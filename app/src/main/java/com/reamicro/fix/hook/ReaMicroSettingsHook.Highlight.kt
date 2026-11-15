@@ -1,10 +1,8 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
-
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
-import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Paint
@@ -25,7 +23,7 @@ import com.reamicro.fix.settings.ReaderHighlightRule
 import com.reamicro.fix.settings.ReaderHighlightRuleType
 import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.settings.READER_HIGHLIGHT_SELECTABLE_TYPES
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.util.zip.GZIPInputStream
 import java.lang.ref.WeakReference
@@ -40,12 +38,12 @@ import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
 internal fun ReaMicroSettingsHook.insertHighlightScreenEntryItem(lazyListScope: Any) {
     val onClick = highlightScreenEntryOnClick ?: run {
-        XposedBridge.log("$LOG_PREFIX highlight entry item skip: onClick null")
+        HookRuntime.log("$LOG_PREFIX highlight entry item skip: onClick null")
         return
     }
     val bookKey = ReaderHighlightBookContext.bookKey
     val bookTitle = ReaderHighlightBookContext.bookTitle
-    XposedBridge.log("$LOG_PREFIX highlight entry item inserting bookKey=$bookKey scope=${lazyListScope.javaClass.name}")
+    HookRuntime.log("$LOG_PREFIX highlight entry item inserting bookKey=$bookKey scope=${lazyListScope.javaClass.name}")
     injectingModuleItem.set(true)
     runCatching {
         addLazyItem(lazyListScope, "reader_highlight_screen_entry_${bookKey.hashCode()}".hashCode()) { composer ->
@@ -57,7 +55,7 @@ internal fun ReaMicroSettingsHook.insertHighlightScreenEntryItem(lazyListScope: 
             )
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to insert highlight screen entry item: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to insert highlight screen entry item: ${it.stackTraceToString()}")
     }
     injectingModuleItem.set(false)
 }
@@ -412,15 +410,7 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
         renderHostActionCard(rows, innerComposer)
         targetUnit()
     }
-    val b4 = com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4"
-    val paddedModifier = readerHighlightPaddingSides(
-        modifierInstance(),
-        0f,
-        if (b4) udp(12) else 0f,
-        0f,
-        udp(12),
-        if (b4) 5 else 7,
-    )
+    val paddedModifier = nativeUi.padding(modifierInstance(), 0f, udp(12), 0f, udp(12))
     readerHighlightColumn(
         paddedModifier,
         arrangementTop(),
@@ -556,9 +546,8 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightScreenPlanPage(bookKey: S
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightPlanColumnModifier(): Any {
-    val filled = method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4)
-        .invoke(null, modifierInstance(), 0f, 1, null)
-    return readerHighlightHorizontalPadding(filled, udp(16), udp(8), 2)
+    val filled = nativeUi.fillWidth(modifierInstance())
+    return readerHighlightHorizontalPadding(filled, udp(16), udp(8))
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightPlanStyleRows(): List<ActionRow> {
@@ -781,10 +770,10 @@ internal fun ReaMicroSettingsHook.renderReaderHighlightColorPickerContent(innerP
 
 internal fun ReaMicroSettingsHook.openReaderHighlightStyleDialog(style: ReaderHighlightStyle) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val nameInput = settingsDialogInput(activity, "\u6837\u5f0f\u540d\u79f0", singleLine = true, colors = colors).apply {
                 setText(style.name)
@@ -919,7 +908,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightStyleDialog(style: ReaderHi
             cancelButton.setOnClickListener { dialog.dismiss() }
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX open highlight style dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX open highlight style dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -932,7 +921,7 @@ internal fun ReaMicroSettingsHook.exportReaderHighlightStyle(style: ReaderHighli
         showToast("\u5df2\u5bfc\u51fa\u9ad8\u4eae\u6837\u5f0f\uff1a$fileName")
     }.onFailure {
         showToast("\u5bfc\u51fa\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX export highlight style failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX export highlight style failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -1069,7 +1058,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightStyleImportPicker() {
         activity.startActivityForResult(intent, HIGHLIGHT_STYLE_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         showToast("\u6253\u5f00\u9ad8\u4eae\u6837\u5f0f\u5bfc\u5165\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX open highlight style import failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX open highlight style import failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -1084,7 +1073,7 @@ internal fun ReaMicroSettingsHook.openHighlightNinePatchPicker(activity: Activit
         activity.startActivityForResult(intent, HIGHLIGHT_NINE_PATCH_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         showToast("\u6253\u5f00\u56fe\u7247\u9009\u62e9\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX open highlight image picker failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX open highlight image picker failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -1095,7 +1084,7 @@ internal fun ReaMicroSettingsHook.importHighlightNinePatchFromUri(activity: Acti
         showToast("\u5df2\u9009\u62e9\u56fe\u7247\uff1a${target.name}")
     }.onFailure {
         showToast(it.message ?: "\u9009\u62e9\u56fe\u7247\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX import highlight image failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX import highlight image failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -1125,7 +1114,7 @@ internal fun ReaMicroSettingsHook.importReaderHighlightStyleFromUri(activity: Ac
         )
     }.onFailure {
         showToast(it.message ?: "\u5bfc\u5165\u9ad8\u4eae\u6837\u5f0f\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX import highlight style failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX import highlight style failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -1328,10 +1317,10 @@ internal fun ReaMicroSettingsHook.uniqueHighlightImageFile(activity: Activity, d
 
 internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHighlightRule) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val highlight = settings.highlightSettings()
             val styles = highlight.styles
@@ -1492,7 +1481,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightRuleDialog(rule: ReaderHigh
             cancelButton.setOnClickListener { dialog.dismiss() }
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX open highlight rule dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX open highlight rule dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -1507,7 +1496,7 @@ internal fun ReaMicroSettingsHook.openReaderHighlightStyleSelectionDialog(
     defaultLabel: String,
     onSelected: (String) -> Unit,
 ) {
-    val dialog = Dialog(activity)
+    val dialog = settingsDialog(activity)
     val card = settingsDialogCard(activity, colors)
     card.addView(settingsDialogTitle(activity, title, colors))
     val highlight = settings.highlightSettings()
@@ -1705,149 +1694,38 @@ internal fun ReaMicroSettingsHook.importExternalHighlight(activity: Activity, by
         )
     }.onFailure {
         showToast(it.message ?: "导入高亮样式失败")
-        XposedBridge.log("$LOG_PREFIX external highlight import failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX external highlight import failed: ${it.stackTraceToString()}")
     }
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightSheetModifier(composer: Any): Any {
-    val height = method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(
-        null,
-        modifierInstance(),
-        udp(READER_RULE_SHEET_HEIGHT_DP),
-    )
-    val surface = colorScheme(composer).longMethod("getSurface")
-    return if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.background(requireNotNull(height), surface)
-    } else {
-        method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
-            null,
-            height,
-            surface,
-            null,
-            2,
-            null,
-        )
-    }
+    val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+    val surface = ui.field("color.surface").getLong(ui.call("colorScheme", composer))
+    return nativeUi.background(nativeUi.height(modifierInstance(), udp(READER_RULE_SHEET_HEIGHT_DP)), surface)
 }
-
-internal fun ReaMicroSettingsHook.readerHighlightSheetListModifier(): Any {
-    val filled = method(SIZE_KT_CLASS, FILL_MAX_SIZE_DEFAULT_METHOD, 4).invoke(
-        null,
-        modifierInstance(),
-        0f,
-        1,
-        null,
-    )
-    return readerHighlightHorizontalPadding(filled, udp(18), 0f, 2)
-}
-
-private fun ReaMicroSettingsHook.readerHighlightPaddingSides(
-    baseModifier: Any,
-    start: Float,
-    top: Float,
-    end: Float,
-    bottom: Float,
-    mask: Int,
-): Any =
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.padding(baseModifier, start, top, end, bottom)
-    } else {
-        method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
-            null,
-            baseModifier,
-            start,
-            top,
-            end,
-            bottom,
-            mask,
-            null,
-        )
-    }
-
+internal fun ReaMicroSettingsHook.readerHighlightSheetListModifier(): Any =
+    readerHighlightHorizontalPadding(nativeUi.fillSize(modifierInstance()), udp(18), 0f)
 private fun ReaMicroSettingsHook.readerHighlightHorizontalPadding(
-    baseModifier: Any,
-    horizontal: Float,
-    vertical: Float,
-    mask: Int,
-): Any =
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.padding(baseModifier, horizontal, vertical, horizontal, vertical)
-    } else {
-        method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
-            null,
-            baseModifier,
-            horizontal,
-            vertical,
-            mask,
-            null,
-        )
-    }
-
+    baseModifier: Any, horizontal: Float, vertical: Float,
+): Any = nativeUi.padding(baseModifier, horizontal, vertical, horizontal, vertical)
 private fun ReaMicroSettingsHook.readerHighlightColumn(
-    modifier: Any,
-    arrangement: Any,
-    alignment: Any,
-    content: Any,
-    composer: Any,
-) {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.column(modifier, arrangement, alignment, content, composer)
-    } else {
-        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-            null,
-            modifier,
-            arrangement,
-            alignment,
-            content,
-            composer,
-            0,
-            0,
-        )
-    }
-}
-
+    modifier: Any, arrangement: Any, alignment: Any, content: Any, composer: Any,
+) { nativeUi.column(modifier, arrangement, alignment, content, composer) }
 private fun ReaMicroSettingsHook.readerHighlightLazyColumn(
-    modifier: Any,
-    arrangement: Any,
-    content: Any,
-    composer: Any,
-) {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.lazyColumn(modifier, arrangement, content, composer)
-    } else {
-        method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
-            null,
-            modifier,
-            null,
-            null,
-            false,
-            arrangement,
-            null,
-            null,
-            false,
-            null,
-            content,
-            composer,
-            0,
-            494,
-        )
-    }
-}
-
+    modifier: Any, arrangement: Any, content: Any, composer: Any,
+) { nativeUi.lazyColumn(modifier, arrangement, content, composer) }
 internal fun ReaMicroSettingsHook.readerHighlightVersionState(): Any {
     readerHighlightVersionUiState?.let { return it }
     return mutableState(0).also { readerHighlightVersionUiState = it }
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightVersionValue(): Int =
-    (readerHighlightVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+    (stateValue(readerHighlightVersionState()) as? Number)?.toInt() ?: 0
 
 internal fun ReaMicroSettingsHook.bumpReaderHighlightVersion() {
     val state = readerHighlightVersionState()
-    val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    val value = (stateValue(state) as? Number)?.toInt() ?: 0
+    setStateValue(state, value + 1)
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightSheetSubPageState(): Any {
@@ -1856,13 +1734,11 @@ internal fun ReaMicroSettingsHook.readerHighlightSheetSubPageState(): Any {
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightSheetSubPageValue(): Int =
-    (readerHighlightSheetSubPageState().method0("getValue") as? Number)?.toInt() ?: 0
+    (stateValue(readerHighlightSheetSubPageState()) as? Number)?.toInt() ?: 0
 
 internal fun ReaMicroSettingsHook.setReaderHighlightSheetSubPage(page: Int) {
     val state = readerHighlightSheetSubPageState()
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, page)
+    setStateValue(state, page)
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightScreenPlanState(): Any {
@@ -1871,11 +1747,9 @@ internal fun ReaMicroSettingsHook.readerHighlightScreenPlanState(): Any {
 }
 
 internal fun ReaMicroSettingsHook.readerHighlightScreenPlanValue(): Int =
-    (readerHighlightScreenPlanState().method0("getValue") as? Number)?.toInt() ?: 0
+    (stateValue(readerHighlightScreenPlanState()) as? Number)?.toInt() ?: 0
 
 internal fun ReaMicroSettingsHook.setReaderHighlightScreenPlan(page: Int) {
     val state = readerHighlightScreenPlanState()
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, page)
+    setStateValue(state, page)
 }

@@ -1,19 +1,21 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostStaticMethod
+import com.reamicro.fix.core.HostEpubSourceBindings
+import com.reamicro.fix.core.HostHighlightDomBindings
+import com.reamicro.fix.core.HostHighlightTextBindings
+import com.reamicro.fix.core.HostScrollContent
 import com.reamicro.fix.epub.editor.*
 import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.reader.SearchHighlightMarkDraft
-import com.reamicro.fix.xposed.XposedHelpers
 import java.util.IdentityHashMap
 
-internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
-    private data class Span(val key: String?, val from: Int, val until: Int)
+internal class ReaderSearchScrollResolver(@Suppress("UNUSED_PARAMETER") reader: ReaderHook) {
+    private val host get() = requireNotNull(HostEpubSourceBindings.current)
+    private val dom get() = requireNotNull(HostHighlightDomBindings.current)
+    private data class Span(val key: String, val from: Int, val until: Int)
     private data class Flow(val id: Any, val point: SelectionCfiPoint, val text: String,
-        val spans: List<Span>, val dom: Any, val element: Any)
-    private val cache = IdentityHashMap<Any, Flow>()
+        val spans: List<Span>, val content: Any, val element: Any, val structured: Boolean)
+    private val cache = IdentityHashMap<Any, List<Flow>>()
     fun clear() = cache.clear()
     fun resolve(elements: List<Any>, result: FullTextSearchResult, index: Int,
         mapper: HostSelectionSourceMapper, source: SelectionSourceMap): ResolvedSearchTarget {
@@ -23,14 +25,19 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
         val a = elements.indexOfFirst { belongs(it, begin, mapper) }
         val b = elements.indexOfLast { belongs(it, end, mapper) }
         require(a >= 0 && b >= a) { "滚动阅读元素中没有目标原文" }
-        val flows = elements.subList(a, b + 1).map { cache[it] ?: project(it, mapper).also { f ->
+        val projected = elements.subList(a, b + 1).flatMap { cache[it] ?: project(it, mapper).also { f ->
             if (cache.size >= 64) cache.clear()
             cache[it] = f
         } }
+        val first = projected.indices.singleOrNull { i -> projected[i].spans.any { it.key == begin.key } }
+            ?: error("滚动正文起点缺失或重复")
+        val last = projected.indices.singleOrNull { i -> projected[i].spans.any { it.key == end.key } }
+            ?: error("滚动正文终点缺失或重复")
+        require(last >= first) { "滚动正文顺序已变化" }
+        val flows = projected.subList(first, last + 1)
         fun offset(flow: Flow, p: SelectionCfiPoint): Int {
             val candidates = flow.spans.filter { it.key == p.key }
             val span = candidates.singleOrNull()
-                ?: candidates.firstOrNull { p.offset in 0..(it.until - it.from) }
                 ?: error(
                     "滚动文本节点无法无损定位 key=${p.key} offset=${p.offset} " +
                         "spans=${flow.spans.take(12).joinToString { "${it.key ?: "null"}:${it.from}-${it.until}" }}",
@@ -54,21 +61,20 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
         }.filter { it.quote.isNotEmpty() }
         val start = mapper.cfiForPoint(flows.first().id, flows.first().point.copy(offset = flows.first().point.offset + from))
         val finish = mapper.cfiForPoint(flows.last().id, flows.last().point.copy(offset = flows.last().point.offset + until))
-        val layout = reader.callNoArg(flows.first().dom, "getTextLayout") ?: error("滚动文本尚未完成测量")
-        // B2 将 TextLayoutResult 的三个转发 getter 内联，几何仍由原生 MultiParagraph 提供。
-        val geometry = if (com.reamicro.fix.core.HostSymbols.isIdentity) layout
-            else reader.callNoArg(layout, "getMultiParagraph") ?: error("滚动文本缺少原生段落布局")
-        val line = (XposedHelpers.callMethod(geometry, "getLineForOffset", from) as Number).toInt()
-        val y = (XposedHelpers.callMethod(geometry, "getLineTop", line) as Number).toFloat()
-        val lineHeight = ((XposedHelpers.callMethod(geometry, "getLineBottom", line) as Number).toFloat() - y).toInt().coerceAtLeast(1)
-
-        // B2 已内联 boxPadding/boxMargin 的聚合门面；行内偏移从文本布局取得，
-        // 不再用未确认的边框值猜测滚动距离。
+        val layout = host.required("scroll.layout", flows.first().content)
+        val geometry = host.required("scroll.paragraph", layout)
+        val line = (host.method("scroll.line").invoke(geometry, from) as Number).toInt()
+        val y = (host.method("scroll.lineTop").invoke(geometry, line) as Number).toFloat()
+        val lineHeight = ((host.method("scroll.lineBottom").invoke(geometry, line) as Number).toFloat() - y).toInt().coerceAtLeast(1)
+        // Initial position only; arrival uses displayed glyph bounds. Structured layouts
+        // obtain their exact paragraph offset from the native anchor callback.
         return ResolvedSearchTarget(result.copy(cfi = start.toString(), startCfi = start.toString(), endCfi = finish.toString()),
-            start, finish, ranges, 3, reader.callNoArg(flows.first().element, "getId"), y.toInt(), lineHeight)
+            start, finish, ranges, 3, host.required("scroll.element.id", flows.first().element),
+            if (flows.first().structured) 0 else y.toInt(), lineHeight)
     }
+
     private fun belongs(element: Any, point: SelectionCfiPoint, mapper: HostSelectionSourceMapper): Boolean {
-        val id = reader.callNoArg(element, "getId") ?: return false
+        val id = host.value("scroll.element.id", element) ?: return false
         val root = mapper.anchorPoint(id)
         return point.spine == root.spine && point.itemRef == root.itemRef && point.bodyIndex == root.bodyIndex &&
             point.steps.take(root.steps.size) == root.steps
@@ -78,39 +84,34 @@ internal class ReaderSearchScrollResolver(private val reader: ReaderHook) {
         val end = result.endCfi?.let { mapper.point(mapper.hostCfi(it)) } ?: return false
         return elements.any { belongs(it, start, mapper) } && elements.any { belongs(it, end, mapper) }
     }
-    private fun project(element: Any, mapper: HostSelectionSourceMapper): Flow {
-        val root = reader.callNoArg(element, "getNode") ?: error("滚动元素缺少源码节点")
-        val dom = reader.callNoArg(element, "buildContentDom") ?: error("滚动内容无法渲染")
-        val id = reader.callNoArg(dom, "getLocation")!!
+    private fun project(element: Any, mapper: HostSelectionSourceMapper): List<Flow> {
+        val rendered = HostScrollContent.render(host, element)
+        return rendered.paragraphs.map { projectParagraph(it, element, rendered.structured, mapper) }
+    }
+    private fun projectParagraph(content: Any, element: Any, structured: Boolean, mapper: HostSelectionSourceMapper): Flow {
+        val id = host.location(content)
         val point = mapper.anchorPoint(id)
-        val nodeClass = reader.classLoader.hostClass("com.fleeksoft.ksoup.nodes.Node")
-        val getStep = reader.classLoader.hostStaticMethod("org.epub.utils.NodeExtKt", "getSteps", nodeClass)
-        fun path(node: Any): String? {
-            var n: Any? = node
-            val steps = arrayListOf<Int>()
-            while (n != null && n !== root && steps.size < 256) {
-                steps += (reader.callNoArg(getStep.invoke(null, n), "getIndex") as Number).toInt()
-                n = reader.callNoArg(n, "parent")
-            }
-            return if (n === root) (point.steps + steps.asReversed()).joinToString("/") else null
-        }
-        val text = StringBuilder(); val spans = arrayListOf<Span>()
-        fun visit(node: Any, depth: Int) {
-            require(depth < 256)
-            when (reader.callString(node, "getTag")) {
-                "#comment", "#doctype", "rt" -> Unit
-                "#text" -> {
-                    val value = reader.callString(node, "getText")
-                    val from = text.length; text.append(value)
-                    spans += Span(reader.callNoArg(node, "getNode")?.let(::path), from, text.length)
-                }
-                "br" -> text.append('\n')
-                else -> (reader.callNoArg(node, "getChildren") as? List<*>).orEmpty().filterNotNull().forEach { visit(it, depth + 1) }
+        fun path(node: Any) = (host.method("node.steps").invoke(null, node) as List<*>)
+            .joinToString("/") { host.stepIndex(requireNotNull(it)).toString() }
+        val nodes = ArrayList<Triple<Any, Int, Int>>()
+        val projected = com.reamicro.fix.reader.HostParagraphProjection.project(content,
+            onNode = { node, start, end ->
+                if (dom.tag(node) == "#text") nodes += Triple(node, start, end)
+            })
+        val actual = requireNotNull(HostHighlightTextBindings.current).text(requireNotNull(dom.field("content").get(content)))
+        require(projected.text == actual) { "滚动元素含特殊排版，不能猜测高亮位置" }
+        val spans = arrayListOf<Span>()
+        for ((node, from, originalEnd) in nodes) {
+            val end = minOf(originalEnd, actual.length)
+            if (from >= end) continue
+            val value = actual.substring(from, end)
+            val sourceNode = host.required("parsed.source", node)
+            val expected = host.text(sourceNode).trim(' ', '\n')
+            val start = value.indexOf(expected)
+            if (expected.isNotEmpty() && start >= 0 && start == value.lastIndexOf(expected)) {
+                spans += Span(path(sourceNode), from + start, from + start + expected.length)
             }
         }
-        (reader.callNoArg(dom, "getChildren") as? List<*>).orEmpty().filterNotNull().forEach { visit(it, 0) }
-        val actual = reader.callString(reader.callNoArg(dom, "getContent"), "getText")
-        require(text.toString().trimEnd('\n') == actual) { "滚动元素含特殊排版，不能猜测高亮位置" }
-        return Flow(id, point, actual, spans, dom, element)
+        return Flow(id, point, actual, spans, content, element, structured)
     }
 }

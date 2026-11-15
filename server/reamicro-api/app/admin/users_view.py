@@ -104,7 +104,7 @@ def admin_users_page(
         f"<form class='toolbar' method='get' action='/admin/users'>"
         f"<input name='q' value='{search_value}' placeholder='搜索阅微账号或备注'>"
         f"<button class='button' type='submit'>搜索</button>"
-        + (f"<a class='button subtle' href='/admin/users'>清除</a>" if query else "")
+        + ("<a class='button subtle' href='/admin/users'>清除</a>" if query else "")
         + "</form>"
         f"<div class='panel'><form class='inline' method='post' action='/admin/users/sync'>{csrf_html}"
         f"<button class='button subtle' type='submit'>从白名单与活动记录补建档案</button></form>"

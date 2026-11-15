@@ -1,18 +1,12 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.hostClass
-
-
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.core.AppTopBarArguments
-import com.reamicro.fix.core.ExternalFeatureCompatibility
-import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleKind
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.reflect.Method
 import com.reamicro.fix.hook.settings.*
 
@@ -28,7 +22,7 @@ internal fun ReaMicroSettingsHook.insertModuleSettingsItem(lazyListScope: Any) {
             )
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to insert module settings item: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to insert module settings item: ${it.stackTraceToString()}")
     }
     injectingModuleItem.set(false)
 }
@@ -46,59 +40,25 @@ internal fun ReaMicroSettingsHook.insertAccountSwitchEntryItem(lazyListScope: An
             )
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to insert account switch entry: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to insert account switch entry: ${it.stackTraceToString()}")
     }
     injectingModuleItem.set(false)
 }
 
 internal fun ReaMicroSettingsHook.renderSettingsEntry(
-    title: String,
-    callbackName: String,
-    route: InjectedRoute,
-    composer: Any,
+    title: String, callbackName: String, route: InjectedRoute, composer: Any,
 ) {
-    runCatching {
-        val openSettings = functionProxy(callbackName, FUNCTION0_CLASS) {
-            if (!openInjectedRouteViaHostNavigation(route)) {
-                XposedBridge.log("$LOG_PREFIX host navigation unavailable for $callbackName")
-            }
-            targetUnit()
-        }
-        settingsEntryTitleOverride.set(title)
-        try {
-            if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.aboutEntry(openSettings, composer)
-            else method(APP_ABOUT_CLASS, APP_ABOUT_METHOD, 3).invoke(null, openSettings, composer, 0)
-        } finally {
-            settingsEntryTitleOverride.set(null)
-        }
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render settings entry: ${it.stackTraceToString()}")
+    val headline = composableLambda(callbackName.hashCode(), FUNCTION2_CLASS) { args ->
+        val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
+        renderHostText(title, innerComposer)
+        targetUnit()
     }
-}
-
-internal fun ReaMicroSettingsHook.renderNestedSettingsEntry(
-    title: String,
-    callbackName: String,
-    route: InjectedRoute,
-    composer: Any,
-) {
-    runCatching {
-        val openSettings = functionProxy(callbackName, FUNCTION0_CLASS) {
-            openNestedInjectedRoute(route)
-            targetUnit()
-        }
-        settingsEntryTitleOverride.set(title)
-        try {
-            if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.aboutEntry(openSettings, composer)
-            else method(APP_ABOUT_CLASS, APP_ABOUT_METHOD, 3).invoke(null, openSettings, composer, 0)
-        } finally {
-            settingsEntryTitleOverride.set(null)
-        }
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render nested settings entry: ${it.stackTraceToString()}")
+    val onClick = functionProxy(callbackName, FUNCTION0_CLASS) {
+        openInjectedRouteViaHostNavigation(route)
+        targetUnit()
     }
+    nativeUi.settingsEntry(headline, onClick, composer)
 }
-
 internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(
     route: InjectedRoute,
     navGraphScopeOverride: Any? = null,
@@ -110,117 +70,98 @@ internal fun ReaMicroSettingsHook.openInjectedRouteViaHostNavigation(
     candidates.forEach { scope ->
         if (navigateToInjectedRoute(scope, route)) return true
     }
-    XposedBridge.log("$LOG_PREFIX failed to open injected route: no live NavGraphScope among ${candidates.size}")
+    HookRuntime.log("$LOG_PREFIX failed to open injected route: no live NavGraphScope among ${candidates.size}")
     return false
 }
 
-private fun ReaMicroSettingsHook.navigateToInjectedRoute(navGraphScope: Any, route: InjectedRoute): Boolean {
-    val previousStack = injectedRouteStack
-    return runCatching {
-        val aboutRoute = staticObject(ROUTE_ABOUT_CLASS, "INSTANCE")
-        val navController = com.reamicro.fix.core.HostNavigation.controller(navGraphScope)
-        currentSettingsNavGraphScope = navGraphScope
-        currentSettingsNavController = navController
-        injectedRouteStack = previousStack + route
-        setInjectedRouteState(route)
-        navigatingModuleRoute.set(true)
-        try {
-            com.reamicro.fix.core.HostNavigation.navigate(classLoader, navGraphScope, aboutRoute)
-        } finally {
-            navigatingModuleRoute.set(false)
+/** The independent module opens the same native feature settings rather than a second copy. */
+internal fun ReaMicroSettingsHook.consumeModuleSettingsIntent(activity: android.app.Activity, intent: android.content.Intent?) {
+    if (intent?.getBooleanExtra(com.reamicro.fix.core.ModuleFeatureCatalog.EXTRA_OPEN_SETTINGS, false) != true) return
+    pendingModuleSettingsRequest = true
+    intent.removeExtra(com.reamicro.fix.core.ModuleFeatureCatalog.EXTRA_OPEN_SETTINGS)
+    deliverModuleSettingsRequest()
+}
+
+internal fun ReaMicroSettingsHook.captureModuleNavigationScope(scope: Any) {
+    val nav = requireNotNull(com.reamicro.fix.core.HostRuntimeBindings.navigation)
+    if (!nav.scope.isInstance(scope)) return
+    navigationPages.capture(scope)
+    deliverModuleSettingsRequest()
+}
+
+private fun ReaMicroSettingsHook.deliverModuleSettingsRequest() {
+    if (!pendingModuleSettingsRequest || moduleSettingsRequestPosted) return
+    if (lastKnownNavGraphScope == null) {
+        val nav = com.reamicro.fix.core.HostRuntimeBindings.navigation
+        val composition = com.reamicro.fix.core.HostCompositionBindings.current
+        val controller = runCatching { composition?.field("navCache")?.get(null) }.getOrNull()
+        if (nav != null && controller != null && nav.controller.type.isInstance(controller)) {
+            lastKnownNavGraphScope = nav.constructor.newInstance(controller)
         }
-        true
+    }
+    if (lastKnownNavGraphScope == null) return
+    if (activityProvider()?.takeUnless { it.isFinishing || it.isDestroyed } == null) return
+    moduleSettingsRequestPosted = true
+    val posted = moduleSettingsRequestHandler.post {
+        moduleSettingsRequestPosted = false
+        if (!pendingModuleSettingsRequest ||
+            activityProvider()?.takeUnless { it.isFinishing || it.isDestroyed } == null) return@post
+        if (openInjectedRouteViaHostNavigation(InjectedRoute.ModuleSettings)) {
+            pendingModuleSettingsRequest = false
+            HookRuntime.logAlways("ReaMicro complete feature settings opened from module app")
+        }
+    }
+    if (!posted) moduleSettingsRequestPosted = false
+}
+
+private fun ReaMicroSettingsHook.navigateToInjectedRoute(navGraphScope: Any, route: InjectedRoute): Boolean {
+    return runCatching {
+        navigationPages.navigate(navGraphScope, route)
     }.onFailure {
-        XposedBridge.logError("$LOG_PREFIX injected route dispatch failed", it)
-        injectedRouteStack = previousStack
-        setInjectedRouteState(previousStack.lastOrNull())
-        navigatingModuleRoute.set(false)
+        HookRuntime.logError("$LOG_PREFIX injected route dispatch failed", it)
     }.getOrDefault(false)
 }
 
-internal fun ReaMicroSettingsHook.consumeTopInjectedRoute(source: String) {
-    val previousSize = injectedRouteStack.size
-    val nextStack = injectedRouteStack.dropLast(1)
-    injectedRouteStack = nextStack
-    setInjectedRouteState(nextStack.lastOrNull())
-    if (nextStack.size != previousSize) {
-        XposedBridge.log("$LOG_PREFIX injected route popped by $source -> $nextStack")
-    }
-}
-
 internal fun ReaMicroSettingsHook.openNestedInjectedRoute(route: InjectedRoute): Boolean {
-    val currentStack = injectedRouteStack
-    if (currentStack.isEmpty()) {
-        return openInjectedRouteViaHostNavigation(route)
-    }
+    if (!settings.snapshot().moduleEnabled && route != InjectedRoute.ModuleSettings) return false
     if (currentInjectedRoute() == InjectedRoute.FontLibrary || route == InjectedRoute.FontLibrary) {
         clearPendingDeleteFontSelection()
     }
-    injectedRouteStack = currentStack + route
-    setInjectedRouteState(route)
-    return true
+    return openInjectedRouteViaHostNavigation(route)
 }
-
-internal fun ReaMicroSettingsHook.activeInjectedRoute(): InjectedRoute? =
-    currentInjectedRoute()
 
 internal fun ReaMicroSettingsHook.currentInjectedRoute(): InjectedRoute? =
-    injectedRouteUiState?.let(::routeStateValue) ?: injectedRouteStack.lastOrNull()
-
-internal fun ReaMicroSettingsHook.refreshCurrentInjectedRoute() {
-    currentInjectedRoute()?.let { route -> setInjectedRouteState(route) }
-}
+    navigationPages.current()
 
 internal fun ReaMicroSettingsHook.navigateBackFromInjectedRoute() {
-    val navGraphScope = currentSettingsNavGraphScope
-    val stack = injectedRouteStack
-    if (handleNestedInjectedBack()) return
-    injectedRouteStack = stack.dropLast(1)
-    setInjectedRouteState(null)
+    val navGraphScope = currentSettingsNavGraphScope ?: return
     clearPendingDeleteFontSelection()
-    popHostInjectedRoute(navGraphScope)
-}
-
-internal fun ReaMicroSettingsHook.isCurrentSettingsNavController(target: Any?): Boolean {
-    if (target == null) return false
-    if (currentSettingsNavController === target) return true
-    val resolved = runCatching {
-        currentSettingsNavGraphScope?.method0("getNavController")
-    }.getOrNull()
-    if (resolved != null) currentSettingsNavController = resolved
-    return resolved === target
-}
-
-internal fun ReaMicroSettingsHook.popHostInjectedRoute(navGraphScope: Any?) {
-    if (navGraphScope == null) return
-    poppingInjectedRoute.set(true)
     runCatching {
         com.reamicro.fix.core.HostNavigation.pop(navGraphScope)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to pop injected route: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to pop injected route: ${it.stackTraceToString()}")
     }
-    poppingInjectedRoute.set(false)
 }
 
-internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRoute, composer: Any) {
-    val routeState = injectedRouteState(route)
-    val currentRoute = routeStateValue(routeState) ?: route
-    renderInjectedBackHandler(currentRoute, composer)
+internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(requestedRoute: InjectedRoute, composer: Any) {
+    val route = if (settings.snapshot().moduleEnabled) requestedRoute else InjectedRoute.ModuleSettings
+    if (route is InjectedRoute.BookStructure) {
+        bookStructurePages.render(route, composer)
+        return
+    }
     val topBar = composableLambda(MODULE_TOP_BAR_KEY, FUNCTION2_CLASS) { args ->
         val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
-        val currentRoute = routeStateValue(routeState) ?: route
-
-        if (currentRoute == InjectedRoute.Discover) {
-            renderDiscoverTopBar(currentRoute.title, innerComposer)
+        if (route == InjectedRoute.Discover) {
+            renderDiscoverTopBar(route.title, innerComposer)
         } else {
-            renderHostTopBar(currentRoute.title, innerComposer)
+            renderHostTopBar(route.title, innerComposer)
         }
         targetUnit()
     }
     val content = composableLambda(MODULE_CONTENT_KEY, FUNCTION3_CLASS) { args ->
         val innerPaddings = args?.getOrNull(0) ?: return@composableLambda targetUnit()
         val innerComposer = args.getOrNull(1) ?: return@composableLambda targetUnit()
-        when (val currentRoute = routeStateValue(routeState) ?: route) {
+        when (val currentRoute = route) {
             InjectedRoute.ModuleSettings -> renderHostModuleSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AssociationCompletionSettings -> renderAssociationCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.ReaderCompletionSettings -> renderReaderCompletionSettingsContent(innerPaddings, innerComposer)
@@ -236,6 +177,9 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             InjectedRoute.ReaderHighlightColorPicker -> renderReaderHighlightColorPickerContent(innerPaddings, innerComposer)
             InjectedRoute.ProfileBackgroundSettings -> renderProfileBackgroundSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.AccountCompletionSettings -> renderAccountCompletionSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.EditCompletionSettings -> renderEditCompletionSettingsContent(innerPaddings, innerComposer)
+            is InjectedRoute.BookStructure -> Unit
             InjectedRoute.ApiServerSettings -> renderApiServerSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudAutomationSettings -> renderCloudAutomationSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.LocalAutomationSettings -> renderLocalAutomationSettingsContent(innerPaddings, innerComposer)
@@ -255,52 +199,14 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(route: InjectedRo
             is InjectedRoute.FontPicker -> renderFontPickerContent(currentRoute.target, innerPaddings, innerComposer)
             InjectedRoute.FontLibrary -> renderFontLibraryContent(innerPaddings, innerComposer)
             InjectedRoute.AboutCompletion -> renderAboutCompletionContent(innerPaddings, innerComposer)
+            InjectedRoute.ModuleDiagnostics -> renderModuleDiagnosticsContent(innerPaddings, innerComposer)
             InjectedRoute.Discover -> renderDiscoverContent(innerPaddings, innerComposer)
         }
         targetUnit()
     }
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.scaffold(topBar, backgroundDim(composer), content, composer)
-        updateModuleDialogTheme(composer)
-        return
-    }
-    method(SCAFFOLD_KT_CLASS, SCAFFOLD_METHOD, 13).invoke(
-        null,
-        null,
-        topBar,
-        null,
-        null,
-        null,
-        0,
-        backgroundDim(composer),
-        0L,
-        null,
-        content,
-        composer,
-        805306416,
-        445,
-    )
+    nativeUi.scaffold(topBar, backgroundDim(composer), content, composer)
     updateModuleDialogTheme(composer)
 }
-
-internal fun ReaMicroSettingsHook.renderInjectedBackHandler(route: InjectedRoute, composer: Any) {
-    val enabled = route is InjectedRoute.FontPicker ||
-        route is InjectedRoute.ReaderBookHighlightRules ||
-        route is InjectedRoute.ReaderBookOnlyHighlightRules ||
-        route is InjectedRoute.ReaderBookGlobalHighlightRules ||
-        route is InjectedRoute.OnlineEpubStyleList ||
-        route == InjectedRoute.FontLibrary ||
-        route in MODULE_CHILD_ROUTES ||
-        route in READER_CHILD_ROUTES ||
-        route in AI_CHILD_ROUTES
-    val onBack = functionProxy("InjectedNestedBackHandler", FUNCTION0_CLASS) {
-        handleNestedInjectedBack()
-        targetUnit()
-    }
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.backHandler(enabled, onBack, composer)
-    else method(BACK_HANDLER_KT_CLASS, BACK_HANDLER_METHOD, 5).invoke(null, enabled, onBack, composer, 0, 0)
-}
-
 internal fun ReaMicroSettingsHook.renderHostTopBar(title: String, composer: Any) {
     renderHostTopBar(title, composer) {
         navigateBackFromInjectedRoute()
@@ -314,10 +220,6 @@ internal fun ReaMicroSettingsHook.renderHostTopBar(title: String, composer: Any,
 internal fun ReaMicroSettingsHook.renderReaderSheetTopBar(title: String, composer: Any, onClose: () -> Unit) {
     val windowInsets = readerSheetWindowInsets(composer)
     val closeIcon = closeImageVector()
-    if (windowInsets == null || closeIcon == null) {
-        renderHostTopBar(title, composer, onClose)
-        return
-    }
     invokeAppTopBar(
         title = title,
         composer = composer,
@@ -359,108 +261,94 @@ internal fun ReaMicroSettingsHook.invokeAppTopBar(
 }
 
 internal fun ReaMicroSettingsHook.appTopBarMethod(): Method =
-    synchronized(methodCache) {
-        methodCache.getOrPut("$APP_TOP_BAR_CLASS#$APP_TOP_BAR_METHOD/*") {
-            val candidates = cls(APP_TOP_BAR_CLASS).declaredMethods
-            composeInterop.findComposableMethod(
-                candidates = candidates,
-                baseName = APP_TOP_BAR_METHOD,
-                composerClassName = COMPOSER_CLASS,
-                firstParameterType = String::class.java,
-            ) ?: error(
-                "$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found; candidates=" +
-                    candidates.joinToString { "${it.name}/${it.parameterTypes.size}" },
-            )
-        }
-    }
-
+    requireNotNull(com.reamicro.fix.core.HostUiBindings.current).method("topBar")
 internal fun ReaMicroSettingsHook.renderHostModuleSettingsContent(innerPaddings: Any, composer: Any) {
+    val enabledState = rememberBooleanState(composer, settings.snapshot().moduleEnabled)
+    stateValue(enabledState)
     val listContent = functionProxy("ModuleSettingsList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         val snapshot = settings.snapshot()
-        addLazyItem(lazyListScope, ASSOCIATION_SWITCHES_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "\u5173\u8054\u8865\u5168",
-                callbackName = "OpenAssociationCompletionSettings",
-                route = InjectedRoute.AssociationCompletionSettings,
-                composer = itemComposer,
-            )
+        addLazyItem(lazyListScope, 0x524d5340) { inner ->
+            renderHostSettingsCard(listOf(ToggleRow(
+                key = ModuleSettings.KEY_MODULE_ENABLED, title = "补全计划",
+                checked = snapshot.moduleEnabled, checkedProvider = { settings.snapshot().moduleEnabled },
+                syncWithSnapshot = true,
+                onChanged = { checked, _ ->
+                    changeModuleEnabled(checked) { actual -> setStateValue(enabledState, actual) }
+                },
+            )), inner)
         }
-        addLazyItem(lazyListScope, 0x524d5348) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "书架补全",
-                callbackName = "OpenBookshelfCompletion",
-                route = InjectedRoute.BookshelfCompletionSettings,
-                composer = itemComposer,
-            )
+        if (!snapshot.moduleEnabled) return@functionProxy targetUnit()
+        com.reamicro.fix.core.ModuleFeatureCatalog.features.forEachIndexed { index, feature ->
+            val route = moduleFeatureRoute(feature.id)
+            addLazyItem(lazyListScope, 0x524d5341 + index, itemKey = "reamicro-feature-${feature.id}") { itemComposer ->
+                renderSettingsEntry(
+                    title = feature.title,
+                    callbackName = "OpenModuleFeature.${feature.id}",
+                    route = route,
+                    composer = itemComposer,
+                )
+            }
         }
-        addLazyItem(lazyListScope, ONLINE_COMPLETION_SETTINGS_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = ONLINE_COMPLETION_TITLE,
-                callbackName = "OpenOnlineCompletionSettings",
-                route = InjectedRoute.OnlineCompletionSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, CLOUD_SWITCHES_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "\u4e91\u76d8\u8865\u5168",
-                callbackName = "OpenCloudCompletionSettings",
-                route = InjectedRoute.CloudCompletionSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, FONT_SETTINGS_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "\u5b57\u4f53\u8865\u5168",
-                callbackName = "OpenFontSettings",
-                route = InjectedRoute.FontSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, READER_SWITCHES_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "\u9605\u8bfb\u8865\u5168",
-                callbackName = "OpenReaderCompletionSettings",
-                route = InjectedRoute.ReaderCompletionSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, PROFILE_BACKGROUND_SWITCHES_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "\u4e3b\u9875\u8865\u5168",
-                callbackName = "OpenProfileBackgroundSettings",
-                route = InjectedRoute.ProfileBackgroundSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, ROTATION_SWITCHES_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = "\u65cb\u8f6c\u8865\u5168",
-                callbackName = "OpenRotationCompletionSettings",
-                route = InjectedRoute.RotationCompletionSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, AI_CONFIG_SETTINGS_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = AI_CONFIG_TITLE,
-                callbackName = "OpenAiConfigSettings",
-                route = InjectedRoute.AiConfigSettings,
-                composer = itemComposer,
-            )
-        }
-        addLazyItem(lazyListScope, ABOUT_COMPLETION_ENTRY_ITEM_KEY) { itemComposer ->
-            renderNestedSettingsEntry(
-                title = ABOUT_COMPLETION_TITLE,
-                callbackName = "OpenAboutCompletion",
-                route = InjectedRoute.AboutCompletion,
-                composer = itemComposer,
-            )
-        }
-        return@functionProxy targetUnit()
+        targetUnit()
     }
     renderHostLazyColumn(innerPaddings, listContent, composer)
+}
+
+internal fun moduleFeatureRoute(id: String): InjectedRoute = when (id) {
+    "association" -> InjectedRoute.AssociationCompletionSettings
+    "bookshelf" -> InjectedRoute.BookshelfCompletionSettings
+    "online" -> InjectedRoute.OnlineCompletionSettings
+    "cloud" -> InjectedRoute.CloudCompletionSettings
+    "font" -> InjectedRoute.FontSettings
+    "reader" -> InjectedRoute.ReaderCompletionSettings
+    "background" -> InjectedRoute.ProfileBackgroundSettings
+    "rotation" -> InjectedRoute.RotationCompletionSettings
+    "account" -> InjectedRoute.AccountCompletionSettings
+    "edit" -> InjectedRoute.EditCompletionSettings
+    "api" -> InjectedRoute.AiConfigSettings
+    "about" -> InjectedRoute.AboutCompletion
+    else -> error("Unregistered module feature $id")
+}
+
+internal fun ReaMicroSettingsHook.renderAccountCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+    val content = functionProxy("AccountCompletionList", FUNCTION1_CLASS) { args ->
+        val scope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+        val snapshot = settings.snapshot()
+        addLazyItem(scope, 0x524d4143) { inner ->
+            renderHostSettingsCard(listOf(
+                ToggleRow(ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED, "账号导出", snapshot.accountExportEnabled,
+                    onChanged = { checked, _ -> settings.setAccountExportEnabled(checked); checked }),
+                ToggleRow(ModuleSettings.KEY_ACCOUNT_CACHE_CLEANUP_ENABLED, "启动缓存清理", snapshot.accountCacheCleanupEnabled,
+                    onChanged = { checked, _ -> settings.setAccountCacheCleanupEnabled(checked); checked }),
+                ToggleRow(ModuleSettings.KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED, "账号偏好同步", snapshot.accountPreferenceRestoreEnabled,
+                    onChanged = { checked, _ -> settings.setAccountPreferenceRestoreEnabled(checked); checked }),
+                ToggleRow(ModuleSettings.KEY_ACCOUNT_SWITCH_ENTRY_ENABLED, "账号切换入口", snapshot.accountSwitchEntryEnabled,
+                    onChanged = { checked, _ -> settings.setAccountSwitchEntryEnabled(checked); checked }),
+            ), inner)
+        }
+        targetUnit()
+    }
+    renderHostLazyColumn(innerPaddings, content, composer)
+}
+
+internal fun ReaMicroSettingsHook.renderEditCompletionSettingsContent(innerPaddings: Any, composer: Any) {
+    val content = functionProxy("EditCompletionList", FUNCTION1_CLASS) { args ->
+        val scope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+        val snapshot = settings.snapshot()
+        addLazyItem(scope, 0x524d4544) { inner ->
+            renderHostSettingsCard(listOf(
+                ToggleRow(ModuleSettings.KEY_EDIT_FILE_ENABLED, "文件编辑", snapshot.editFileEnabled,
+                    onChanged = { checked, _ -> settings.setEditFileEnabled(checked); checked }),
+                ToggleRow(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, "封面与横幅选择", snapshot.bookImageSelectionEnabled,
+                    onChanged = { checked, _ -> settings.setBookImageSelectionEnabled(checked); checked }),
+                ToggleRow(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, "备份页面滚动", snapshot.bookBackupScrollEnabled,
+                    onChanged = { checked, _ -> settings.setBookBackupScrollEnabled(checked); checked }),
+            ), inner)
+        }
+        targetUnit()
+    }
+    renderHostLazyColumn(innerPaddings, content, composer)
 }
 
 internal fun ReaMicroSettingsHook.completionEntryRow(key: String, title: String, enabled: Boolean, route: InjectedRoute): ActionRow =
@@ -481,6 +369,11 @@ internal fun ReaMicroSettingsHook.renderBookshelfCompletionSettingsContent(inner
             val snapshot = settings.snapshot()
             val rows = listOf(
             ToggleRow(
+                key = ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, title = "默认首页扩展",
+                checked = snapshot.homeDefaultPageEnabled,
+                onChanged = { enabled, _ -> settings.setHomeDefaultPageEnabled(enabled); enabled },
+            ),
+            ToggleRow(
                 key = ModuleSettings.KEY_SHELF_HIDE_SYNC, title = "隐藏同步按钮",
                 checked = snapshot.shelfHideSync,
                 onChanged = { enabled, _ -> settings.setShelfHideSync(enabled); enabled },
@@ -500,8 +393,8 @@ internal fun ReaMicroSettingsHook.renderBookshelfCompletionSettingsContent(inner
                 checked = snapshot.shelfBatchUpdate,
                 onChanged = { enabled, _ ->
                     settings.setShelfBatchUpdate(enabled)
-                    val value = (version.method0("getValue") as Number).toInt()
-                    com.reamicro.fix.xposed.XposedHelpers.callMethod(version, "setValue", value + 1)
+                    val value = (stateValue(version) as Number).toInt()
+                    setStateValue(version, value + 1)
                     enabled
                 },
             ),
@@ -535,32 +428,18 @@ internal fun ReaMicroSettingsHook.renderAssociationCompletionSettingsContent(inn
     val listContent = functionProxy("AssociationCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         val snapshot = settings.snapshot()
-        val manualEditFeature = ExternalSourceLoader.loadFeatures(activityProvider()?.applicationContext)
-            .firstOrNull { it.id == "manual-edit" }
-        val manualEditDisabledReason = if (manualEditFeature != null) {
-            ExternalFeatureCompatibility.disabledReason(manualEditFeature.id, manualEditFeature.capabilities)
-        } else ExternalFeatureCompatibility.manualEditDisabledReason()
-        if (manualEditDisabledReason != null && hasManualEditFeature()) {
-            addLazyItem(
-                lazyListScope,
-                ASSOCIATION_SWITCHES_ITEM_KEY,
-                itemKey = "${ASSOCIATION_SWITCHES_ITEM_KEY}_manual_edit_unavailable",
-            ) { itemComposer ->
-                renderHostActionCard(
-                    listOf(
-                        ActionRow(
-                            key = ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED,
-                            title = "\u624b\u52a8\u7f16\u8f91",
-                            subtitle = manualEditDisabledReason,
-                            trailing = "\u4e0d\u53ef\u7528",
-                            onClick = { showToast(manualEditDisabledReason) },
-                        ),
-                    ),
-                    itemComposer,
-                )
-            }
-        }
         val rows = buildList {
+            if (snapshot.associationManualEditUnlocked) {
+                add(ToggleRow(
+                    key = ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED,
+                    title = "手动编辑",
+                    checked = snapshot.associationManualEditEnabled,
+                    onChanged = { checked, _ ->
+                        settings.setAssociationManualEditEnabled(checked)
+                        checked
+                    },
+                ))
+            }
             add(
                 ToggleRow(
                     key = ModuleSettings.KEY_ASSOCIATION_UNLINK_ENABLED,
@@ -579,18 +458,6 @@ internal fun ReaMicroSettingsHook.renderAssociationCompletionSettingsContent(inn
                     checked = snapshot.associationCoverFixEnabled,
                     onChanged = { checked, _ ->
                         settings.setAssociationCoverFixEnabled(checked)
-                        checked
-                    },
-                ),
-            )
-            add(
-                ToggleRow(
-                    key = ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED,
-                    title = "\u624b\u52a8\u7f16\u8f91",
-                    checked = snapshot.associationManualEditEnabled,
-                    visibleProvider = { manualEditDisabledReason == null && hasManualEditFeature() },
-                    onChanged = { checked, _ ->
-                        settings.setAssociationManualEditEnabled(checked)
                         checked
                     },
                 ),
@@ -637,6 +504,11 @@ internal fun ReaMicroSettingsHook.renderReaderCompletionSettingsContent(innerPad
             ),
         )
         val rows = listOf(
+            ToggleRow(
+                key = ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, title = "翻页动画调节",
+                checked = snapshot.readerPageAnimationEnabled,
+                onChanged = { checked, _ -> settings.setReaderPageAnimationEnabled(checked); checked },
+            ),
             ToggleRow(
                 key = ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED,
                 title = "\u81ea\u52a8\u9605\u8bfb",
@@ -1024,27 +896,12 @@ internal fun ReaMicroSettingsHook.renderReaderSheetBackHandler(composer: Any, on
         targetUnit()
     }
     renderReaderSheetNavigationBackHandler(composer, back)
-    method(BACK_HANDLER_KT_CLASS, BACK_HANDLER_METHOD, 5).invoke(null, true, back, composer, 0, 0)
+    nativeUi.backHandler(true, back, composer)
 }
 
 internal fun ReaMicroSettingsHook.renderReaderSheetNavigationBackHandler(composer: Any, back: Any) {
-    runCatching {
-        val none = staticObject(NAVIGATION_EVENT_INFO_NONE_CLASS, "INSTANCE")
-        val state = method(
-            REMEMBER_NAVIGATION_EVENT_STATE_KT_CLASS,
-            REMEMBER_NAVIGATION_EVENT_STATE_METHOD,
-            6,
-        ).invoke(null, none, null, null, composer, 6, 6)
-        method(
-            NAVIGATION_EVENT_HANDLER_KT_CLASS,
-            NAVIGATION_BACK_HANDLER_METHOD,
-            7,
-        ).invoke(null, state, true, null, back, composer, 0, 4)
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX reader sheet navigation back fallback: ${it.stackTraceToString()}")
-    }
+    requireNotNull(com.reamicro.fix.core.HostHighlightUiBindings.current).sheetNavigationBack(composer, back)
 }
-
 internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("CloudCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
@@ -1052,7 +909,7 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
         val rows = listOf(
             ToggleRow(
                 key = ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
-                title = "同步扩展",
+                title = "WebDAV 同步",
                 checked = snapshot.cloudSyncExtensionEnabled,
                 onChanged = { checked, _ ->
                     settings.setCloudSyncExtensionEnabled(checked)
@@ -1061,7 +918,7 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
             ),
             ToggleRow(
                 key = ModuleSettings.KEY_CLOUD_WEBDAV_ENABLED,
-                title = "WebDAV",
+                title = "WebDAV 云盘",
                 checked = snapshot.cloudWebDavEnabled,
                 onChanged = { checked, _ ->
                     settings.setCloudWebDavEnabled(checked)
@@ -1094,6 +951,12 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
                     settings.setCloudDownloadCancelEnabled(checked)
                     checked
                 },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED,
+                title = "本地导出",
+                checked = snapshot.bookLocalExportEnabled,
+                onChanged = { checked, _ -> settings.setBookLocalExportEnabled(checked); checked },
             ),
             ToggleRow(
                 key = ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED,
@@ -1335,9 +1198,7 @@ internal fun ReaMicroSettingsHook.renderAccountSwitchContent(innerPaddings: Any,
     renderHostLazyColumn(innerPaddings, listContent, composer)
 }
 
-internal fun ReaMicroSettingsHook.renderAccountSecurityExportContent(
-    state: Any, deleteDialogState: Any, composer: Any, includeDelete: Boolean = true,
-) {
+internal fun ReaMicroSettingsHook.renderAccountSecurityExportContent(composer: Any) {
     accountListVersionValue()
     val accounts = accountController.displayAccounts()
     val expandedState = accountDataExportExpandedState(accounts.isNotEmpty())
@@ -1389,55 +1250,37 @@ internal fun ReaMicroSettingsHook.renderAccountSecurityExportContent(
     val content = functionProxy("AccountSecurityExportContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         renderHostActionCard(rows, innerComposer)
-        if (includeDelete) renderHostDeleteAccountItem(state, deleteDialogState, innerComposer)
         targetUnit()
     }
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.column(b2Ui.fillWidth(b2Ui.modifier()), b2Ui.spacedBy(udp(16)), b2Ui.start(), content, composer)
-        return
-    }
-    method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
-        method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(
-            null,
-            modifierInstance(),
-            0f,
-            1,
-            null,
-        ),
-        spacedBy(16),
-        alignmentStart(),
-        content,
-        composer,
-        0,
-        0,
-    )
+    nativeUi.column(nativeUi.fillWidth(nativeUi.modifier()), nativeUi.spacedBy(udp(16)), nativeUi.start(), content, composer)
 }
-
-internal fun ReaMicroSettingsHook.renderHostDeleteAccountItem(state: Any, deleteDialogState: Any, composer: Any) {
-    val deletingAccount = runCatching {
-        val uiState = state.method0("getValue")
-        uiState.method0("getDeletingAccount") as? Boolean ?: false
-    }.getOrDefault(false)
-    val onClick = functionProxy("OpenDeleteAccountDialog", FUNCTION0_CLASS) {
-        setBooleanState(deleteDialogState, true)
-        targetUnit()
-    }
-    method(ACCOUNT_SECURITY_SCREEN_CLASS, ACCOUNT_SECURITY_DELETE_ITEM_METHOD, 4).invoke(
-        null,
-        deletingAccount,
-        onClick,
-        composer,
-        48,
-    )
-}
-
 internal fun ReaMicroSettingsHook.renderOnlineCompletionSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("OnlineCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
         onlineSourceVersionValue()
         onlineEpubStyleVersionValue()
         val sources = listOnlineSources()
+        val snapshot = settings.snapshot()
+        addLazyItem(lazyListScope, 0x524d4f4d) { itemComposer ->
+            renderHostSettingsCard(buildList {
+                if (snapshot.onlineEnhancedParserUnlocked) {
+                    add(ToggleRow(
+                        key = ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED,
+                        title = "增强解析",
+                        checked = snapshot.onlineEnhancedParserEnabled,
+                        onChanged = { checked, _ ->
+                            if (!settings.setOnlineEnhancedParserEnabled(checked)) showToast("保存解析设置失败，请重试")
+                            bumpOnlineSourceVersion()
+                            settings.snapshot().onlineEnhancedParserEnabled
+                        },
+                    ))
+                }
+                add(ToggleRow(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, "发现入口", snapshot.onlineDiscoverEnabled,
+                    onChanged = { checked, _ -> settings.setOnlineDiscoverEnabled(checked); checked }))
+                add(ToggleRow(ModuleSettings.KEY_MERCHANT_END_TIME_ENABLED, "行商结束时间", snapshot.merchantEndTimeEnabled,
+                    onChanged = { checked, _ -> settings.setMerchantEndTimeEnabled(checked); checked }))
+            }, itemComposer)
+        }
         val styleRows = listOf(
             ActionRow(
                 key = "online_download_style",
@@ -1674,28 +1517,8 @@ internal fun ReaMicroSettingsHook.renderHostLazyColumn(
     itemSpacing: Int = 16,
     modifierOverride: Any? = null,
 ) {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.lazyColumn(modifierOverride ?: pageModifier(innerPaddings, extendBottom), spacedBy(itemSpacing), listContent, composer)
-        return
-    }
-    method(LAZY_DSL_KT_CLASS, LAZY_COLUMN_METHOD, 13).invoke(
-        null,
-        modifierOverride ?: pageModifier(innerPaddings, extendBottom),
-        null,
-        null,
-        false,
-        spacedBy(itemSpacing),
-        null,
-        null,
-        false,
-        null,
-        listContent,
-        composer,
-        0,
-        494,
-    )
+    nativeUi.lazyColumn(modifierOverride ?: pageModifier(innerPaddings, extendBottom), spacedBy(itemSpacing), listContent, composer)
 }
-
 internal fun ReaMicroSettingsHook.renderHostSettingsCard(rows: List<ToggleRow>, composer: Any) {
     val content = functionProxy("ModuleSettingsCardContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
@@ -1710,22 +1533,8 @@ internal fun ReaMicroSettingsHook.renderHostSettingsCard(rows: List<ToggleRow>, 
         }
         targetUnit()
     }
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.column(settingsCardModifier(composer), arrangementTop(), alignmentStart(), content, composer)
-        return
-    }
-    method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
-        settingsCardModifier(composer),
-        arrangementTop(),
-        alignmentStart(),
-        content,
-        composer,
-        0,
-        0,
-    )
+    nativeUi.column(settingsCardModifier(composer), arrangementTop(), alignmentStart(), content, composer)
 }
-
 internal fun ReaMicroSettingsHook.renderHostActionCard(rows: List<ActionRow>, composer: Any, backgroundOverride: Long? = null) {
     val content = functionProxy("ModuleActionCardContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
@@ -1735,22 +1544,8 @@ internal fun ReaMicroSettingsHook.renderHostActionCard(rows: List<ActionRow>, co
         }
         targetUnit()
     }
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.column(settingsCardModifier(composer, backgroundOverride), arrangementTop(), alignmentStart(), content, composer)
-        return
-    }
-    method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
-        settingsCardModifier(composer, backgroundOverride),
-        arrangementTop(),
-        alignmentStart(),
-        content,
-        composer,
-        0,
-        0,
-    )
+    nativeUi.column(settingsCardModifier(composer, backgroundOverride), arrangementTop(), alignmentStart(), content, composer)
 }
-
 internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: Any) {
     val headline = composableLambda(row.key.hashCode(), FUNCTION2_CLASS) { args ->
         val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
@@ -1777,6 +1572,7 @@ internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: 
             renderHostTrailingText(trailingText, innerComposer)
             targetUnit()
         }
+        row.onClick != null -> nativeUi.settingsArrow()
         else -> null
     }
     val baseModifier = rowModifier(true, if (supporting == null) 56 else 68)
@@ -1792,19 +1588,14 @@ internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: 
             clickableModifier(baseModifier, "ActionRow${row.key}") { row.onClick.invoke() }
         else -> baseModifier
     }
-    renderAbiListItem(
-        headline,
-        modifier,
-        null,
-        supporting,
-        null,
-        trailing,
-        transparentListItemColors(composer),
-        0f,
-        0f,
-        composer,
-        196614,
-        listItemDefaultMask(
+    nativeUi.listItem(
+        headline = headline,
+        modifier = modifier,
+        composer = composer,
+        colors = transparentListItemColors(composer),
+        supporting = supporting,
+        trailing = trailing,
+        defaultMask = listItemDefaultMask(
             hasSupporting = supporting != null,
             hasTrailing = trailing != null,
         ),
@@ -1827,102 +1618,48 @@ internal fun ReaMicroSettingsHook.renderHostSwitchRow(
         renderHostSwitch(row, innerComposer, stateUpdaters, pendingStateUpdates)
         targetUnit()
     }
-    renderAbiListItem(
-        headline,
-        rowModifier(row.visibleProvider()),
-        null,
-        null,
-        null,
-        trailing,
-        transparentListItemColors(composer),
-        0f,
-        0f,
-        composer,
-        196614,
-        412,
+    nativeUi.listItem(
+        headline = headline,
+        modifier = rowModifier(row.visibleProvider()),
+        composer = composer,
+        colors = transparentListItemColors(composer),
+        trailing = trailing,
+        defaultMask = 412,
     )
 }
 
 internal fun ReaMicroSettingsHook.renderHostText(text: String, composer: Any, fontFamily: Any? = null) {
-    renderAbiText(
-        text,
-        null,
-        colorScheme(composer).longMethod("getOnBackground"),
-        null,
-        0L,
-        null,
-        null,
-        fontFamily,
-        0L,
-        null,
-        null,
-        0L,
-        0,
-        false,
-        0,
-        0,
-        null,
-        typography(composer).method0("getLabelLarge"),
-        composer,
-        0,
-        0,
-        if (fontFamily == null) TEXT_DEFAULT_MASK else TEXT_WITH_FONT_FAMILY_MASK,
+    nativeUi.text(
+        text = text,
+        composer = composer,
+        color = colorScheme(composer).longMethod("getOnBackground"),
+        style = typography(composer).method0("getLabelLarge"),
+        fontFamily = fontFamily,
+        defaultMask = if (fontFamily == null) TEXT_DEFAULT_MASK else TEXT_WITH_FONT_FAMILY_MASK,
     )
 }
 
 internal fun ReaMicroSettingsHook.renderHostSupportingText(text: String, composer: Any, singleLine: Boolean = false) {
-    renderAbiText(
-        text,
-        null,
-        runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
+    nativeUi.text(
+        text = text,
+        composer = composer,
+        color = runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
             .getOrElse { colorScheme(composer).longMethod("getOnBackground") },
-        null,
-        0L,
-        null,
-        null,
-        null,
-        0L,
-        null,
-        null,
-        0L,
-        0,
-        false,
-        if (singleLine) 1 else 0,
-        if (singleLine) 1 else 0,
-        null,
-        typography(composer).method0("getBodyMedium"),
-        composer,
-        0,
-        0,
-        if (singleLine) TEXT_SINGLE_LINE_MASK else TEXT_DEFAULT_MASK,
+        style = typography(composer).method0("getBodyMedium"),
+        maxLines = if (singleLine) 1 else 0,
+        minLines = if (singleLine) 1 else 0,
+        defaultMask = if (singleLine) TEXT_SINGLE_LINE_MASK else TEXT_DEFAULT_MASK,
     )
 }
 
 internal fun ReaMicroSettingsHook.renderHostTrailingText(text: String, composer: Any) {
-    renderAbiText(
-        text,
-        null,
-        runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
+    nativeUi.text(
+        text = text,
+        composer = composer,
+        color = runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
             .getOrElse { colorScheme(composer).longMethod("getOnBackground") },
-        null,
-        0L,
-        null,
-        null,
-        null,
-        0L,
-        null,
-        null,
-        0L,
-        0,
-        false,
-        0,
-        0,
-        null,
-        typography(composer).method0("getLabelLarge"),
-        composer,
-        0,
-        0,
-        TEXT_DEFAULT_MASK,
+        style = typography(composer).method0("getLabelLarge"),
+        defaultMask = TEXT_DEFAULT_MASK,
     )
 }
 
@@ -1935,8 +1672,7 @@ internal fun ReaMicroSettingsHook.renderHostSwitch(
     val targetChecked = row.checkedProvider()
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
+        setStateValue(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
     val canSyncWithSnapshot = !row.syncWithSnapshot ||
@@ -1966,7 +1702,7 @@ internal fun ReaMicroSettingsHook.renderHostSwitch(
         updateRow(row.key, row.onChanged(newValue, ::updateRow))
         targetUnit()
     }
-    renderAbiSwitch(checked, onCheckedChange, composer)
+    nativeUi.settingsSwitch(checked, onCheckedChange, composer)
 }
 
 internal fun ReaMicroSettingsHook.renderHostActionSwitch(
@@ -1977,8 +1713,7 @@ internal fun ReaMicroSettingsHook.renderHostActionSwitch(
 ) {
     val state = rememberBooleanState(composer, checked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
+        setStateValue(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: checked
     if (rememberedChecked != checked) {
@@ -1990,40 +1725,20 @@ internal fun ReaMicroSettingsHook.renderHostActionSwitch(
         onChanged(newValue)
         targetUnit()
     }
-    renderAbiSwitch(checked, onCheckedChange, composer)
+    nativeUi.settingsSwitch(checked, onCheckedChange, composer)
 }
 
 internal fun ReaMicroSettingsHook.renderHostDivider(composer: Any) {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.divider(dividerModifier(), composer)
-        return
-    }
-    method(DIVIDER_KT_CLASS, DASHED_DIVIDER_METHOD, 6).invoke(
-        null,
-        dividerModifier(),
-        0L,
-        0f,
-        composer,
-        0,
-        6,
-    )
+    nativeUi.divider(dividerModifier(), composer)
 }
-
 internal fun ReaMicroSettingsHook.addLazyItem(lazyListScope: Any, key: Int, itemKey: Any? = null, block: (Any) -> Unit) {
     val content = composableLambda(key, FUNCTION3_CLASS) { args ->
         val composer = args?.getOrNull(1) ?: return@composableLambda targetUnit()
         block(composer)
         targetUnit()
     }
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.addItem(lazyListScope, itemKey ?: "reamicro-$key", content)
-        return
-    }
-    val itemMethod = lazyItemDefaultMethod ?: method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6)
-
-    itemMethod.invoke(null, lazyListScope, itemKey, null, content, if (itemKey == null) 3 else 2, null)
+    nativeUi.addItem(lazyListScope, itemKey ?: "reamicro-$key", content)
 }
-
 internal fun ReaMicroSettingsHook.runOnMainThreadOrLog(name: String, block: () -> Unit) {
     val mainLooper = runCatching { android.os.Looper.getMainLooper() }.getOrNull()
     @Suppress("DEPRECATION")
@@ -2032,82 +1747,17 @@ internal fun ReaMicroSettingsHook.runOnMainThreadOrLog(name: String, block: () -
         block()
         return
     }
-    XposedBridge.logAlways(
+    HookRuntime.logAlways(
         "[ReaMicro] $name skipped: not on main thread (main=${mainLooper != null} current=${current != null})",
     )
 }
 
 internal fun ReaMicroSettingsHook.settingsCardModifier(composer: Any, backgroundOverride: Long? = null): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        val scheme = colorScheme(composer)
-        return b2Ui.card(modifierInstance(),
-            backgroundOverride ?: method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme) as Long,
-            method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, scheme) as Long, udp(0.8))
-    }
     updateModuleDialogTheme(composer)
-    val shape = method(SHAPE_KT_CLASS, ROUNDED_SHAPE_METHOD, 0).invoke(null)
+    val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
     val scheme = colorScheme(composer)
-    val clipped = method(CLIP_KT_CLASS, CLIP_METHOD, 2).invoke(null, modifierInstance(), shape)
-    val bordered = method(BORDER_KT_CLASS, BORDER_METHOD, 4).invoke(
-        null,
-        clipped,
-        udp(0.8),
-        method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, scheme),
-        shape,
-    )
-    val background = method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(
-        null,
-        bordered,
-        backgroundOverride ?: method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme),
-        null,
-        2,
-        null,
-    )
-    return method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(null, background, 0f, 1, null)
+    return nativeUi.card(modifierInstance(), backgroundOverride ?: ui.call("backgroundAuto", scheme) as Long,
+        ui.call("borderVariant", scheme) as Long, udp(ui.decimal("settingsBorderWidth")))
 }
-
-internal fun ReaMicroSettingsHook.rowModifier(visible: Boolean): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") b2Ui.height(modifierInstance(), udp(if (visible) 56 else 0))
-    else method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, modifierInstance(), udp(if (visible) 56 else 0))
-
-internal fun ReaMicroSettingsHook.rowModifier(visible: Boolean, height: Int): Any =
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") b2Ui.height(modifierInstance(), udp(if (visible) height else 0))
-    else method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, modifierInstance(), udp(if (visible) height else 0))
-
-internal fun ReaMicroSettingsHook.injectedRouteState(initialValue: InjectedRoute): Any {
-    injectedRouteUiState?.let { return it }
-    val state = mutableState(initialValue).also { injectedRouteUiState = it }
-    resolveRouteStateAccessors(state)
-    return state
-}
-
-internal fun ReaMicroSettingsHook.resolveRouteStateAccessors(state: Any) {
-    if (injectedRouteGetter != null && injectedRouteSetter != null) return
-    runCatching {
-        val clazz = state.javaClass
-        val getter = clazz.methods.firstOrNull {
-            it.parameterTypes.isEmpty() &&
-                (it.hostNameMatches("getValue") || it.name.startsWith("getValue-")) &&
-                it.returnType != java.lang.Void.TYPE && it.returnType != Int::class.javaPrimitiveType &&
-                it.returnType != java.lang.Boolean.TYPE
-        }?.apply { isAccessible = true }
-        val setter = clazz.methods.firstOrNull {
-            it.hostNameMatches("setValue") && it.parameterTypes.size == 1 &&
-                it.parameterTypes[0] != Int::class.javaPrimitiveType &&
-                it.parameterTypes[0] != java.lang.Boolean.TYPE
-        }?.apply { isAccessible = true }
-        if (getter != null) injectedRouteGetter = getter
-        if (setter != null) injectedRouteSetter = setter
-    }
-}
-
-internal fun ReaMicroSettingsHook.routeStateValue(state: Any): InjectedRoute? {
-    if (injectedRouteGetter == null) resolveRouteStateAccessors(state)
-    return runCatching { injectedRouteGetter?.invoke(state) as? InjectedRoute }.getOrNull()
-}
-
-internal fun ReaMicroSettingsHook.setInjectedRouteState(route: InjectedRoute?) {
-    val state = injectedRouteUiState ?: return
-    if (injectedRouteSetter == null) resolveRouteStateAccessors(state)
-    runCatching { injectedRouteSetter?.invoke(state, route) }
-}
+internal fun ReaMicroSettingsHook.rowModifier(visible: Boolean): Any = nativeUi.height(modifierInstance(), udp(if (visible) 56 else 0))
+internal fun ReaMicroSettingsHook.rowModifier(visible: Boolean, height: Int): Any = nativeUi.height(modifierInstance(), udp(if (visible) height else 0))

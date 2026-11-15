@@ -1,38 +1,33 @@
 package com.reamicro.fix.core
 
-import java.lang.reflect.Proxy
+import android.content.Context
+import android.view.View
+import com.reamicro.fix.xposed.HookRuntime
 
-/** B4 保留可复用 View 的八参入口；旧六参入口的默认槽不能直接移位复用。 */
+/** The host's own overload proves the reusable-view callback slots. */
 class HostAndroidViews(private val loader: ClassLoader) {
-    private val type by lazy { loader.hostClass("androidx.compose.ui.viewinterop.AndroidView_androidKt") }
+    private val bindings by lazy { requireNotNull(HostIntegrationBindings.androidView) { "Native AndroidView contract unavailable" } }
     private val noOp by lazy {
-        Proxy.newProxyInstance(loader, arrayOf(loader.hostClass("kotlin.jvm.functions.Function1"))) { proxy, method, args ->
-            when (HostSymbols.logicalMethodName(method)) {
-                "invoke" -> loader.hostClass("kotlin.Unit").hostField("INSTANCE").get(null)
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.firstOrNull()
-                "toString" -> "ReaMicroAndroidViewNoOp"
-                else -> null
-            }
-        }
+        val ui = requireNotNull(HostUiBindings.current)
+        ui.callback(ui.type("function1")) {}
     }
-    private val render by lazy {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            type.hostAbiMethod("b", loader.hostClass("kotlin.jvm.functions.Function1"),
-                loader.hostClass("androidx.compose.ui.Modifier"),
-                loader.hostClass("kotlin.jvm.functions.Function1"),
-                loader.hostClass("kotlin.jvm.functions.Function1"),
-                loader.hostClass("kotlin.jvm.functions.Function1"),
-                loader.hostClass("androidx.compose.runtime.Composer"),
-                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-        } else type.hostMethodsNamed("AndroidView").single { it.parameterCount == 6 }
+    fun render(factory: Any, modifier: Any, composer: Any, update: Any? = null, onRelease: Any? = null) {
+        val ui = requireNotNull(HostUiBindings.current)
+        require(ui.loader === loader && ui.type("function1").isInstance(factory))
+        val invoke = ui.method("invoke1")
+        val guardedFactory = ui.function(ui.type("function1"), fallback = ::emptyView) { args ->
+            runCatching {
+                requireNotNull(invoke.invoke(factory, args?.firstOrNull()) as? View) {
+                    "Native AndroidView factory did not return a View"
+                }
+            }.onFailure { HookRuntime.logError("ReaMicro native AndroidView factory failed", it) }
+                .getOrElse { emptyView(args) }
+        }
+        bindings.method("render").invoke(null, guardedFactory, modifier, null,
+            onRelease ?: bindings.field("release").get(null), update ?: noOp, composer, 0, 4)
     }
 
-    fun render(factory: Any, modifier: Any, composer: Any, update: Any? = null) {
-        if (render.parameterCount == 8) {
-            render.invoke(null, factory, modifier, null, noOp, update ?: noOp, composer, 0, 4)
-        } else {
-            render.invoke(null, factory, modifier, update, composer, 0, if (update == null) 4 else 0)
-        }
-    }
+    // Only a framework View is created on rejection; no old module UI or listener is installed.
+    private fun emptyView(args: Array<out Any?>?): View =
+        View(requireNotNull(args?.firstOrNull() as? Context) { "Native AndroidView context unavailable" })
 }

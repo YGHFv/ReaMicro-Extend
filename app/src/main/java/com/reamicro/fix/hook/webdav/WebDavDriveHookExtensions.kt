@@ -76,10 +76,6 @@ internal fun String.hexDecodeToString(): String {
     }.getOrDefault(this)
 }
 
-internal fun Class<*>.companionField(name: String) =
-    runCatching { getDeclaredField(name) }
-        .recoverCatching { getField(name) }
-        .getOrNull()
 
 internal fun String.trimChapterHeadingSeparator(): String =
     trim().trimStart { it.isWhitespace() || it in "　:：/／、，,。.!！?？-—_；;]" }
@@ -160,7 +156,7 @@ internal fun android.database.Cursor.longAt(index: Int): Long =
     if (index < 0 || isNull(index)) 0L else getLong(index)
 
 internal fun Any.method0(name: String): Any =
-    requireNotNull(com.reamicro.fix.xposed.XposedHelpers.callMethod(this, name))
+    requireNotNull(invokeNoArg(name))
 
 internal fun Any.longMethod(name: String): Long =
     (method0(name) as Number).toLong()
@@ -183,8 +179,28 @@ internal fun Any.callFloat(methodName: String): Float {
     return (value as? Number)?.toFloat() ?: value?.toString()?.toFloatOrNull() ?: 0f
 }
 
-internal fun Any.invokeNoArg(methodName: String): Any? =
-    runCatching { com.reamicro.fix.xposed.XposedHelpers.callMethod(this, methodName) }.getOrNull()
+internal fun Any.invokeNoArg(methodName: String): Any? {
+    val property = methodName.takeIf { it.startsWith("get") && it.length > 3 }
+        ?.removePrefix("get")?.replaceFirstChar(Char::lowercaseChar)
+    if (property != null) {
+        com.reamicro.fix.core.HostUiBindings.current?.let { ui ->
+            if (ui.method("colorScheme").returnType.isInstance(this)) return ui.field("color.$property").get(this)
+        }
+        com.reamicro.fix.core.HostBookBindings.current?.let { host ->
+            if (host.type("book").isInstance(this)) return host.properties.getValue(property).get(this)
+        }
+        com.reamicro.fix.core.HostStorageBindings.records?.let { host ->
+            for ((role, schema) in com.reamicro.fix.core.HostStorageQueries.RECORDS) {
+                if (!host.type(role).isInstance(this)) continue
+                if (property in schema.second.split(' ')) return host.field("$role.$property").get(this)
+                if (role == "book" && property in listOf("title", "extension"))
+                    return requireNotNull(com.reamicro.fix.core.HostStorageBindings.presentation).method(property).invoke(this)
+                error("Unbound native $role property: $property")
+            }
+        }
+    }
+    error("Unbound storage accessor: ${javaClass.name}#$methodName")
+}
 
 internal fun String.htmlAttrEscape(): String =
     replace("&", "&amp;")

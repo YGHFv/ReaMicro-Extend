@@ -10,53 +10,61 @@ internal object EpubCssEditor {
     data class Document(val loaded: LoadedEpubText, val css: CssSourceDocument)
     data class Saved(val snapshot: EpubTextSnapshot, val changed: Boolean)
 
-    fun load(file: File, sourceDialog: Boolean = false): LoadedEpubText {
+    fun load(file: File, sourceDialog: Boolean = false, checkCurrent: () -> Unit = {}): LoadedEpubText {
+        checkCurrent()
         require(file.isFile && file.extension.equals("css", true)) { "不是 CSS 文件" }
         val limit = if (sourceDialog) MAX_SOURCE_DIALOG_BYTES else MAX_CSS_BYTES
         require(file.length() <= limit) {
             if (sourceDialog) "CSS 较大，请使用逐项编辑；源码弹窗最多支持 256KB" else "CSS 超出安全编辑范围"
         }
-        return EpubTextFiles.load(file, minOf(limit, EpubTextFiles.availableLoadBudget()))
+        return EpubTextFiles.load(file, minOf(limit, EpubTextFiles.availableLoadBudget()), checkCurrent)
+            .also { checkCurrent() }
     }
 
     fun read(file: File): Document = load(file).let { Document(it, CssSourceDocument.parse(it.text)) }
 
-    private fun current(file: File, expectedSha256: String, sourceDialog: Boolean = false): LoadedEpubText {
+    private fun current(file: File, expectedSha256: String, sourceDialog: Boolean = false,
+        checkCurrent: () -> Unit = {}): LoadedEpubText {
         require(Regex("[0-9a-f]{64}").matches(expectedSha256)) { "缺少 CSS 文件版本，请刷新后重试" }
-        val loaded = load(file, sourceDialog)
+        val loaded = load(file, sourceDialog, checkCurrent)
         require(loaded.snapshot.fingerprint.sha256 == expectedSha256) {
             "CSS 文件已被其他操作修改，保存已取消，请刷新后重新编辑"
         }
         return loaded
     }
 
-    private fun save(file: File, loaded: LoadedEpubText, next: String): Saved {
+    private fun save(file: File, loaded: LoadedEpubText, next: String,
+        commit: (() -> Unit) -> Unit, checkCurrent: () -> Unit): Saved {
+        checkCurrent()
         if (next == loaded.text) return Saved(loaded.snapshot, false)
-        return Saved(EpubTextFiles.save(file, next, loaded.snapshot), true)
+        return Saved(EpubTextFiles.save(file, next, loaded.snapshot, commit, checkCurrent), true)
     }
 
     fun saveValue(
         file: File, expectedSha256: String, ruleId: Int, declarationId: Int,
         value: String,
+        commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {},
     ): Saved {
         require(value.length <= MAX_VALUE_CHARS) { "CSS 属性值过长，不能在弹窗中安全编辑" }
-        val loaded = current(file, expectedSha256)
+        val loaded = current(file, expectedSha256, checkCurrent = checkCurrent)
         val css = CssSourceDocument.parse(loaded.text)
         val target = css.declaration(ruleId, declarationId)
         require(target.valueEnd - target.valueStart <= MAX_VALUE_CHARS) { "原属性值过长，不能在弹窗中安全编辑" }
-        return save(file, loaded, css.replaceValue(ruleId, declarationId, value))
+        return save(file, loaded, css.replaceValue(ruleId, declarationId, value), commit, checkCurrent)
     }
 
-    fun saveSelector(file: File, expectedSha256: String, ruleId: Int, selector: String): Saved {
+    fun saveSelector(file: File, expectedSha256: String, ruleId: Int, selector: String,
+        commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {}): Saved {
         require(selector.length <= 16_384) { "选择器过长" }
-        val loaded = current(file, expectedSha256)
+        val loaded = current(file, expectedSha256, checkCurrent = checkCurrent)
         val css = CssSourceDocument.parse(loaded.text)
-        return save(file, loaded, css.replaceSelector(ruleId, selector))
+        return save(file, loaded, css.replaceSelector(ruleId, selector), commit, checkCurrent)
     }
 
-    fun saveSource(file: File, expectedSha256: String, source: String): Saved {
+    fun saveSource(file: File, expectedSha256: String, source: String,
+        commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {}): Saved {
         require(source.length <= MAX_SOURCE_DIALOG_BYTES) { "CSS 源码超出弹窗安全编辑范围" }
-        val loaded = current(file, expectedSha256, sourceDialog = true)
+        val loaded = current(file, expectedSha256, sourceDialog = true, checkCurrent = checkCurrent)
         val ending = Regex("\\r\\n|\\r|\\n").find(loaded.text)?.value ?: "\n"
         val next = source.replace("\r\n", "\n").replace('\r', '\n').replace("\n", ending)
         val encoded = loaded.snapshot.format.charset.newEncoder()
@@ -67,6 +75,6 @@ internal object EpubCssEditor {
             "CSS 编码后的内容超过 256KB，未修改原文件"
         }
         CssSourceDocument.parse(next)
-        return save(file, loaded, next)
+        return save(file, loaded, next, commit, checkCurrent)
     }
 }

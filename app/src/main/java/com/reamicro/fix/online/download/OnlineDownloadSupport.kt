@@ -1,10 +1,5 @@
 package com.reamicro.fix.online.download
 
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.xposed.XposedHelpers
-
 import android.app.NotificationManager
 import android.content.Context
 import android.os.SystemClock
@@ -22,14 +17,11 @@ import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
 import com.reamicro.fix.online.download.RemoteOnlineChapter
 import com.reamicro.fix.online.download.StoredOnlineChapter
-import com.reamicro.fix.xposed.XposedBridge
-import java.io.BufferedInputStream
 import java.io.File
 import java.lang.reflect.Method
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
-import java.util.zip.ZipInputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import com.reamicro.fix.hook.webdav.*
@@ -38,11 +30,21 @@ import com.reamicro.fix.hook.cloudPathOf
 import com.reamicro.fix.hook.onlineCompletionFailedLogFile
 import com.reamicro.fix.hook.sendOnlineCompletionCancelBroadcastToModule
 import com.reamicro.fix.logging.logWebDav
-import com.reamicro.fix.core.typeMatches
 
 internal fun throwIfOnlineCompletionDownloadCancelled(task: OnlineCompletionDownloadTask) {
-    if (task.cancelRequested || Thread.currentThread().isInterrupted) {
+    task.control.check()
+    if (task.cancelRequested || task.cancellation.isCancelled || Thread.currentThread().isInterrupted ||
+        !task.checkActive()
+    ) {
         throw OnlineCompletionDownloadCancelledException()
+    }
+    if (!com.reamicro.fix.hook.AccountHostRuntime.isCurrentStorage(task.storageIdentity)) {
+        throw OnlineCompletionDownloadCancelledException("账号已切换，已停止旧账号下载")
+    }
+    val directory = task.importedBookDir
+    val key = task.importedBookFileKey
+    if (directory != null && key != null && onlineCompletionDirectoryKey(directory) != key) {
+        throw OnlineCompletionDownloadCancelledException("书籍已被另一次导入替换，已停止旧任务追加")
     }
 }
 
@@ -56,6 +58,7 @@ internal fun cleanupDownloadToken(token: CancellableWebDavDownload) {
 }
 
 internal fun cleanupOnlineCompletionDownloadTask(task: OnlineCompletionDownloadTask) {
+    task.cancellation.cancel()
     runCatching {
         val stat = CacheDeleteStat()
         deleteCachePath(task.cacheDir, stat)
@@ -69,6 +72,10 @@ internal fun cleanupOnlineCompletionDownloadTask(task: OnlineCompletionDownloadT
 }
 
 internal fun deleteCachePath(file: File, stat: CacheDeleteStat) {
+    if (Files.isSymbolicLink(file.toPath())) {
+        file.delete()
+        return
+    }
     if (!file.exists()) return
     if (file.isDirectory) {
         file.listFiles()?.forEach { deleteCachePath(it, stat) }
@@ -92,91 +99,11 @@ internal fun staleTopLevelImportCacheDirs(cacheDir: File): List<File> {
         .orEmpty()
 }
 
-internal fun orphanProfileBackgroundFiles(filesDir: File, activeImagePath: String): List<File> {
-    val dir = File(filesDir, PROFILE_BACKGROUND_FILES_DIR)
-    if (!dir.isDirectory) return emptyList()
-    val active = activeImagePath.trim()
-        .takeIf { it.isNotBlank() }
-        ?.let { path -> runCatching { File(path).canonicalPath }.getOrElse { path } }
-    return dir.listFiles()
-        ?.filter { it.isFile }
-        ?.filterNot { file ->
-            active != null && runCatching { file.canonicalPath }.getOrElse { file.path } == active
-        }
-        .orEmpty()
-}
-
 internal fun paragraphCommentCacheDir(filesDir: File): File =
     File(filesDir, OnlineParagraphCommentCacheStore.DIRECTORY_NAME)
 
 internal fun cancelExistingBackupTasks(tracker: Any, bookId: Long) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        val loader = tracker.javaClass.classLoader
-        val gate = tracker.javaClass.getDeclaredField("a").get(tracker)
-        val lock = gate.javaClass.getDeclaredField("a").get(gate) as java.util.concurrent.locks.ReentrantLock
-        lock.lock()
-        try {
-            val flow = tracker.javaClass.getDeclaredField("d").get(tracker)
-            val works = XposedHelpers.callMethod(flow, "getValue") as List<*>
-            val statusClass = loader.hostClass(WORK_STATUS_CLASS)
-            val running = statusClass.enumConstants.single { (it as Enum<*>).name == "Running" }
-            val cancelled = statusClass.enumConstants.single { (it as Enum<*>).name == "Cancelled" }
-            val stateClass = loader.hostClass(WORK_STATE_CLASS)
-            val constructor = stateClass.getDeclaredConstructor(
-                statusClass, Int::class.javaPrimitiveType, String::class.java, String::class.java, String::class.java,
-            )
-            val update = tracker.javaClass.getDeclaredMethod("d", String::class.java, stateClass)
-            works.filterNotNull().forEach { work ->
-                val kind = work.javaClass.getDeclaredField("b").get(work) as String
-                val label = work.javaClass.getDeclaredField("c").get(work) as String
-                val status = work.javaClass.getDeclaredField("d").get(work)
-                if (kind.startsWith("backup") && label == bookId.toString() && status == running) {
-                    val id = work.javaClass.getDeclaredField("a").get(work) as String
-                    val progress = work.javaClass.getDeclaredField("e").getInt(work)
-                    val name = work.javaClass.getDeclaredField("h").get(work) as? String
-                    update.invoke(tracker, id, constructor.newInstance(cancelled, progress, null, null, name))
-                }
-            }
-        } finally {
-            lock.unlock()
-        }
-        return
-    }
-    runCatching {
-        val worksFlow = tracker.javaClass.methods.first {
-            it.name == "works" && it.parameterTypes.isEmpty()
-        }.apply { isAccessible = true }.invoke(tracker)
-        val works = worksFlow?.javaClass?.methods?.firstOrNull {
-            it.name == "getValue" && it.parameterTypes.isEmpty()
-        }?.apply { isAccessible = true }?.invoke(worksFlow) as? Iterable<*> ?: return
-        val ids = works.mapNotNull { work ->
-            val kind = work?.javaClass?.methods?.firstOrNull { it.name == "getKind" && it.parameterTypes.isEmpty() }
-                ?.apply { isAccessible = true }
-                ?.invoke(work)
-                ?.toString()
-            val label = work?.javaClass?.methods?.firstOrNull { it.name == "getLabel" && it.parameterTypes.isEmpty() }
-                ?.apply { isAccessible = true }
-                ?.invoke(work)
-                ?.toString()
-            if (kind?.startsWith("backup") == true && label == bookId.toString()) {
-                work.javaClass.methods.firstOrNull { it.name == "getId" && it.parameterTypes.isEmpty() }
-                    ?.apply { isAccessible = true }
-                    ?.invoke(work)
-                    ?.toString()
-            } else {
-                null
-            }
-        }
-        val cancel = tracker.javaClass.methods.firstOrNull {
-            it.name == "cancelWorkById" && it.parameterTypes.size == 1
-        }?.apply { isAccessible = true }
-        ids.forEach { cancel?.invoke(tracker, it) }
-        tracker.javaClass.methods.firstOrNull {
-            it.name == "pruneWork" && it.parameterTypes.isEmpty()
-        }?.apply { isAccessible = true }?.invoke(tracker)
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to cancel old WebDAV backup tasks: ${it.stackTraceToString()}")
-    }
+    com.reamicro.fix.core.HostWorkBindings.requireCurrent().cancelBackups(tracker, bookId)
 }
 
 internal fun ensureNcxSpineToc(content: String): String {
@@ -463,15 +390,6 @@ internal fun normalizeOnlineChapterText(raw: String): String {
         .joinToString("\n\n")
 }
 
-internal fun onlineCompletionPendingChapter(chapter: OnlineChapter, index: Int): OnlineDownloadedChapter =
-    OnlineDownloadedChapter(
-        title = chapter.title.ifBlank { "第 ${index + 1} 章" },
-        content = "本章正在后台下载中。\n\n退出本书后重新进入，可刷新已经下载完成的正文。",
-        volumeTitle = chapter.volumeTitle,
-        level = chapter.level,
-        sourceUrl = chapter.url,
-    )
-
 internal fun onlineCompletionOnDemandPendingChapter(
     chapter: OnlineChapter,
     index: Int,
@@ -483,31 +401,89 @@ internal fun onlineCompletionOnDemandPendingChapter(
     sourceUrl = chapter.url,
 )
 
-internal fun writeOnlineCompletionTextAtomically(target: File, content: String) {
-    writeOnlineCompletionBytesAtomically(target, content.toByteArray(Charsets.UTF_8))
+internal fun onlineCompletionPausedPendingChapter(
+    chapter: OnlineChapter,
+    index: Int,
+): OnlineDownloadedChapter = OnlineDownloadedChapter(
+    title = chapter.title.ifBlank { "第 ${index + 1} 章" },
+    content = "本章尚未下载。\n\n返回书架，长按本书并选择更新，可继续下载。",
+    volumeTitle = chapter.volumeTitle,
+    level = chapter.level,
+    sourceUrl = chapter.url,
+)
+
+internal fun writeOnlineCompletionTextAtomically(target: File, content: String, checkCurrent: () -> Unit) {
+    writeOnlineCompletionTextAtomically(target, content, commit = { it() }, checkCurrent = checkCurrent)
 }
 
-internal fun writeOnlineCompletionBytesAtomically(target: File, content: ByteArray) {
-    val parent = target.parentFile ?: error("EPUB target directory missing: ${target.name}")
-    parent.mkdirs()
-    val temp = File(
-        parent,
-        ".${target.name}.tmp-${Thread.currentThread().id}-${System.nanoTime()}",
-    )
-    temp.writeBytes(content)
+internal fun writeOnlineCompletionTextAtomically(
+    target: File,
+    content: String,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
+) {
+    writeOnlineCompletionBytesAtomically(target, content.toByteArray(Charsets.UTF_8), commit, checkCurrent)
+}
+
+internal fun writeOnlineCompletionBytesAtomically(target: File, content: ByteArray, checkCurrent: () -> Unit) {
+    writeOnlineCompletionBytesAtomically(target, content, commit = { it() }, checkCurrent = checkCurrent)
+}
+
+internal fun writeOnlineCompletionBytesAtomically(
+    target: File,
+    content: ByteArray,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
+) {
+    checkCurrent()
+    val parent = target.absoluteFile.parentFile ?: error("EPUB target directory missing: ${target.name}")
+    commit {
+        checkCurrent()
+        require(parent.isDirectory || parent.mkdirs()) { "EPUB target directory unavailable: ${target.name}" }
+    }
+    val previous = target.takeIf { it.exists() }?.let(com.reamicro.fix.epub.editor.VerifiedFileIO::digest)
+    val hash = java.security.MessageDigest.getInstance("SHA-256")
+    val temp = File.createTempFile(".reamicro-online-", ".tmp", parent)
     try {
-        Files.move(
-            temp.toPath(),
-            target.toPath(),
-            StandardCopyOption.ATOMIC_MOVE,
-            StandardCopyOption.REPLACE_EXISTING,
+        temp.outputStream().use { output ->
+            var from = 0
+            while (from < content.size) {
+                checkCurrent()
+                val count = minOf(64 * 1024, content.size - from)
+                output.write(content, from, count)
+                hash.update(content, from, count)
+                from += count
+            }
+            output.fd.sync()
+        }
+        val expected = com.reamicro.fix.epub.editor.VerifiedFileIO.Digest(
+            content.size.toLong(), hash.digest().joinToString("") { "%02x".format(it.toInt() and 255) },
         )
-    } catch (_: Exception) {
-        Files.move(
-            temp.toPath(),
-            target.toPath(),
-            StandardCopyOption.REPLACE_EXISTING,
-        )
+        check(com.reamicro.fix.epub.editor.VerifiedFileIO.digest(temp) == expected) {
+            "EPUB staged bytes changed before commit"
+        }
+        checkCurrent()
+        check(if (previous == null) !target.exists() else com.reamicro.fix.epub.editor.VerifiedFileIO.digest(target) == previous) {
+            "EPUB target changed before commit"
+        }
+        var committed = false
+        commit {
+            check(!committed) { "EPUB staged bytes were already committed" }
+            checkCurrent()
+            check(if (previous == null) !target.exists() else com.reamicro.fix.epub.editor.VerifiedFileIO.digest(target) == previous) {
+                "EPUB target changed while waiting for commit"
+            }
+            try {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+            committed = true
+        }
+        check(committed) { "EPUB staged bytes were not committed" }
+        com.reamicro.fix.epub.editor.VerifiedFileIO.requireMatches(target, expected)
+    } finally {
+        temp.delete()
     }
 }
 
@@ -576,12 +552,14 @@ internal fun writeOnlineCompletionChapterIndex(
     target: OnlineDownloadTarget,
     chapters: List<OnlineChapter>,
     chapterHrefs: List<String>,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
 ): Boolean {
+    checkCurrent()
     val file = onlineCompletionChapterIndexFile(bookDir)
     val content = onlineCompletionChapterIndexJson(target, chapters, chapterHrefs)
     if (file.isFile && file.readText(Charsets.UTF_8) == content) return false
-    file.parentFile?.mkdirs()
-    file.writeText(content, Charsets.UTF_8)
+    writeOnlineCompletionTextAtomically(file, content, commit = commit, checkCurrent = checkCurrent)
     return true
 }
 
@@ -625,14 +603,17 @@ internal fun writeOnlineCompletionFailedChapters(
     bookDir: File,
     target: OnlineDownloadTarget,
     failures: List<OnlineFailedChapter>,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
 ) {
+    checkCurrent()
     val file = onlineCompletionFailedLogFile(bookDir)
     if (failures.isEmpty()) {
-        if (file.exists()) file.delete()
+        commit { checkCurrent(); if (file.exists()) file.delete() }
         return
     }
-    file.parentFile?.mkdirs()
-    file.writeText(onlineCompletionFailedChaptersJson(target, failures), Charsets.UTF_8)
+    writeOnlineCompletionTextAtomically(file, onlineCompletionFailedChaptersJson(target, failures),
+        commit = commit, checkCurrent = checkCurrent)
     logWebDav(
         "online completion failed chapter log written book=${target.result.name} " +
             "count=${failures.size} path=${file.absolutePath}",
@@ -643,12 +624,15 @@ internal fun mergeOnlineCompletionFailedChapters(
     bookDir: File,
     target: OnlineDownloadTarget,
     failures: List<OnlineFailedChapter>,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
 ) {
+    checkCurrent()
     val merged = (readOnlineCompletionFailedChapters(bookDir) + failures)
         .associateBy { it.index }
         .values
         .sortedBy { it.index }
-    writeOnlineCompletionFailedChapters(bookDir, target, merged)
+    writeOnlineCompletionFailedChapters(bookDir, target, merged, commit = commit, checkCurrent = checkCurrent)
 }
 
 internal fun onlineCompletionFailedChaptersJson(
@@ -684,38 +668,6 @@ internal fun onlineCompletionFailedChaptersJson(
         .toString(2)
 }
 
-internal fun unzipOnlineCompletionEpub(file: File): File {
-    val outputDir = File(
-        file.parentFile ?: file.absoluteFile.parentFile ?: File("/data/local/tmp"),
-        "${file.nameWithoutExtension}_unzipped",
-    )
-    if (outputDir.exists()) outputDir.deleteRecursively()
-    outputDir.mkdirs()
-    val root = outputDir.canonicalFile
-    ZipInputStream(BufferedInputStream(file.inputStream())).use { zip ->
-        while (true) {
-            val entry = zip.nextEntry ?: break
-            try {
-                val target = File(root, entry.name).canonicalFile
-                val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
-                if (target != root && !target.path.startsWith(rootPrefix)) {
-                    error("EPUB entry escapes output dir: ${entry.name}")
-                }
-                if (entry.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    target.parentFile?.mkdirs()
-                    target.outputStream().buffered().use { out -> zip.copyTo(out) }
-                }
-            } finally {
-                zip.closeEntry()
-            }
-        }
-    }
-    logWebDav("online completion epub unzipped dir=${outputDir.absolutePath}")
-    return outputDir
-}
-
 internal fun cancelOnlineCompletionNotification(context: Context, id: Int, key: String) {
     cancelOnlineCompletionHostNotification(context, id)
     sendOnlineCompletionCancelBroadcastToModule(context, id, key)
@@ -737,56 +689,11 @@ internal fun importCacheFile(cacheDir: File?, root: String, fileName: String): F
         fileName.safeWebDavFileName(),
     )
 
-internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? {
+internal fun enqueueNativeImport(workerManager: Any, platformFile: Any): Any? =
+    com.reamicro.fix.core.HostWorkBindings.requireCurrent().method("import").invoke(workerManager, platformFile, null, false)
 
-    val candidates = (workerManager.javaClass.methods.asSequence() +
-        workerManager.javaClass.declaredMethods.asSequence())
-        .filter { it.hostNameMatches(WORKER_ENQUEUE_IMPORT_METHOD) }
-        .distinct()
-        .toList()
-
-    candidates.firstOrNull { it.parameterTypes.size == 1 }?.let {
-        it.isAccessible = true
-        return it.invoke(workerManager, platformFile)
-    }
-
-    candidates.firstOrNull {
-        it.parameterTypes.size == 2 &&
-            (it.parameterTypes[1] == java.lang.Boolean.TYPE || it.parameterTypes[1] == java.lang.Boolean::class.java)
-    }?.let {
-        it.isAccessible = true
-        return it.invoke(workerManager, platformFile, false)
-    }
-
-    candidates.firstOrNull {
-        it.parameterTypes.size == 3 &&
-            it.parameterTypes[1] == String::class.java &&
-            (it.parameterTypes[2] == java.lang.Boolean.TYPE || it.parameterTypes[2] == java.lang.Boolean::class.java)
-    }?.let {
-        it.isAccessible = true
-        return it.invoke(workerManager, platformFile, null, false)
-    }
-
-    val fallback = candidates.minByOrNull { it.parameterTypes.size }
-        ?: error("WorkerManager.$WORKER_ENQUEUE_IMPORT_METHOD not found")
-    fallback.isAccessible = true
-    val args = fallback.parameterTypes.mapIndexed { index, type ->
-        when {
-            index == 0 -> platformFile
-            type == java.lang.Boolean.TYPE || type == java.lang.Boolean::class.java -> false
-            else -> null
-        }
-    }.toTypedArray()
-    return fallback.invoke(workerManager, *args)
+internal fun findImportBookMethod(bookshelf: Any): Method {
+    val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.imports) { "Native import contract unavailable" }
+    check(host.type("repository").isInstance(bookshelf))
+    return host.method("normal")
 }
-
-internal fun findImportBookMethod(bookshelf: Any): Method =
-    (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-        .filter {
-            it.hostNameMatches(BOOKSHELF_IMPORT_BOOK_METHOD) &&
-                it.parameterTypes.size >= 6 &&
-                typeMatches(it.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS)
-        }
-        .minByOrNull { it.parameterTypes.size }
-        ?.apply { isAccessible = true }
-        ?: error("阅微 importBook 方法未找到")

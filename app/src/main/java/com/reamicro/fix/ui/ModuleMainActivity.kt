@@ -8,6 +8,7 @@ import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
 import android.content.Context
 import androidx.annotation.StringRes
+import androidx.annotation.PluralsRes
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -16,7 +17,6 @@ import android.Manifest
 import android.app.ActivityManager
 import android.app.UiModeManager
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
@@ -33,6 +33,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.text.input.TextFieldState
@@ -40,9 +44,7 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.horizontalDrag
@@ -51,18 +53,24 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.captionBar
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -76,6 +84,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -88,6 +97,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
@@ -102,15 +112,19 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -121,6 +135,10 @@ import com.reamicro.fix.cloud.local.AutoReadTimeLock
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskRunner
 import com.reamicro.fix.cloud.local.LocalTaskStore
+import com.reamicro.fix.cloud.local.localTaskFromJson
+import com.reamicro.fix.cloud.local.localTaskRecordFromJson
+import com.reamicro.fix.cloud.local.localTaskRuntimeState
+import com.reamicro.fix.cloud.local.nextLocalTaskAt
 import com.reamicro.fix.cloud.root.RootModuleStatus
 import com.reamicro.fix.cloud.root.RootTaskBridge
 import com.reamicro.fix.hook.CLOUD_AUTOMATION_TASKS
@@ -130,32 +148,24 @@ import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.notification.CloudTaskNotifications
 import com.reamicro.fix.notification.NotificationRecordStore
 import com.reamicro.fix.notification.cloudTaskQualityColor
+import org.json.JSONArray
 import org.json.JSONObject
-import top.yukonga.miuix.kmp.basic.Button
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Checkbox
-import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.ScrollBehavior
-import top.yukonga.miuix.kmp.basic.NavigationBar
-import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.PullToRefresh
+import top.yukonga.miuix.kmp.basic.RefreshState
+import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TopAppBar
-import top.yukonga.miuix.kmp.blur.BlendColorEntry
-import top.yukonga.miuix.kmp.blur.BlurColors
-import top.yukonga.miuix.kmp.blur.blendColors
-import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
-import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
-import top.yukonga.miuix.kmp.blur.textureBlur
-import top.yukonga.miuix.kmp.window.WindowDialog
+import top.yukonga.miuix.kmp.integration.captureBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Info
@@ -163,21 +173,28 @@ import top.yukonga.miuix.kmp.icon.extended.Play
 import top.yukonga.miuix.kmp.icon.extended.Recent
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tasks
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
+import top.yukonga.miuix.kmp.icon.glass.Info
+import top.yukonga.miuix.kmp.icon.glass.Recent
+import top.yukonga.miuix.kmp.icon.glass.Settings
+import top.yukonga.miuix.kmp.icon.glass.Tasks
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PagerFlingTrackerConnection
 import top.yukonga.miuix.kmp.utils.PagerGestureNestedScrollConnection
 import top.yukonga.miuix.kmp.utils.PagerInterceptionMode
 import top.yukonga.miuix.kmp.utils.PagerNavigationSpringSpec
-import top.yukonga.miuix.kmp.utils.overScrollVertical
-import top.yukonga.miuix.kmp.utils.pagerGestureOverride
 import top.yukonga.miuix.kmp.utils.springAnimateToPage
+import top.yukonga.miuix.kmp.utils.overScrollHorizontal
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
-import org.lsposed.hiddenapibypass.HiddenApiBypass
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -192,6 +209,18 @@ class ModuleMainActivity : ComponentActivity() {
     private val tab = mutableIntStateOf(TAB_RECORDS)
 
     private val recordsState = mutableStateOf<List<Pair<String, LocalTaskRecord>>>(emptyList())
+    private val recordRows = mutableStateOf<List<ModuleRecordRow>>(emptyList())
+    private var recordsSelecting by mutableStateOf(false)
+    private var selectedRecordKeys by mutableStateOf<Set<String>>(emptySet())
+    private var deletingRecordKeys by mutableStateOf<Set<String>>(emptySet())
+    private var exitingRecordKeys by mutableStateOf<Set<String>>(emptySet())
+    private var recordsDeleteConfirmation by mutableStateOf(false)
+    private var recordsDeleting by mutableStateOf(false)
+    private var taskDragging by mutableStateOf(false)
+    private var taskSortPopupOpen by mutableStateOf(false)
+    private var taskOrder by mutableStateOf(ModuleTaskOrder())
+    private val taskOrderPreferences by lazy { ModuleTaskOrderPreferences(getSharedPreferences(UI_PREFS, MODE_PRIVATE)) }
+    private var recordDeletionError by mutableStateOf(false)
     private val failedCount = mutableIntStateOf(0)
     private val taskRows = mutableStateOf<List<TaskRow>>(emptyList())
     private val accountCount = mutableIntStateOf(0)
@@ -218,6 +247,8 @@ class ModuleMainActivity : ComponentActivity() {
 
     private fun uiText(@StringRes id: Int, vararg args: Any): String =
         if (args.isEmpty()) uiContext.getString(id) else uiContext.getString(id, *args)
+    private fun uiQuantity(@PluralsRes id: Int, count: Int): String =
+        uiContext.resources.getQuantityString(id, count, count)
     private val notificationSummary = mutableStateOf("")
     private val logSummary = mutableStateOf("")
     private val rootUi = mutableStateOf<RootModuleStatus?>(null)
@@ -234,23 +265,16 @@ class ModuleMainActivity : ComponentActivity() {
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         toast(uiText(if (granted) R.string.toast_notification_granted else R.string.permission_notification_denied))
         refresh()
-        refresh()
     }
 
     private val aboutEffectResumed = mutableStateOf(false)
-    private val blurBars = mutableStateOf(false)
-
-    private val floatingNavBar = mutableStateOf(false)
-
-    private val liquidGlass = mutableStateOf(true)
-
-    private val themeMode = mutableIntStateOf(THEME_FOLLOW_SYSTEM)
-
-    private val pagerGestureMode = mutableIntStateOf(PagerInterceptionMode.CrossAxisInterceptor.ordinal)
+    private var themeConfig by mutableStateOf(ModuleThemeConfig())
+    private val themePreferences by lazy { ModuleThemePreferences(getSharedPreferences(UI_PREFS, MODE_PRIVATE)) }
+    private var appliedThemeSurface: Int? = null
 
     private val swipeBack = mutableStateOf(true)
 
-    private val predictiveBack = mutableStateOf(false)
+    private var predictiveBackMode by mutableStateOf(ModulePredictiveBackMode.Off)
 
     private val textDialog = mutableStateOf<TextDialogUi?>(null)
     private val editorDialog = mutableStateOf<TaskEditor?>(null)
@@ -258,8 +282,22 @@ class ModuleMainActivity : ComponentActivity() {
     private val recordsNavigationRequest = mutableIntStateOf(0)
 
     private val splashExit = ModuleSplashExit(this)
+    private val uiRefreshLifetime = SupervisorJob()
+    private val uiRefreshScope = CoroutineScope(uiRefreshLifetime + Dispatchers.Main.immediate)
+    private val uiRefresh by lazy {
+        ModuleUiRefresh(
+            scope = uiRefreshScope,
+            read = {
+                val context = uiContext
+                withContext(Dispatchers.IO) { readUiData(context) }
+            },
+            apply = ::applyUiData,
+            onError = { ModuleAndroidLog.error(LOG_TAG, "Failed to refresh local task UI", it) },
+        )
+    }
 
     override fun onDestroy() {
+        uiRefreshLifetime.cancel()
         splashExit.dispose()
         super.onDestroy()
     }
@@ -271,14 +309,19 @@ class ModuleMainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ModuleLogBuffer.attach(this)
         tab.intValue = savedInstanceState?.getInt(STATE_TAB, TAB_RECORDS) ?: TAB_RECORDS
-        themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
-        syncApplicationNightMode(themeMode.intValue)
+        themeConfig = themePreferences.read()
+        taskOrder = taskOrderPreferences.read()
+        recordsSelecting = savedInstanceState?.getBoolean(STATE_RECORD_SELECTION, false) ?: false
+        selectedRecordKeys = savedInstanceState?.getStringArrayList(STATE_SELECTED_RECORDS)?.toSet().orEmpty()
+        syncApplicationNightMode(themeConfig.nightMode)
 
-        applyPredictiveBack(uiPrefBoolean(KEY_PREDICTIVE_BACK))
+        predictiveBackMode = ModulePredictiveBackMode.read(getSharedPreferences(UI_PREFS, MODE_PRIVATE).all)
+        hideRecentTask.value = hideRecentTaskEnabled()
+        swipeBack.value = uiPrefBoolean(KEY_SWIPE_BACK, true)
 
         applyLauncherIconResult(launcherIcons.restore())
         updateLanguageContext()
-        window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
+        window?.setBackgroundDrawable(ColorDrawable(windowThemeSurface()))
         ModuleAndroidLog.legacy(LOG_TAG, "module main ui opened")
 
         consumeNavigationIntent(intent)
@@ -290,16 +333,34 @@ class ModuleMainActivity : ComponentActivity() {
                 LocalLayoutDirection provides if (localizedContext.resources.configuration.layoutDirection == android.view.View.LAYOUT_DIRECTION_RTL)
                     LayoutDirection.Rtl else LayoutDirection.Ltr,
                 LocalConfiguration provides Configuration(localizedContext.resources.configuration),
+                LocalModuleWindowGestures provides ModuleWindowGestureSettings(predictiveBackMode, swipeBack.value),
             ) {
-                val dark = resolveDark(themeMode.intValue)
+                val dark = themeConfig.isDark(isNightMode())
                 ImmersiveSystemBars(dark)
                 SystemBarAppearance(dark)
-                MiuixTheme(colors = if (dark) darkColorScheme() else lightColorScheme()) {
-                    ModuleApp()
+                ModuleAppTheme(config = themeConfig, dark = dark) {
+                    ThemeWindowSurface()
+                    ModulePredictiveBackScope(animated = predictiveBackMode.enabled) {
+                        ModuleApp()
+                    }
                 }
             }
         }
     }
+
+    @Composable
+    private fun ThemeWindowSurface() {
+        val color = MiuixTheme.colorScheme.surface.toArgb()
+        SideEffect {
+            if (appliedThemeSurface != color) {
+                appliedThemeSurface = color
+                window.setBackgroundDrawable(ColorDrawable(color))
+            }
+        }
+    }
+
+    private fun windowThemeSurface(): Int = appliedThemeSurface
+        ?: if (themeConfig.isDark(isNightMode())) DARK_WINDOW_BG else LIGHT_WINDOW_BG
 
     @Composable
     private fun ImmersiveSystemBars(dark: Boolean) {
@@ -357,6 +418,7 @@ class ModuleMainActivity : ComponentActivity() {
     override fun onPause() {
         aboutEffectResumed.value = false
         unregisterRecordObservers()
+        uiRefresh.cancelPending()
         super.onPause()
     }
     override fun onUserLeaveHint() {
@@ -418,113 +480,190 @@ class ModuleMainActivity : ComponentActivity() {
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
     private fun refresh() {
-        val context = applicationContext
-        rootEnhancementEnabled.value = RootTaskBridge.isEnabled(context)
-        val store = LocalTaskStore { context }
-        val recordsList = store.accountIds()
-            .flatMap { accountId -> store.records(accountId).map { accountId to it } }
-            .sortedByDescending { (_, record) -> record.at }
-        recordsState.value = recordsList
-        failedCount.intValue = recordsList.count { (_, record) -> record.result != "success" }
+        if (observingRecords && !isFinishing && !isDestroyed) uiRefresh.request()
+    }
 
-        val tasks = store.accountIds().flatMap { accountId -> store.list(accountId).map { accountId to it } }
-        accountCount.intValue = store.accountIds().size
-        taskRows.value = tasks.map { (accountId, task) ->
-            TaskRow(accountId, task, specOf(task.taskType), taskSubtitle(accountId, task))
+    private fun readUiData(context: Context): UiData {
+        val store = LocalTaskStore { applicationContext }
+        // Read each account once. Its task state and records then come from the same
+        // preference snapshot instead of reparsing its full history for every task.
+        val accounts = store.snapshotPayload(recordLimit = LocalTaskStore.MAX_RECORDS).getJSONObject("accounts")
+        val accountIds = accounts.keys().asSequence().toList()
+        val accountRecords = accountIds.associateWith { accountId ->
+            val records = accounts.getJSONObject(accountId).optJSONArray("records") ?: JSONArray()
+            (0 until records.length()).mapNotNull { index ->
+                records.optJSONObject(index)?.let(::localTaskRecordFromJson)
+            }.sortedByDescending { it.at }
         }
-        overviewText.value = buildOverviewText(store)
-
-        hideRecentTask.value = hideRecentTaskEnabled()
-
-        applyLauncherIconResult(launcherIcons.inspect(), notify = false)
-        blurBars.value = uiPrefBoolean(KEY_BLUR_BARS)
-        floatingNavBar.value = uiPrefBoolean(KEY_FLOATING_NAV_BAR)
-
-        liquidGlass.value = uiPrefBoolean(KEY_LIQUID_GLASS, true)
-        themeMode.intValue = uiPrefInt(KEY_THEME_MODE).coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
-        pagerGestureMode.intValue = uiPrefInt(KEY_PAGER_GESTURE, PagerInterceptionMode.CrossAxisInterceptor.ordinal)
-            .coerceIn(0, PagerInterceptionMode.entries.lastIndex)
-        swipeBack.value = uiPrefBoolean(KEY_SWIPE_BACK, true)
-        predictiveBack.value = uiPrefBoolean(KEY_PREDICTIVE_BACK)
-
+        val recordsList = accountIds
+            .flatMap { accountId -> accountRecords.getValue(accountId).map { accountId to it } }
+            .sortedByDescending { (_, record) -> record.at }
+        val now = System.currentTimeMillis()
+        val rows = accountIds.flatMap { accountId ->
+            val tasks = accounts.getJSONObject(accountId).getJSONObject("tasks")
+            val checkin = tasks.optJSONObject("yeshe_checkin") ?: JSONObject()
+            tasks.keys().asSequence().mapNotNull { type ->
+                val rawTask = tasks.optJSONObject(type) ?: return@mapNotNull null
+                val task = localTaskFromJson(type, rawTask)
+                val state = localTaskRuntimeState(rawTask)
+                val spec = specOf(task.taskType)
+                val effectiveNext = nextLocalTaskAt(task, state, checkin, now) ?: 0L
+                TaskRow(
+                    accountId, task, spec,
+                    moduleTaskSubtitle(context, task, spec, state, accountRecords.getValue(accountId), effectiveNext),
+                    effectiveNext,
+                )
+            }.toList()
+        }
+        val rootEnabled = RootTaskBridge.isEnabled(applicationContext)
+        val next = rows.asSequence()
+            .filter { it.task.enabled && it.effectiveNextRunAt > now }.minOfOrNull { it.effectiveNextRunAt }
+            ?.let { SimpleDateFormat("MM-dd HH:mm", context.resources.configuration.locales[0]).format(Date(it)) }
+            ?: context.getString(R.string.common_none)
+        val overview = context.getString(R.string.task_overview_body, accountIds.size, rows.count { it.task.enabled }, next) +
+            if (!rootEnabled) "\n" + context.getString(R.string.root_manual_only) else ""
         val notifications = NotificationRecordStore { context }.list()
-        notificationSummary.value = if (notifications.isEmpty()) {
-            uiText(R.string.notification_empty_summary)
+        val notificationText = if (notifications.isEmpty()) {
+            context.getString(R.string.notification_empty_summary)
         } else {
             val delivered = notifications.count { it.delivered }
-            uiText(R.string.notification_summary, notifications.size, delivered, notifications.size - delivered)
+            context.getString(R.string.notification_summary, notifications.size, delivered, notifications.size - delivered)
         }
         val logs = ModuleLogBuffer.snapshot()
         val path = ModuleLogBuffer.filePath()
-        logSummary.value = uiText(R.string.log_summary, logs.size,
-            path?.let { uiText(R.string.log_file_path, it) } ?: uiText(R.string.log_file_unavailable))
+        val logText = context.getString(R.string.log_summary, logs.size,
+            path?.let { context.getString(R.string.log_file_path, it) } ?: context.getString(R.string.log_file_unavailable))
+        return UiData(
+            recordsList, recordsList.count { (_, record) -> record.result != "success" },
+            rows, accountIds.size, rootEnabled, overview, notificationText, logText,
+        )
     }
 
-    private fun buildOverviewText(store: LocalTaskStore): String {
-        val configured = taskRows.value.count { it.task.enabled }
-        val next = futureNextRunAt(store)?.let(::formatTime) ?: uiText(R.string.common_none)
-        return uiText(R.string.task_overview_body, accountCount.intValue, configured, next) +
-            if (!rootEnhancementEnabled.value) "\n" + uiText(R.string.root_manual_only) else ""
+    private fun readTaskRow(store: LocalTaskStore, accountId: String, taskType: String): TaskRow {
+        val task = checkNotNull(store.get(accountId, taskType)) { "任务不存在，请刷新后重试" }
+        val spec = specOf(taskType)
+        val state = store.runtimeState(accountId, taskType)
+        val effectiveNext = nextLocalTaskAt(
+            task, state,
+            store.runtimeState(accountId, "yeshe_checkin"), System.currentTimeMillis(),
+        ) ?: 0L
+        return TaskRow(
+            accountId, task, spec,
+            moduleTaskSubtitle(uiContext, task, spec, state, store.records(accountId), effectiveNext),
+            effectiveNext,
+        )
     }
 
-    private fun taskSubtitle(accountId: String, task: LocalTask): String {
-        val spec = specOf(task.taskType)
-        return buildString {
-            if (spec != null && spec.blessingOptions.isNotEmpty()) {
-                append(uiText(R.string.task_blessing_summary, blessingLabel(task.blessingType)))
-                append('\n')
-            }
-            append(nextRunLine(accountId, task, spec))
-            if (task.lastMessage.isNotBlank()) {
-                append('\n')
-                append(task.lastMessage)
-            }
+    private fun applySavedTask(row: TaskRow) {
+        taskRows.value = taskRows.value.map {
+            if (it.accountId == row.accountId && it.task.taskType == row.task.taskType) row else it
         }
+        refresh()
+        // LocalTaskStore already queues the configuration change. Its confirmed
+        // Root snapshot will notify the preference observer when state changes.
+    }
+
+    private fun applyUiData(data: UiData) {
+        // Keep the displayed multiset frozen through persistence and exit, including identical
+        // records whose occurrence keys will be renumbered after one duplicate is removed.
+        if (!recordsDeleting) {
+            recordRows.value = moduleRecordRows(data.records)
+            recordsState.value = data.records
+            failedCount.intValue = data.failedCount
+            selectedRecordKeys = selectedRecordKeys.intersect(recordRows.value.mapTo(mutableSetOf()) { it.key })
+        }
+        taskRows.value = data.tasks
+        accountCount.intValue = data.accountCount
+        rootEnhancementEnabled.value = data.rootEnabled
+        overviewText.value = data.overview
+        notificationSummary.value = data.notifications
+        logSummary.value = data.logs
     }
 
     @Composable
     private fun ModuleApp() {
         val tabTitles = TAB_TITLE_RES.map { stringResource(it) }
         val pagerState = rememberPagerState(initialPage = tab.intValue, pageCount = { TAB_TITLE_RES.size })
+        val pagerFlingTracker = remember { PagerFlingTrackerConnection() }
         val scope = rememberCoroutineScope()
-        val pagerMode = PagerInterceptionMode.entries.getOrElse(pagerGestureMode.intValue) {
-            PagerInterceptionMode.Native
-        }
-        val interceptPager = pagerMode == PagerInterceptionMode.CrossAxisInterceptor
+        val settings = themeConfig.active
+        val pagerMode = settings.pagerMode
+        val interceptPager = pagerMode == PagerInterceptionMode.CrossAxis
 
         val overlayOpen = textDialog.value != null || editorDialog.value != null || suPathDialog.value != null ||
-            rootModuleDialog.value || rootConfirmation.value != null
-        val userScrollEnabled = !overlayOpen
+            rootModuleDialog.value || rootConfirmation.value != null || recordsDeleteConfirmation
+        val userScrollEnabled = !overlayOpen && !taskDragging && !taskSortPopupOpen && !recordsDeleting
+        BackHandler(enabled = recordsSelecting && !overlayOpen && !recordsDeleting) { exitRecordSelection() }
         LaunchedEffect(pagerState.settledPage) {
             tab.intValue = pagerState.settledPage
         }
         BackHandler(enabled = overlayOpen) { dismissTopOverlay() }
+        LaunchedEffect(pagerState.settledPage) {
+            if (pagerState.settledPage != TAB_RECORDS && !recordsDeleting) exitRecordSelection()
+        }
 
         val scrollBehaviors = List(TAB_TITLE_RES.size) { MiuixScrollBehavior() }
         var pullRefreshing by remember { mutableStateOf(false) }
-        val blurSupported = remember { isRuntimeShaderSupported() }
-        val blurred = blurBars.value && blurSupported
-        val floating = floatingNavBar.value
-        val liquid = floating && liquidGlass.value && blurSupported
-        val surface = MiuixTheme.colorScheme.surface
-        val backdrop = rememberLayerBackdrop {
-            drawRect(surface)
-            drawContent()
+        val pullState = rememberPullToRefreshState()
+        LaunchedEffect(deletingRecordKeys) {
+            val deleted = deletingRecordKeys
+            if (deleted.isNotEmpty()) {
+                delay(140)
+                exitingRecordKeys = deleted
+                delay(280)
+                val remaining = recordRows.value.filterNot { it.key in deleted }
+                recordRows.value = remaining
+                recordsState.value = remaining.map { it.accountId to it.record }
+                failedCount.intValue = remaining.count { it.record.result != "success" }
+                selectedRecordKeys -= deleted
+                deletingRecordKeys = emptySet()
+                exitingRecordKeys = emptySet()
+                recordsDeleting = false
+                if (recordDeletionError) {
+                    recordDeletionError = false
+                    recordsSelecting = true
+                } else exitRecordSelection()
+                refresh()
+            }
         }
-        val barBlurColors = BlurColors(
-            blendColors = listOf(BlendColorEntry(surface.copy(alpha = BAR_TINT_ALPHA))),
-        )
+        val blurSupported = remember { isRuntimeShaderSupported() }
+        val recordBackdrop = themeConfig.needsPageBackdrop(blurSupported)
+        val surface = MiuixTheme.colorScheme.surface
+        // Bodies and chrome have different recording owners so a bar cannot sample itself.
+        val pageBackdrops = List(TAB_TITLE_RES.size) { rememberLayerBackdrop() }
+        val chromeBackdrops = List(TAB_TITLE_RES.size) { rememberLayerBackdrop() }
+        val stablePageBackdrops = remember { pageBackdrops }
+        val stableChromeBackdrops = remember { chromeBackdrops }
+        val aboutState = rememberLazyListState()
+        val aboutMotion = com.reamicro.fix.ui.effect.rememberAboutBrandMotion(aboutState)
+        val aboutEffectState = remember { com.reamicro.fix.ui.effect.BgEffectState() }
+        val recordsState = rememberLazyListState()
+        val tasksListState = rememberLazyListState()
+        val configListState = rememberLazyListState()
+        val launcherListState = rememberLazyListState()
+        val bottomBackdrop = rememberLayerBackdrop()
+        val recordScene = themeConfig.needsSceneBackdrop(blurSupported)
+        val visiblePageIndices = remember(pagerState) {
+            derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.map { it.index }.sorted() }
+        }
+        val visiblePages = remember(pagerState, visiblePageIndices) {
+            {
+                // Sampling must follow every movement frame even while the same two pages stay
+                // visible. The index list itself stays cached and is shared by all consumers.
+                pagerState.currentPageOffsetFraction
+                visiblePageIndices.value
+            }
+        }
+        val backdrop = rememberModulePageBackdrops(stablePageBackdrops, visiblePages)
+        val topBackdrop = rememberModulePageBackdrops(stableChromeBackdrops, visiblePages)
 
         var selectedPage by remember { mutableIntStateOf(tab.intValue.coerceIn(0, TAB_TITLE_RES.lastIndex)) }
         var isNavigating by remember { mutableStateOf(false) }
         var navJob by remember { mutableStateOf<Job?>(null) }
 
-        var contentReady by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) { contentReady = true }
-
-        LaunchedEffect(pagerState.currentPage) {
-            if (!isNavigating && selectedPage != pagerState.currentPage) {
-                selectedPage = pagerState.currentPage
+        LaunchedEffect(pagerState) {
+            snapshotFlow { pagerState.currentPage }.collect { page ->
+                if (!isNavigating && selectedPage != page) selectedPage = page
             }
         }
         LaunchedEffect(recordsNavigationRequest.intValue) {
@@ -537,10 +676,9 @@ class ModuleMainActivity : ComponentActivity() {
             }
         }
         val currentPage = selectedPage.coerceIn(0, TAB_TITLE_RES.lastIndex)
-        val scrollBehavior = scrollBehaviors[currentPage]
 
         val animateToTab: (Int) -> Unit = { index ->
-            if (index != selectedPage) {
+            if (index != selectedPage && !taskDragging && !recordsDeleting && !overlayOpen) {
                 navJob?.cancel()
                 selectedPage = index
                 isNavigating = true
@@ -558,214 +696,227 @@ class ModuleMainActivity : ComponentActivity() {
                 }
             }
         }
-        Scaffold(
-            topBar = {
-
-                if (currentPage != TAB_ABOUT) TopAppBar(
-                    title = tabTitles[currentPage],
-                    largeTitle = tabTitles[currentPage],
-                    scrollBehavior = scrollBehavior,
-                    color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
-                    modifier = if (blurred) {
-                        Modifier.textureBlur(
-                            backdrop = backdrop,
-                            shape = RectangleShape,
-                            blurRadius = BAR_BLUR_RADIUS,
-                            colors = barBlurColors,
-                        )
-                    } else {
-                        Modifier
-                    },
-                )
-            },
-            bottomBar = {
-                if (floating) {
-                    val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 28.dp)
-                            .padding(bottom = if (navInset > 0.dp) 8.dp + navInset else 28.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        FloatingBottomBar(
-
-                            modifier = Modifier.pointerInput(Unit) { detectTapGestures { } },
+        val pageAndTop = com.reamicro.fix.ui.liquid.rememberCombinedBackdrop(backdrop, topBackdrop)
+        val scene = if (settings.showNavigation) {
+            com.reamicro.fix.ui.liquid.rememberCombinedBackdrop(pageAndTop, bottomBackdrop)
+        } else pageAndTop
+        CompositionLocalProvider(LocalModuleSceneBackdrop provides if (recordScene) scene else null) {
+            Scaffold(
+                // The pager pages own their top bars and insets; only the bottom bar is global.
+                contentWindowInsets = WindowInsets.navigationBars.union(WindowInsets.captionBar)
+                    .only(WindowInsetsSides.Bottom),
+                bottomBar = {
+                    Box(Modifier.then(if (recordScene) Modifier.captureBackdrop(bottomBackdrop) else Modifier)) {
+                        ModuleBottomBar(
+                            titles = tabTitles,
+                            os3Icons = TAB_ICONS,
+                            os4Icons = TAB_GLASS_ICONS,
                             selectedIndex = currentPage,
-                            onSelected = animateToTab,
+                            onSelect = animateToTab,
+                            config = themeConfig,
                             backdrop = backdrop,
-                            tabsCount = TAB_ICONS.size,
-                            isBlurEnabled = liquid,
-                        ) { activateTab ->
-                            TAB_ICONS.forEachIndexed { index, icon ->
-                                FloatingBottomBarItem(
-                                    selected = currentPage == index,
-                                    onClick = { activateTab(index) },
-
-                                    modifier = Modifier.defaultMinSize(minWidth = 76.dp),
-                                ) {
-                                    Icon(
-                                        imageVector = icon,
-                                        contentDescription = tabTitles[index],
-                                        tint = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
-                                        modifier = Modifier.size(24.dp),
-                                    )
-                                    Text(
-                                        text = tabTitles[index],
-                                        color = top.yukonga.miuix.kmp.theme.LocalContentColor.current,
-                                        fontSize = 11.sp,
-                                        lineHeight = 14.sp,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        overflow = TextOverflow.Visible,
-                                    )
-                                }
-                            }
-                        }
+                        )
                     }
-                } else {
-                    NavigationBar(
-                        color = if (blurred) Color.Transparent else MiuixTheme.colorScheme.surface,
-                        modifier = if (blurred) {
-                            Modifier.textureBlur(
-                                backdrop = backdrop,
-                                shape = RectangleShape,
-                                blurRadius = BAR_BLUR_RADIUS,
-                                colors = barBlurColors,
-                            )
-                        } else {
-                            Modifier
-                        },
-                    ) {
-                        TAB_ICONS.forEachIndexed { index, icon ->
-                            NavigationBarItem(
-                                selected = currentPage == index,
-                                onClick = { animateToTab(index) },
-                                icon = icon,
-                                label = tabTitles[index],
-                            )
-                        }
-                    }
-                }
-            },
-        ) { padding ->
-            val pagerFling = flingBehavior(
-                state = pagerState,
-                snapAnimationSpec = PagerNavigationSpringSpec,
-            )
-            val pagerModifier = (if (interceptPager) {
-                Modifier.crossAxisPagerWithExclusion(
+                },
+            ) { padding ->
+                val pagerFling = flingBehavior(
+                    state = pagerState,
+                    snapAnimationSpec = PagerNavigationSpringSpec,
+                )
+                val pagerModifier = Modifier.modulePagerGestureOverride(
                     pagerState = pagerState,
+                    flingBehavior = pagerFling,
+                    mode = pagerMode,
                     enabled = userScrollEnabled,
+                    flingTracker = pagerFlingTracker,
                     isExcluded = { position ->
-                        pagerState.currentPage == TAB_CONFIG &&
+                        interceptPager && pagerState.currentPage == TAB_CONFIG &&
                             launcherIconCoordinates?.takeIf { it.isAttached }
                                 ?.boundsInWindow()?.contains(position) == true
                     },
                 )
-            } else {
-                Modifier.pagerGestureOverride(
-                    pagerState = pagerState,
-                    mode = pagerMode,
-                    enabled = userScrollEnabled,
-                )
-            }).then(if (blurred || floating) Modifier.layerBackdrop(backdrop) else Modifier)
-            HorizontalPager(
-                modifier = pagerModifier,
-                state = pagerState,
+                    .fillMaxSize()
+                    .background(surface)
+                    .padding(rememberModuleHorizontalPadding(padding))
+                HorizontalPager(
+                    modifier = pagerModifier,
+                    state = pagerState,
 
-                beyondViewportPageCount = if (contentReady) 3 else 0,
-                userScrollEnabled = userScrollEnabled && !interceptPager,
-                overscrollEffect = null,
-                pageNestedScrollConnection = if (interceptPager) {
-                    PagerGestureNestedScrollConnection
-                } else {
-                    pageNestedScrollConnection(pagerState, Orientation.Horizontal)
-                },
-                flingBehavior = pagerFling,
-            ) { page ->
-                val pageScroll = scrollBehaviors[page]
-                val scrollContent: @Composable () -> Unit = {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .overScrollVertical()
+                    beyondViewportPageCount = 1,
+                    userScrollEnabled = userScrollEnabled && !interceptPager,
+                    overscrollEffect = null,
+                    pageNestedScrollConnection = if (interceptPager) {
+                        PagerGestureNestedScrollConnection
+                    } else {
+                        pageNestedScrollConnection(pagerState, Orientation.Horizontal)
+                    },
+                    flingBehavior = pagerFling,
+                ) { page ->
+                    val pageScroll = scrollBehaviors[page]
+                    val pageBackdrop = pageBackdrops[page]
+                    val pageVisible = remember(pagerState, page) {
+                        derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.any { it.index == page } }
+                    }
+                    // A local Scaffold owns only page chrome. All popups stay in the global host.
+                    Scaffold(
+                        modifier = Modifier.fillMaxSize(),
+                        containerColor = Color.Transparent,
+                        contentWindowInsets = WindowInsets.navigationBars.union(WindowInsets.displayCutout)
+                            .only(WindowInsetsSides.Horizontal),
+                        popupHost = {},
+                        topBar = {
+                            if (page != TAB_ABOUT) {
+                                Box(Modifier.then(
+                                    if (recordScene) Modifier.captureBackdrop(chromeBackdrops[page]) {
+                                        pageVisible.value
+                                    } else Modifier,
+                                )) {
+                                    ModuleTopBar(
+                                        title = if (page == TAB_RECORDS && recordsSelecting) {
+                                            uiQuantity(R.plurals.records_selected_count, selectedRecordKeys.size)
+                                        } else tabTitles[page],
+                                        scrollBehavior = pageScroll,
+                                        config = themeConfig,
+                                        backdrop = pageBackdrop,
+                                        navigationIcon = {
+                                            if (page == TAB_RECORDS && recordsSelecting) {
+                                                ModuleToolbarAction(
+                                                    icon = ModuleActionIcon.Close,
+                                                    description = uiText(R.string.records_selection_exit),
+                                                    onClick = ::exitRecordSelection,
+                                                    enabled = !recordsDeleting,
+                                                )
+                                            }
+                                        },
+                                        actions = {
+                                            if (page == TAB_RECORDS && recordsSelecting) {
+                                                val allSelected = recordRows.value.isNotEmpty() &&
+                                                    selectedRecordKeys.size == recordRows.value.size
+                                                ModuleToolbarAction(
+                                                    icon = ModuleActionIcon.SelectAll,
+                                                    description = uiText(if (allSelected) R.string.records_deselect_all else R.string.records_select_all),
+                                                    onClick = {
+                                                        selectedRecordKeys = if (allSelected) emptySet()
+                                                        else recordRows.value.mapTo(linkedSetOf()) { it.key }
+                                                    },
+                                                    enabled = !recordsDeleting,
+                                                )
+                                                ModuleToolbarAction(
+                                                    icon = ModuleActionIcon.Delete,
+                                                    description = uiText(R.string.records_delete_action),
+                                                    onClick = { recordsDeleteConfirmation = true },
+                                                    enabled = selectedRecordKeys.isNotEmpty() && !recordsDeleting,
+                                                    tint = MiuixTheme.colorScheme.error,
+                                                )
+                                            } else if (page == TAB_TASKS) {
+                                                ModuleTaskSortAction(
+                                                    mode = taskOrder.mode,
+                                                    onSelect = ::setTaskSortMode,
+                                                    enabled = taskRows.value.isNotEmpty() &&
+                                                        !overlayOpen && !taskDragging && !pullRefreshing,
+                                                    canActivate = page == currentPage && pagerState.settledPage == TAB_TASKS &&
+                                                        !isNavigating && !pagerState.isScrollInProgress &&
+                                                        !overlayOpen && !taskDragging && !pullRefreshing,
+                                                    onExpandedChange = { taskSortPopupOpen = it },
+                                                )
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        },
+                    ) { pagePadding ->
+                        val listPadding = rememberModulePagePadding(pagePadding, padding)
+                        Box(
+                            Modifier.fillMaxSize()
+                                .then(if (recordBackdrop) Modifier.captureBackdrop(pageBackdrop) {
+                                    pageVisible.value
+                                } else Modifier)
+                                .background(surface)
+                                .padding(rememberModuleHorizontalPadding(pagePadding)),
+                        ) {
+                            if (page == TAB_TASKS) {
+                                PullToRefresh(
+                                    isRefreshing = pullRefreshing,
+                                    pullToRefreshState = pullState,
+                                    onRefresh = {
+                                        if (!taskDragging) {
+                                            pullRefreshing = true
+                                            recomputeSchedule { pullRefreshing = false }
+                                        }
+                                    },
+                                    refreshTexts = listOf(uiText(R.string.refresh_pull), uiText(R.string.refresh_release), uiText(R.string.refresh_running), uiText(R.string.refresh_success)),
+                                    contentPadding = pagePadding,
+                                    topAppBarScrollBehavior = pageScroll,
+                                ) {
+                                    TasksPage(
+                                        contentPadding = listPadding,
+                                        listState = tasksListState,
+                                        canStartDrag = {
+                                            currentPage == TAB_TASKS && pagerState.settledPage == TAB_TASKS &&
+                                                !pagerState.isScrollInProgress && !isNavigating && !overlayOpen &&
+                                                !pullRefreshing && !taskSortPopupOpen && !recordsDeleting &&
+                                                pullState.refreshState == RefreshState.Idle &&
+                                                kotlin.math.abs(pullState.dragOffset) < 0.5f
+                                        },
+                                    )
+                                }
+                            } else if (page == TAB_RECORDS) {
 
-                            .then(if (page == TAB_ABOUT) Modifier else Modifier.nestedScroll(pageScroll.nestedScrollConnection))
-                            .verticalScroll(rememberScrollState(), overscrollEffect = null)
-                            .padding(top = if (page == TAB_ABOUT) {
-                                WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-                            } else padding.calculateTopPadding())
-                            .padding(top = if (page == TAB_ABOUT) 0.dp else 4.dp, bottom = 4.dp),
-                    ) {
+                                RecordsPage(
+                                    contentPadding = listPadding,
+                                    scrollBehavior = pageScroll,
+                                    listState = recordsState,
+                                )
+                            } else if (page == TAB_ABOUT) {
 
-                        if (contentReady || page == currentPage) {
-                            when (page) {
-                                TAB_TASKS -> TasksPage()
-                                TAB_CONFIG -> ConfigPage()
-                                else -> {}
+                                val aboutVisible by remember(pagerState) {
+                                    derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.any { it.index == TAB_ABOUT } }
+                                }
+                                val aboutPlaying by remember(pagerState, isNavigating, blurSupported) {
+                                    derivedStateOf {
+                                        blurSupported && aboutEffectResumed.value &&
+                                            pagerState.currentPage == TAB_ABOUT && !isNavigating &&
+                                            !pagerState.isScrollInProgress && pagerState.settledPage == TAB_ABOUT
+                                    }
+                                }
+                                AboutPage(
+                                    playing = aboutPlaying,
+                                    bottomPadding = padding.calculateBottomPadding(),
+                                    listState = aboutState,
+                                    prepareEffect = aboutVisible,
+                                    motion = aboutMotion,
+                                    effectState = aboutEffectState,
+                                )
+                            } else {
+                                ConfigPage(
+                                    contentPadding = listPadding,
+                                    scrollBehavior = pageScroll,
+                                    listState = configListState,
+                                    launcherListState = launcherListState,
+                                )
                             }
                         }
-                        Spacer(Modifier.height(padding.calculateBottomPadding()))
-                        Spacer(Modifier.height(4.dp))
                     }
                 }
-                if (page == TAB_TASKS) {
-                    PullToRefresh(
-                        isRefreshing = pullRefreshing,
-                        onRefresh = {
-                            pullRefreshing = true
-                            recomputeSchedule { pullRefreshing = false }
-                        },
-                        refreshTexts = listOf(uiText(R.string.refresh_pull), uiText(R.string.refresh_release), uiText(R.string.refresh_running), uiText(R.string.refresh_success)),
-                        contentPadding = PaddingValues(top = padding.calculateTopPadding()),
-                        topAppBarScrollBehavior = pageScroll,
-                    ) {
-                        scrollContent()
-                    }
-                } else if (page == TAB_RECORDS) {
-
-                    RecordsPage(
-                        topPadding = padding.calculateTopPadding(),
-                        bottomPadding = padding.calculateBottomPadding(),
-                        scrollBehavior = pageScroll,
-                    )
-                } else if (page == TAB_ABOUT) {
-
-                    val aboutPlaying by remember(pagerState, currentPage, isNavigating, blurSupported) {
-                        derivedStateOf {
-                            blurSupported && aboutEffectResumed.value &&
-                                currentPage == TAB_ABOUT && !isNavigating &&
-                                !pagerState.isScrollInProgress && pagerState.settledPage == TAB_ABOUT
-                        }
-                    }
-                    AboutPage(
-                        playing = aboutPlaying,
-                        bottomPadding = padding.calculateBottomPadding(),
-                    )
-                } else {
-                    scrollContent()
+                Dialogs()
+                if (swipeBack.value && (textDialog.value != null || editorDialog.value != null)) {
+                    Box(Modifier.fillMaxSize().swipeBack { dismissTopOverlay() })
                 }
-            }
-            Dialogs()
-            if (swipeBack.value && (textDialog.value != null || editorDialog.value != null)) {
-                Box(Modifier.fillMaxSize().swipeBack { dismissTopOverlay() })
             }
         }
     }
 
     @Composable
-    private fun RecordsPage(topPadding: Dp, bottomPadding: Dp, scrollBehavior: ScrollBehavior) {
-        val list = recordsState.value
+    private fun RecordsPage(contentPadding: PaddingValues, scrollBehavior: ScrollBehavior, listState: LazyListState) {
+        val list = recordRows.value
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .overScrollVertical()
-                .nestedScroll(scrollBehavior.nestedScrollConnection),
-            contentPadding = PaddingValues(
-                top = topPadding + 4.dp,
-                bottom = bottomPadding + 8.dp,
-            ),
+                .modulePageScroll(scrollBehavior),
+            overscrollEffect = null,
+            contentPadding = contentPadding,
         ) {
             if (list.isEmpty()) {
                 item(key = "empty", contentType = "empty") {
@@ -788,230 +939,360 @@ class ModuleMainActivity : ComponentActivity() {
             itemsIndexed(
                 items = list,
 
-                key = { _, (accountId, record) -> "$accountId-${record.at}-${record.taskType}" },
+                key = { _, row -> row.key },
                 contentType = { _, _ -> "record" },
-            ) { index, (accountId, record) ->
+            ) { index, row ->
 
-                val day = dayLabel(record.at)
-                if (index == 0 || dayLabel(list[index - 1].second.at) != day) {
-                    GroupTitle(day)
+                AnimatedVisibility(
+                    visible = row.key !in exitingRecordKeys,
+                    modifier = if (recordsDeleting) Modifier else Modifier.animateItem(),
+                    exit = fadeOut(tween(220)) + shrinkVertically(tween(260)),
+                ) {
+                    Column {
+                        val day = dayLabel(row.record.at)
+                        if (index == 0 || dayLabel(list[index - 1].record.at) != day) {
+                            GroupTitle(day)
+                        }
+                        RecordCard(row)
+                    }
                 }
-                RecordCard(accountId, record)
             }
         }
     }
 
     @Composable
-    private fun RecordCard(accountId: String, record: LocalTaskRecord) {
+    private fun RecordCard(row: ModuleRecordRow) {
+        val record = row.record
         val failed = record.result != "success"
-        SectionCard(
+        val selected = row.key in selectedRecordKeys
+        val deleting = row.key in deletingRecordKeys
+        val colors = MiuixTheme.colorScheme
+        val background by animateColorAsState(
+            targetValue = when {
+                deleting -> colors.errorContainer
+                selected -> colors.tertiaryContainer
+                else -> colors.surfaceContainer
+            },
+            animationSpec = tween(140),
+            label = "recordSelectionSurface",
+        )
+        val haptic = LocalHapticFeedback.current
+        val selectRecord = {
+            if (!recordsDeleting) {
+                recordsSelecting = true
+                selectedRecordKeys = selectedRecordKeys + row.key
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            }
+        }
+        ModuleRecordCard(
             title = if (failed) uiText(R.string.record_failed_title, taskTitle(record.taskType), resultLabel(record.result))
             else taskTitle(record.taskType),
-            titleColor = if (failed) DangerRed else MiuixTheme.colorScheme.onSurface,
+            titleColor = when {
+                deleting -> colors.onErrorContainer
+                failed -> DangerRed
+                else -> colors.onSurface
+            },
+            containerColor = background,
+            enabled = !recordsDeleting,
+            modifier = Modifier.semantics {
+                this.selected = selected
+                if (!recordsSelecting) {
+                    customActions = listOf(CustomAccessibilityAction(uiText(R.string.records_selection_enter)) {
+                        selectRecord()
+                        true
+                    })
+                }
+            },
             trailing = {
-                Text(
-                    formatClock(record.at),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight(550),
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                )
+                if (recordsSelecting) {
+                    Checkbox(
+                        state = if (selected) ToggleableState.On else ToggleableState.Off,
+                        onClick = { toggleRecordSelection(row.key) },
+                        enabled = !recordsDeleting,
+                        modifier = Modifier.semantics {
+                            contentDescription = "${taskTitle(record.taskType)} ${formatDateTime(record.at)}"
+                        },
+                    )
+                } else {
+                    Text(
+                        formatClock(record.at),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight(550),
+                        color = colors.onSurfaceVariantSummary,
+                    )
+                }
             },
             description = record.message.takeIf { it.isNotBlank() },
-            onClick = { showRecordDetail(accountId, record) },
+            onClick = {
+                if (!recordsDeleting) {
+                    if (recordsSelecting) toggleRecordSelection(row.key)
+                    else showRecordDetail(row.accountId, record)
+                }
+            },
+            onLongPress = selectRecord,
         )
     }
 
     @Composable
-    private fun TasksPage() {
-
-        SectionCard(
-            title = uiText(R.string.task_overview_title),
-            description = overviewText.value,
-        )
-        if (taskRows.value.isEmpty()) {
-            SectionCard(
-                title = uiText(R.string.tasks_empty_title),
-                description = uiText(R.string.tasks_empty_description),
-            )
-        } else {
-            taskRows.value.forEach { row -> TaskCard(row) }
+    private fun TasksPage(
+        contentPadding: PaddingValues, listState: LazyListState,
+        canStartDrag: () -> Boolean,
+    ) {
+        val sourceRows = taskRows.value
+        val rows = remember(sourceRows, taskOrder) {
+            val keyed = sourceRows.associateBy { moduleTaskOrderKey(it.accountId, it.task.taskType) }
+            orderedModuleTaskKeys(taskOrder, sourceRows.map {
+                ModuleTaskOrderEntry(moduleTaskOrderKey(it.accountId, it.task.taskType), it.task.enabled)
+            }).map(keyed::getValue)
         }
-        Text(
-            uiText(R.string.tasks_sync_note),
-            modifier = Modifier.padding(horizontal = 28.dp),
-            style = MiuixTheme.textStyles.footnote1,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        val orderedKeys = remember(rows) { rows.map { moduleTaskOrderKey(it.accountId, it.task.taskType) } }
+        val haptic = LocalHapticFeedback.current
+        val reorderState = rememberModuleTaskReorderState(
+            listState = listState,
+            orderedKeys = orderedKeys,
+            onMove = { from, target -> taskOrder = taskOrder.move(from, target) },
+            onDragStateChange = { active ->
+                taskDragging = active
+                if (active) {
+                    taskSortPopupOpen = false
+                    taskOrder = taskOrder.startManual(orderedKeys)
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                }
+            },
+            onDragFinished = ::persistTaskOrder,
+            enabled = canStartDrag,
         )
-    }
-
-    @Composable
-    private fun ConfigPage() {
-
-        GroupTitle(stringResource(R.string.section_language))
-        Card(
-            modifier = Modifier
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 12.dp),
-            insideMargin = PaddingValues(0.dp),
+        DisposableEffect(Unit) { onDispose { taskDragging = false; taskSortPopupOpen = false } }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize()
+                .taskReorderContainer(reorderState)
+                // PullToRefresh already forwards this page's top-bar scroll connection.
+                .modulePageScroll(),
+            overscrollEffect = null,
+            contentPadding = contentPadding,
         ) {
-            OverlayDropdownPreference(
-                title = stringResource(R.string.pref_app_language_title),
-                summary = stringResource(R.string.pref_app_language_summary),
-                items = listOf(
-                    stringResource(R.string.language_system),
-                    stringResource(R.string.language_zh),
-                    stringResource(R.string.language_en),
-                ),
-                selectedIndex = appLanguage.intValue.coerceIn(0, 2),
-                onSelectedIndexChange = ::setAppLanguage,
-            )
-        }
-
-        GroupTitle(stringResource(R.string.section_interface))
-
-        Card(
-            modifier = Modifier
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 12.dp),
-            insideMargin = PaddingValues(0.dp),
-        ) {
-            OverlayDropdownPreference(
-                title = stringResource(R.string.pref_theme_title),
-                summary = stringResource(R.string.pref_theme_summary),
-                items = listOf(
-                    stringResource(R.string.theme_system),
-                    stringResource(R.string.theme_light),
-                    stringResource(R.string.theme_dark),
-                ),
-                selectedIndex = themeMode.intValue.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK),
-                onSelectedIndexChange = ::setThemeMode,
-            )
-            SwitchPreference(
-                title = stringResource(R.string.pref_blur_title),
-                summary = stringResource(R.string.pref_blur_summary),
-                checked = blurBars.value,
-                onCheckedChange = ::toggleBlurBars,
-            )
-            SwitchPreference(
-                title = stringResource(R.string.pref_floating_bar_title),
-                summary = stringResource(R.string.pref_floating_bar_summary),
-                checked = floatingNavBar.value,
-                onCheckedChange = ::toggleFloatingNavBar,
-            )
-            if (floatingNavBar.value) {
-                SwitchPreference(
-                    title = stringResource(R.string.pref_liquid_glass_title),
-                    summary = stringResource(R.string.pref_liquid_glass_summary),
-                    checked = liquidGlass.value,
-                    onCheckedChange = ::toggleLiquidGlass,
+            item(key = "overview", contentType = "overview") {
+                SectionCard(
+                    title = uiText(R.string.task_overview_title),
+                    description = overviewText.value,
                 )
             }
-        }
-
-        GroupTitle(stringResource(R.string.section_personalization))
-        Card(
-            modifier = Modifier
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 12.dp),
-            insideMargin = PaddingValues(0.dp),
-        ) {
-            Column {
+            if (rows.isEmpty()) {
+                item(key = "empty", contentType = "empty") {
+                    SectionCard(
+                        title = uiText(R.string.tasks_empty_title),
+                        description = uiText(R.string.tasks_empty_description),
+                    )
+                }
+            } else {
+                itemsIndexed(rows, key = { _, row -> moduleTaskOrderKey(row.accountId, row.task.taskType) }, contentType = { _, _ -> "task" }) { index, row ->
+                    val orderKey = moduleTaskOrderKey(row.accountId, row.task.taskType)
+                    val moveUp = uiText(R.string.task_move_up)
+                    val moveDown = uiText(R.string.task_move_down)
+                    Box(
+                        Modifier
+                            .taskReorderItem(reorderState, orderKey)
+                            .animateItem(
+                                placementSpec = if (reorderState.isLifted(orderKey)) null
+                                else androidx.compose.animation.core.spring(
+                                    stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow,
+                                ),
+                            )
+                            .semantics {
+                                customActions = buildList {
+                                    if (index > 0) add(CustomAccessibilityAction(moveUp) {
+                                        moveTaskForAccessibility(orderedKeys, orderKey, orderedKeys[index - 1])
+                                        true
+                                    })
+                                    if (index < orderedKeys.lastIndex) add(CustomAccessibilityAction(moveDown) {
+                                        moveTaskForAccessibility(orderedKeys, orderKey, orderedKeys[index + 1])
+                                        true
+                                    })
+                                }
+                            },
+                    ) {
+                        TaskCard(row, Modifier.moduleTaskShadow { reorderState.isLifted(orderKey) })
+                    }
+                }
+            }
+            item(key = "sync-note", contentType = "note") {
                 Text(
-                    text = stringResource(R.string.pref_app_icon_title),
-                    fontSize = MiuixTheme.textStyles.headline1.fontSize,
-                    fontWeight = FontWeight.Medium,
-                    color = MiuixTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp, bottom = 10.dp),
+                    uiText(R.string.tasks_sync_note),
+                    modifier = Modifier.padding(horizontal = 28.dp),
+                    style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
-                LauncherIconPicker()
-                Spacer(Modifier.height(12.dp))
-            }
-            SwitchPreference(
-                title = stringResource(R.string.pref_hide_recent_title),
-                summary = stringResource(R.string.pref_hide_recent_summary),
-                checked = hideRecentTask.value,
-                onCheckedChange = { toggleHideRecentTask() },
-            )
-            SwitchPreference(
-                title = stringResource(R.string.pref_hide_launcher_title),
-                summary = stringResource(R.string.pref_hide_launcher_summary),
-                checked = hideLauncherIcon.value,
-                onCheckedChange = ::toggleHideLauncherIcon,
-            )
-        }
-
-        GroupTitle(stringResource(R.string.section_gesture))
-        Card(
-            modifier = Modifier
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 12.dp),
-            insideMargin = PaddingValues(0.dp),
-        ) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                SwitchPreference(
-                    title = stringResource(R.string.pref_predictive_back_title),
-                    summary = stringResource(R.string.pref_predictive_back_summary),
-                    checked = predictiveBack.value,
-                    onCheckedChange = ::togglePredictiveBack,
-                )
-            }
-            SwitchPreference(
-                title = stringResource(R.string.pref_swipe_back_title),
-                summary = stringResource(R.string.pref_swipe_back_summary),
-                checked = swipeBack.value,
-                onCheckedChange = ::toggleSwipeBack,
-            )
-            OverlayDropdownPreference(
-                title = stringResource(R.string.pref_pager_gesture_title),
-                summary = stringResource(R.string.pref_pager_gesture_summary),
-                items = listOf(
-                    stringResource(R.string.pager_gesture_default),
-                    stringResource(R.string.pager_gesture_cross),
-                    stringResource(R.string.pager_gesture_ios),
-                ),
-                selectedIndex = pagerGestureMode.intValue.coerceIn(0, 2),
-                onSelectedIndexChange = ::setPagerGestureMode,
-            )
-        }
-
-        GroupTitle(uiText(R.string.root_enhancement_title))
-        RootEnhancementSection()
-
-        GroupTitle(uiText(R.string.section_notifications_logs))
-        Card(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp), insideMargin = PaddingValues(0.dp)) {
-            ArrowPreference(title = uiText(R.string.permission_notification_settings),
-                summary = uiText(R.string.root_notification_hint), onClick = ::requestNotificationPermission)
-        }
-        SectionCard(
-            title = uiText(R.string.notification_records_title),
-            description = notificationSummary.value,
-        ) {
-            CapsuleButton(MiuixIcons.Info, uiText(R.string.action_view)) { showNotificationRecords() }
-            Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Delete, uiText(R.string.action_clear)) {
-                NotificationRecordStore { applicationContext }.clear()
-                toast(uiText(R.string.toast_notifications_cleared))
-                refresh()
-            }
-        }
-        SectionCard(
-            title = uiText(R.string.module_logs_title),
-            description = logSummary.value,
-        ) {
-            CapsuleButton(MiuixIcons.Info, uiText(R.string.action_view)) { showLogs() }
-            Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Delete, uiText(R.string.action_clear)) {
-                ModuleLogBuffer.clear()
-                toast(uiText(R.string.toast_logs_cleared))
-                refresh()
             }
         }
     }
 
     @Composable
-    private fun TaskCard(row: TaskRow) {
+    private fun ConfigPage(
+        contentPadding: PaddingValues,
+        scrollBehavior: ScrollBehavior,
+        listState: LazyListState,
+        launcherListState: LazyListState,
+    ) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().modulePageScroll(scrollBehavior),
+            overscrollEffect = null,
+            contentPadding = contentPadding,
+        ) {
+            item(key = "language.title", contentType = "group-title") {
+                GroupTitle(stringResource(R.string.section_language))
+            }
+            modulePreferenceGroup("language", listOf("language"), { it }) {
+                ModuleDropdownPreference(
+                    title = stringResource(R.string.pref_app_language_title),
+                    summary = stringResource(R.string.pref_app_language_summary),
+                    items = listOf(
+                        stringResource(R.string.language_system),
+                        stringResource(R.string.language_zh),
+                        stringResource(R.string.language_en),
+                    ),
+                    selectedIndex = appLanguage.intValue.coerceIn(0, 2),
+                    onSelectedIndexChange = ::setAppLanguage,
+                )
+            }
+            moduleThemeSettings(config = themeConfig, onChange = ::updateThemeConfig)
+            item(key = "personalization.title", contentType = "group-title") {
+                GroupTitle(stringResource(R.string.section_personalization))
+            }
+            modulePreferenceGroup(
+                "personalization",
+                listOf("icon", "recent", "launcher"),
+                { it },
+            ) { row ->
+                when (row) {
+                    "icon" -> Column {
+                        Text(
+                            text = stringResource(R.string.pref_app_icon_title),
+                            fontSize = MiuixTheme.textStyles.headline1.fontSize,
+                            fontWeight = FontWeight.Medium,
+                            color = MiuixTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(start = 16.dp, top = 14.dp, end = 16.dp, bottom = 10.dp),
+                        )
+                        LauncherIconPicker(launcherListState)
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    "recent" -> SwitchPreference(
+                        title = stringResource(R.string.pref_hide_recent_title),
+                        summary = stringResource(R.string.pref_hide_recent_summary),
+                        checked = hideRecentTask.value,
+                        onCheckedChange = { toggleHideRecentTask() },
+                    )
+                    "launcher" -> SwitchPreference(
+                        title = stringResource(R.string.pref_hide_launcher_title),
+                        summary = stringResource(R.string.pref_hide_launcher_summary),
+                        checked = hideLauncherIcon.value,
+                        onCheckedChange = ::toggleHideLauncherIcon,
+                    )
+                }
+            }
+            item(key = "gestures.title", contentType = "group-title") {
+                GroupTitle(stringResource(R.string.section_gesture))
+            }
+            modulePreferenceGroup(
+                "gestures",
+                listOf("predictive", "swipe", "pager"),
+                { it },
+            ) { row ->
+                when (row) {
+                    "predictive" -> ModuleDropdownPreference(
+                        title = stringResource(R.string.pref_predictive_back_title),
+                        summary = stringResource(R.string.pref_predictive_back_summary),
+                        enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE,
+                        items = listOf(
+                            stringResource(R.string.predictive_back_off),
+                            stringResource(R.string.predictive_back_miuix),
+                            stringResource(R.string.predictive_back_aosp),
+                        ),
+                        selectedIndex = predictiveBackMode.ordinal,
+                        onSelectedIndexChange = { changePredictiveBackMode(ModulePredictiveBackMode.entries[it]) },
+                    )
+                    "swipe" -> SwitchPreference(
+                        title = stringResource(R.string.pref_swipe_back_title),
+                        summary = stringResource(R.string.pref_swipe_back_summary),
+                        checked = swipeBack.value,
+                        onCheckedChange = ::toggleSwipeBack,
+                    )
+                    "pager" -> ModuleDropdownPreference(
+                        title = stringResource(R.string.pref_pager_gesture_title),
+                        summary = stringResource(R.string.pref_pager_gesture_summary),
+                        items = listOf(
+                            stringResource(R.string.pager_gesture_default),
+                            stringResource(R.string.pager_gesture_cross),
+                            stringResource(R.string.pager_gesture_ios),
+                        ),
+                        selectedIndex = themeConfig.active.pagerMode.ordinal,
+                        onSelectedIndexChange = {
+                            updateThemeConfig(themeConfig.withActive(themeConfig.active.copy(pagerMode = PagerInterceptionMode.entries[it])))
+                        },
+                    )
+                }
+            }
+            item(key = "root.title", contentType = "group-title") {
+                GroupTitle(uiText(R.string.root_enhancement_title))
+            }
+            modulePreferenceGroup("root", ModuleRootPreferenceRow.entries, { it.name }) { row ->
+                RootEnhancementPreference(
+                    row = row,
+                    enabled = rootEnhancementEnabled.value, busy = rootBusy.value, status = rootUi.value,
+                    checking = rootChecking.value, syncing = rootSyncing.value,
+                    syncedAt = rootSyncedAt.value, syncError = rootSyncError.value,
+                    onToggle = { enable -> rootConfirmation.value =
+                        if (enable) RootEnhancementAction.ENABLE else RootEnhancementAction.DISABLE },
+                    onInspect = ::inspectRoot,
+                    onManage = { rootModuleDialog.value = true },
+                    onSync = ::syncRootTasks,
+                )
+            }
+
+            item(key = "notification-permission", contentType = "preferences") {
+                GroupTitle(uiText(R.string.section_notifications_logs))
+                Card(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp), insideMargin = PaddingValues(0.dp)) {
+                    ArrowPreference(title = uiText(R.string.permission_notification_settings),
+                        summary = uiText(R.string.root_notification_hint), onClick = ::requestNotificationPermission)
+                }
+            }
+            item(key = "notification-records", contentType = "actions") {
+                SectionCard(
+                    title = uiText(R.string.notification_records_title),
+                    description = notificationSummary.value,
+                ) {
+                    CapsuleButton(moduleActionIcon(ModuleActionIcon.Info), uiText(R.string.action_view)) { showNotificationRecords() }
+                    Spacer(Modifier.weight(1f))
+                    CapsuleButton(moduleActionIcon(ModuleActionIcon.Delete), uiText(R.string.action_clear)) {
+                        NotificationRecordStore { applicationContext }.clear()
+                        toast(uiText(R.string.toast_notifications_cleared))
+                        refresh()
+                    }
+                }
+            }
+            item(key = "logs", contentType = "actions") {
+                SectionCard(
+                    title = uiText(R.string.module_logs_title),
+                    description = logSummary.value,
+                ) {
+                    CapsuleButton(moduleActionIcon(ModuleActionIcon.Info), uiText(R.string.action_view)) { showLogs() }
+                    Spacer(Modifier.weight(1f))
+                    CapsuleButton(moduleActionIcon(ModuleActionIcon.Delete), uiText(R.string.action_clear)) {
+                        ModuleLogBuffer.clear()
+                        toast(uiText(R.string.toast_logs_cleared))
+                        refresh()
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun TaskCard(row: TaskRow, modifier: Modifier = Modifier) {
         SectionCard(
             title = taskTitle(row.task.taskType),
+            bodyModifier = modifier,
             showActionDivider = true,
             titleColor = if (row.task.enabled) MiuixTheme.colorScheme.onSurface
             else MiuixTheme.colorScheme.onSurfaceVariantActions,
@@ -1024,24 +1305,10 @@ class ModuleMainActivity : ComponentActivity() {
                 )
             },
         ) {
-            CapsuleButton(MiuixIcons.Play, uiText(R.string.action_run)) { runSingleTask(row.accountId, row.task) }
+            CapsuleButton(moduleActionIcon(ModuleActionIcon.Play), uiText(R.string.action_run)) { runSingleTask(row.accountId, row.task) }
             Spacer(Modifier.weight(1f))
-            CapsuleButton(MiuixIcons.Settings, uiText(R.string.action_configure)) { openTaskEditor(row.accountId, row.task, row.spec) }
+            CapsuleButton(moduleActionIcon(ModuleActionIcon.Settings), uiText(R.string.action_configure)) { openTaskEditor(row.accountId, row.task, row.spec) }
         }
-    }
-
-    @Composable
-    private fun RootEnhancementSection() {
-        RootEnhancementCard(
-            enabled = rootEnhancementEnabled.value, busy = rootBusy.value, status = rootUi.value,
-            checking = rootChecking.value, syncing = rootSyncing.value,
-            syncedAt = rootSyncedAt.value, syncError = rootSyncError.value,
-            onToggle = { enable -> rootConfirmation.value =
-                if (enable) RootEnhancementAction.ENABLE else RootEnhancementAction.DISABLE },
-            onInspect = ::inspectRoot,
-            onManage = { rootModuleDialog.value = true },
-            onSync = ::syncRootTasks,
-        )
     }
 
     private fun inspectRoot() {
@@ -1091,17 +1358,22 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun LauncherIconPicker() {
+    private fun LauncherIconPicker(listState: LazyListState) {
         val current = launcherIconStyle.value
-        Row(
+        DisposableEffect(Unit) {
+            onDispose { launcherIconCoordinates = null }
+        }
+        LazyRow(
+            state = listState,
             modifier = Modifier
                 .fillMaxWidth()
-                .onGloballyPositioned { launcherIconCoordinates = it }
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp),
+                .overScrollHorizontal()
+                .onGloballyPositioned { launcherIconCoordinates = it },
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            overscrollEffect = null,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            ModuleIconStyle.entries.forEach { style ->
+            items(ModuleIconStyle.entries, key = { it.key }, contentType = { "launcher-icon" }) { style ->
                 val selected = style == current
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1197,10 +1469,12 @@ class ModuleMainActivity : ComponentActivity() {
                 } else ""
                 check(store.get(accountId, task.taskType) != null) { "任务不存在，请刷新后重试" }
                 store.setEnabled(accountId, task.taskType, enabled, token)
+                readTaskRow(store, accountId, task.taskType)
             }
         }, then = { result ->
             taskMutations.value = taskMutations.value - key
-            result.onSuccess {
+            result.onSuccess { saved ->
+                applySavedTask(saved)
                 toast(uiText(if (enabled) R.string.toast_task_enabled else R.string.toast_task_disabled, taskTitle(task.taskType)))
             }.onFailure { toast(it.message ?: "任务保存失败") }
             refresh()
@@ -1312,42 +1586,29 @@ class ModuleMainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         updateLanguageContext()
         refresh()
-        window.setBackgroundDrawable(ColorDrawable(if (resolveDark(themeMode.intValue)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
+        window.setBackgroundDrawable(ColorDrawable(windowThemeSurface()))
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt(STATE_TAB, tab.intValue)
+        outState.putBoolean(STATE_RECORD_SELECTION, recordsSelecting && !recordsDeleting)
+        outState.putStringArrayList(STATE_SELECTED_RECORDS, ArrayList(if (recordsDeleting) emptySet() else selectedRecordKeys))
         super.onSaveInstanceState(outState)
     }
 
-    private fun toggleBlurBars(enabled: Boolean) {
-        writeUiPref(KEY_BLUR_BARS, enabled)
-        blurBars.value = enabled
+    private fun updateThemeConfig(config: ModuleThemeConfig) {
+        val value = config
+        val modeChanged = themeConfig.nightMode != value.nightMode
+        themePreferences.write(value)
+        themeConfig = value
+        if (modeChanged) syncApplicationNightMode(value.nightMode)
     }
 
-    private fun toggleFloatingNavBar(enabled: Boolean) {
-        writeUiPref(KEY_FLOATING_NAV_BAR, enabled)
-        floatingNavBar.value = enabled
-    }
-
-    private fun toggleLiquidGlass(enabled: Boolean) {
-        writeUiPref(KEY_LIQUID_GLASS, enabled)
-        liquidGlass.value = enabled
-    }
-
-    private fun setThemeMode(mode: Int) {
-        val value = mode.coerceIn(THEME_FOLLOW_SYSTEM, THEME_DARK)
-        writeUiPrefInt(KEY_THEME_MODE, value)
-        themeMode.intValue = value
-        syncApplicationNightMode(value)
-        window?.setBackgroundDrawable(ColorDrawable(if (resolveDark(value)) DARK_WINDOW_BG else LIGHT_WINDOW_BG))
-    }
-
-    private fun syncApplicationNightMode(mode: Int) {
+    private fun syncApplicationNightMode(mode: ModuleNightMode) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         val nightMode = when (mode) {
-            THEME_LIGHT -> UiModeManager.MODE_NIGHT_NO
-            THEME_DARK -> UiModeManager.MODE_NIGHT_YES
+            ModuleNightMode.Light -> UiModeManager.MODE_NIGHT_NO
+            ModuleNightMode.Dark -> UiModeManager.MODE_NIGHT_YES
             else -> UiModeManager.MODE_NIGHT_AUTO
         }
         runCatching {
@@ -1358,43 +1619,18 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
-    private fun setPagerGestureMode(mode: Int) {
-        val value = mode.coerceIn(0, PagerInterceptionMode.entries.lastIndex)
-        writeUiPrefInt(KEY_PAGER_GESTURE, value)
-        pagerGestureMode.intValue = value
-    }
-
     private fun toggleSwipeBack(enabled: Boolean) {
         writeUiPref(KEY_SWIPE_BACK, enabled)
         swipeBack.value = enabled
     }
 
-    private fun togglePredictiveBack(enabled: Boolean) {
-        writeUiPref(KEY_PREDICTIVE_BACK, enabled)
-        predictiveBack.value = enabled
-        applyPredictiveBack(enabled)
-        recreate()
-    }
-
-    private fun applyPredictiveBack(enabled: Boolean) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
-        runCatching {
-            HiddenApiBypass.addHiddenApiExemptions(
-                "Landroid/content/pm/ApplicationInfo;->setEnableOnBackInvokedCallback",
-            )
-            val method = ApplicationInfo::class.java.getDeclaredMethod(
-                "setEnableOnBackInvokedCallback",
-                Boolean::class.javaPrimitiveType,
-            )
-            method.isAccessible = true
-            method.invoke(applicationInfo, enabled)
-        }.onFailure { ModuleAndroidLog.error(LOG_TAG, "更新预测性返回失败", it) }
-    }
-
-    private fun resolveDark(mode: Int): Boolean = when (mode) {
-        THEME_LIGHT -> false
-        THEME_DARK -> true
-        else -> isNightMode()
+    private fun changePredictiveBackMode(mode: ModulePredictiveBackMode) {
+        if (mode == predictiveBackMode) return
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit()
+            .putString(ModulePredictiveBackMode.KEY, mode.name)
+            .putBoolean(KEY_PREDICTIVE_BACK, mode.enabled)
+            .apply()
+        predictiveBackMode = mode
     }
 
     @Composable
@@ -1423,12 +1659,83 @@ class ModuleMainActivity : ComponentActivity() {
     private fun dismissTopOverlay() {
         val editor = editorDialog.value
         when {
+            recordsDeleteConfirmation -> if (!recordsDeleting) recordsDeleteConfirmation = false
             rootConfirmation.value != null -> rootConfirmation.value = null
             rootModuleDialog.value -> rootModuleDialog.value = false
             suPathDialog.value != null -> suPathDialog.value = null
             editor?.multiOpenLabel != null -> editor.multiOpenLabel = null
             editor != null -> editorDialog.value = null
             textDialog.value != null -> textDialog.value = null
+        }
+    }
+
+    private fun toggleRecordSelection(key: String) {
+        if (recordsDeleting) return
+        selectedRecordKeys = if (key in selectedRecordKeys) selectedRecordKeys - key else selectedRecordKeys + key
+    }
+
+    private fun exitRecordSelection() {
+        if (recordsDeleting) return
+        recordsSelecting = false
+        selectedRecordKeys = emptySet()
+        recordsDeleteConfirmation = false
+    }
+
+    private fun deleteSelectedRecords() {
+        if (recordsDeleting) return
+        val chosen = recordRows.value.filter { it.key in selectedRecordKeys }
+        if (chosen.isEmpty()) {
+            recordsDeleteConfirmation = false
+            return
+        }
+        recordsDeleting = true
+        runBg(
+            work = {
+                val deleted = mutableSetOf<String>()
+                var count = 0
+                val result = runCatching {
+                    val store = LocalTaskStore { applicationContext }
+                    chosen.groupBy { it.accountId }.forEach { (account, rows) ->
+                        count += store.deleteRecords(account, rows.map { it.record })
+                        deleted += rows.map { it.key }
+                    }
+                }
+                RecordDeletionResult(deleted, count, result.exceptionOrNull())
+            },
+            then = { result ->
+                recordsDeleteConfirmation = false
+                if (result.deletedKeys.isNotEmpty()) {
+                    deletingRecordKeys = result.deletedKeys
+                    if (result.count > 0) toast(uiQuantity(R.plurals.records_deleted, result.count))
+                } else {
+                    recordsDeleting = false
+                }
+                result.error?.let {
+                    recordDeletionError = result.deletedKeys.isNotEmpty()
+                    toast(uiText(R.string.records_delete_failed))
+                }
+                refresh()
+            },
+        )
+    }
+
+    private fun setTaskSortMode(mode: ModuleTaskSort) {
+        if (taskDragging || taskOrder.mode == mode) return
+        taskOrder = taskOrder.copy(mode = mode)
+        persistTaskOrder()
+    }
+
+    private fun moveTaskForAccessibility(keys: List<String>, key: String, target: String) {
+        if (taskDragging) return
+        taskOrder = taskOrder.startManual(keys).move(key, target)
+        persistTaskOrder()
+    }
+
+    private fun persistTaskOrder() {
+        taskOrderPreferences.writeAsync(taskOrder) {
+            runOnUiThread {
+                if (!isDestroyed && !isFinishing) toast(uiText(R.string.task_order_save_failed))
+            }
         }
     }
 
@@ -1573,10 +1880,12 @@ class ModuleMainActivity : ComponentActivity() {
                     check(it.isNotBlank()) { "登录凭据不可用，请在阅微重新登录并同步" }
                 } else ""
                 store.saveEditedTask(editor.accountId, updated, token, editor.task)
+                readTaskRow(store, editor.accountId, updated.taskType)
             }
         }, then = { result ->
             editor.saving = false
-            result.onSuccess {
+            result.onSuccess { saved ->
+                applySavedTask(saved)
                 toast(uiText(R.string.toast_config_saved))
                 if (editorDialog.value === editor) editorDialog.value = null
             }.onFailure { toast(it.message ?: "任务保存失败") }
@@ -1648,11 +1957,22 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun AboutPage(playing: Boolean, bottomPadding: Dp) {
+    private fun AboutPage(
+        playing: Boolean,
+        bottomPadding: Dp,
+        listState: LazyListState,
+        prepareEffect: Boolean,
+        motion: com.reamicro.fix.ui.effect.AboutBrandMotion,
+        effectState: com.reamicro.fix.ui.effect.BgEffectState,
+    ) {
         val iconStyle = launcherIconStyle.value
         com.reamicro.fix.ui.effect.AboutScrollLayout(
             playing = playing,
             bottomPadding = bottomPadding,
+            listState = listState,
+            prepareEffect = prepareEffect,
+            motion = motion,
+            effectState = effectState,
             header = { motion ->
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
@@ -1774,6 +2094,20 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun Dialogs() {
+        if (recordsDeleteConfirmation) {
+            AppWindowDialog(
+                show = true,
+                title = uiText(R.string.records_delete_title),
+                onClose = { if (!recordsDeleting) recordsDeleteConfirmation = false },
+                primaryLabel = uiText(R.string.records_delete_action),
+                onPrimary = ::deleteSelectedRecords,
+                primaryEnabled = selectedRecordKeys.isNotEmpty() && !recordsDeleting,
+                dangerous = true,
+                dismissEnabled = !recordsDeleting,
+            ) {
+                Text(uiQuantity(R.plurals.records_delete_confirm, selectedRecordKeys.size))
+            }
+        }
         RootModuleDialog(
             show = rootModuleDialog.value, busy = rootBusy.value, status = rootUi.value,
             lastError = RootTaskBridge.lastOperationError(applicationContext),
@@ -1872,6 +2206,7 @@ class ModuleMainActivity : ComponentActivity() {
         AppWindowDialog(
             show = true, title = taskTitle(editor.task.taskType),
             onClose = { if (!editor.saving) editorDialog.value = null },
+            dismissEnabled = !editor.saving,
             primaryLabel = uiText(R.string.action_save),
             primaryEnabled = !editor.saving,
             onPrimary = { saveTaskEdits(editor) },
@@ -2021,13 +2356,44 @@ class ModuleMainActivity : ComponentActivity() {
             ),
             textStyles = MiuixTheme.textStyles,
         ) {
-            WindowDropdownPreference(
-                entry = entry, title = title, summary = summary, enabled = choices.isNotEmpty(),
-                insideMargin = PaddingValues(vertical = 8.dp), maxHeight = 320.dp,
-                onExpandedChange = { expanded ->
-                    if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
-                },
-            )
+            if (useModuleGlass() && isRuntimeShaderSupported()) {
+                top.yukonga.miuix.kmp.integration.EntryGlassDropdownPreference(
+                    entry = entry,
+                    title = title,
+                    summary = summary,
+                    backdrop = LocalModuleSceneBackdrop.current,
+                    enabled = choices.isNotEmpty(),
+                    insideMargin = PaddingValues(vertical = 8.dp),
+                    sizing = top.yukonga.miuix.kmp.glass.GlassPopupSizing(maxHeight = 320.dp),
+                    renderInRootScaffold = !LocalModuleWindowScaffold.current,
+                    onExpandedChange = { expanded ->
+                        if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
+                    },
+                )
+            } else {
+                if (LocalModuleWindowScaffold.current) {
+                    top.yukonga.miuix.kmp.preference.OverlayDropdownPreference(
+                        entry = entry,
+                        title = title,
+                        summary = summary,
+                        enabled = choices.isNotEmpty(),
+                        insideMargin = PaddingValues(vertical = 8.dp),
+                        maxHeight = 320.dp,
+                        renderInRootScaffold = false,
+                        onExpandedChange = { expanded ->
+                            if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
+                        },
+                    )
+                } else {
+                    WindowDropdownPreference(
+                        entry = entry, title = title, summary = summary, enabled = choices.isNotEmpty(),
+                        insideMargin = PaddingValues(vertical = 8.dp), maxHeight = 320.dp,
+                        onExpandedChange = { expanded ->
+                            if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
+                        },
+                    )
+                }
+            }
         }
         Spacer(Modifier.height(12.dp))
     }
@@ -2235,10 +2601,10 @@ class ModuleMainActivity : ComponentActivity() {
             )
         }
 
-        WindowDialog(
+        ModuleWindowDialog(
             title = uiText(R.string.field_pawn),
             show = true,
-            onDismissRequest = { editor.multiOpenLabel = null },
+            onClose = { editor.multiOpenLabel = null },
         ) {
             Column(
                 modifier = Modifier
@@ -2293,17 +2659,16 @@ class ModuleMainActivity : ComponentActivity() {
                     .fillMaxWidth()
                     .padding(top = 12.dp),
             ) {
-                Button(
-                    onClick = { editor.multiOpenLabel = null },
+                ModuleDialogActionButton(
+                    text = uiText(R.string.action_cancel),
+                    onClick = LocalModuleWindowCloseRequest.current ?: { editor.multiOpenLabel = null },
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(),
-                ) {
-                    Text(uiText(R.string.action_cancel))
-                }
+                )
                 Spacer(Modifier.width(16.dp))
-                Button(
+                ModuleDialogActionButton(
+                    text = uiText(R.string.action_done),
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColorsPrimary(),
+                    primary = true,
                     onClick = {
 
                         editor.values[label] = picked
@@ -2311,9 +2676,7 @@ class ModuleMainActivity : ComponentActivity() {
                             .joinToString(",")
                         editor.multiOpenLabel = null
                     },
-                ) {
-                    Text(uiText(R.string.action_done))
-                }
+                )
             }
         }
     }
@@ -2339,14 +2702,7 @@ class ModuleMainActivity : ComponentActivity() {
         getSharedPreferences(UI_PREFS, MODE_PRIVATE).getBoolean(key, defValue)
 
     private fun writeUiPref(key: String, value: Boolean) {
-        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putBoolean(key, value).commit()
-    }
-
-    private fun uiPrefInt(key: String, defValue: Int = 0): Int =
-        getSharedPreferences(UI_PREFS, MODE_PRIVATE).getInt(key, defValue)
-
-    private fun writeUiPrefInt(key: String, value: Int) {
-        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putInt(key, value).commit()
+        getSharedPreferences(UI_PREFS, MODE_PRIVATE).edit().putBoolean(key, value).apply()
     }
 
     private fun uiPrefString(key: String, defValue: String? = null): String? =
@@ -2373,41 +2729,6 @@ class ModuleMainActivity : ComponentActivity() {
                 .onSuccess { value -> runOnUiThread { if (!isFinishing && !isDestroyed) then(value) } }
                 .onFailure { error -> runOnUiThread { toast(error.message ?: error.javaClass.simpleName) } }
         }.apply { isDaemon = true }.start()
-    }
-
-    private fun futureNextRunAt(store: LocalTaskStore): Long? {
-        val now = System.currentTimeMillis()
-        return store.accountIds()
-            .flatMap { accountId -> store.list(accountId) }
-            .filter { it.enabled && it.nextRunAt > now }
-            .minOfOrNull { it.nextRunAt }
-    }
-
-    private fun nextRunLine(accountId: String, task: LocalTask, spec: CloudAutomationTaskSpec?): String {
-        if (!task.enabled) return uiText(R.string.status_not_enabled)
-        if (spec?.rewardTriggered == true) return uiText(R.string.task_wish_trigger)
-        val next = if (task.nextRunAt > 0L) formatDateTime(task.nextRunAt) else uiText(R.string.status_pending_schedule)
-        if (spec?.merchant == true) {
-            val poll = uiText(R.string.task_next_check, next)
-            val tripEnd = lastMerchantTripEnd(accountId, task.taskType)
-            return if (tripEnd != null) uiText(R.string.task_merchant_next, poll, tripEnd) else poll
-        }
-        return uiText(R.string.task_next_run, next)
-    }
-
-    private fun lastMerchantTripEnd(accountId: String, taskType: String): String? {
-        val store = LocalTaskStore { applicationContext }
-        val state = store.runtimeState(accountId, taskType)
-        if (state.has(LocalTaskStore.KEY_MERCHANT_END_TIME)) {
-            return state.optLong(LocalTaskStore.KEY_MERCHANT_END_TIME).takeIf { it > 0L }?.let(::formatDateTime)
-        }
-        return store.records(accountId)
-            .firstOrNull { it.taskType == taskType }
-            ?.detail
-            ?.let { runCatching { JSONObject(it) }.getOrNull() }
-            ?.optString("行程")
-            ?.substringAfter(" → ", "")
-            ?.takeIf { it.isNotBlank() }
     }
 
     private fun resultLabel(result: String): String = when (result) {
@@ -2469,6 +2790,20 @@ class ModuleMainActivity : ComponentActivity() {
         val task: LocalTask,
         val spec: CloudAutomationTaskSpec?,
         val subtitle: String,
+        val effectiveNextRunAt: Long,
+    )
+
+    private data class RecordDeletionResult(val deletedKeys: Set<String>, val count: Int, val error: Throwable?)
+
+    private data class UiData(
+        val records: List<Pair<String, LocalTaskRecord>>,
+        val failedCount: Int,
+        val tasks: List<TaskRow>,
+        val accountCount: Int,
+        val rootEnabled: Boolean,
+        val overview: String,
+        val notifications: String,
+        val logs: String,
     )
 
     private data class TextDialogUi(
@@ -2503,6 +2838,8 @@ class ModuleMainActivity : ComponentActivity() {
     private companion object {
         const val LOG_TAG = "ReaMicroMain"
         const val STATE_TAB = "selectedTab"
+        const val STATE_RECORD_SELECTION = "recordSelectionActive"
+        const val STATE_SELECTED_RECORDS = "selectedRecordKeys"
         const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
 
         const val UI_PREFS = "reamicro_module_ui"
@@ -2512,27 +2849,11 @@ class ModuleMainActivity : ComponentActivity() {
 
         const val KEY_LAUNCHER_ICON_PENDING = "launcherIconPending"
         const val KEY_LAUNCHER_ICON_PENDING_HIDDEN = "launcherIconPendingHidden"
-        const val KEY_BLUR_BARS = "themeBlurBars"
-        const val KEY_FLOATING_NAV_BAR = "themeFloatingNavBar"
-        const val KEY_LIQUID_GLASS = "themeLiquidGlass"
-        const val KEY_THEME_MODE = "themeMode"
-        const val KEY_PAGER_GESTURE = "pagerGestureMode"
         const val KEY_SWIPE_BACK = "swipeBack"
         const val KEY_PREDICTIVE_BACK = "predictiveBack"
 
         const val MODULE_PACKAGE = "com.reamicro.fix"
         const val MAIN_ACTIVITY_CLASS = "com.reamicro.fix.ui.ModuleMainActivity"
-
-        const val THEME_FOLLOW_SYSTEM = 0
-        const val THEME_LIGHT = 1
-        const val THEME_DARK = 2
-
-        val FLOAT_BAR_CORNER = 28.dp
-
-        const val BAR_BLUR_RADIUS = 25f
-        const val BAR_TINT_ALPHA = 0.87f
-
-        const val LIQUID_SURFACE_ALPHA = 0.4f
 
         const val GITHUB_REPO_URL = "https://github.com/YGHFv/ReaMicro-Extend"
 
@@ -2542,6 +2863,9 @@ class ModuleMainActivity : ComponentActivity() {
         const val TAB_ABOUT = 3
         val TAB_TITLE_RES = listOf(R.string.tab_records, R.string.tab_tasks, R.string.tab_settings, R.string.tab_about)
         val TAB_ICONS = listOf(MiuixIcons.Recent, MiuixIcons.Tasks, MiuixIcons.Settings, MiuixIcons.Info)
+        val TAB_GLASS_ICONS = listOf(
+            MiuixIcons.Glass.Recent, MiuixIcons.Glass.Tasks, MiuixIcons.Glass.Settings, MiuixIcons.Glass.Info,
+        )
 
         val LIGHT_WINDOW_BG = lightColorScheme().surface.toArgb()
         val DARK_WINDOW_BG = darkColorScheme().surface.toArgb()

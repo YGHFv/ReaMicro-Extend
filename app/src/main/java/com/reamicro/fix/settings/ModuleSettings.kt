@@ -8,11 +8,15 @@ object ModuleSettings {
     const val KEY_MODULE_ENABLED = "module_enabled"
     const val KEY_ASSOCIATION_ENABLED = "association_enabled"
     const val KEY_ASSOCIATION_MANUAL_EDIT_ENABLED = "association_manual_edit_enabled"
+    const val KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED = "association_manual_edit_unlocked"
+    const val KEY_ONLINE_ENHANCED_PARSER_UNLOCKED = "online_enhanced_parser_unlocked"
+    const val KEY_ONLINE_ENHANCED_PARSER_ENABLED = "online_enhanced_parser_enabled"
     const val KEY_ASSOCIATION_UNLINK_ENABLED = "association_unlink_enabled"
     const val KEY_ASSOCIATION_COVER_FIX_ENABLED = "association_cover_fix_enabled"
     const val KEY_READER_ENABLED = "reader_enabled"
     const val KEY_READER_LONG_PRESS_ENABLED = "reader_long_press_enabled"
     const val KEY_READER_AUTO_PAGE_ENABLED = "reader_auto_page_enabled"
+    const val KEY_READER_PAGE_ANIMATION_ENABLED = "reader_page_animation_enabled"
     const val KEY_READER_OVERWRITE_CHECK_ENABLED = "reader_overwrite_check_enabled"
     const val KEY_READER_EDIT_OVERWRITE_ENABLED = "reader_edit_overwrite_enabled"
     const val KEY_READER_DICTIONARY_ENABLED = "reader_dictionary_enabled"
@@ -30,6 +34,14 @@ object ModuleSettings {
     const val KEY_SHELF_AUTO_UPDATE = "shelf_auto_update"
     const val KEY_SHELF_CURRENT_ONLY = "shelf_current_only"
     const val KEY_SHELF_SKIP_COMPLETED = "shelf_skip_completed"
+    const val KEY_HOME_DEFAULT_PAGE_ENABLED = "home_default_page_enabled"
+    const val KEY_ONLINE_DISCOVER_ENABLED = "online_discover_enabled"
+    const val KEY_MERCHANT_END_TIME_ENABLED = "merchant_end_time_enabled"
+    const val KEY_BOOK_IMAGE_SELECTION_ENABLED = "book_image_selection_enabled"
+    const val KEY_BOOK_LOCAL_EXPORT_ENABLED = "book_local_export_enabled"
+    const val KEY_BOOK_BACKUP_SCROLL_ENABLED = "book_backup_scroll_enabled"
+    const val KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED = "account_preference_restore_enabled"
+    const val KEY_ACCOUNT_SWITCH_ENTRY_ENABLED = "account_switch_entry_enabled"
     const val KEY_FONT_ENABLED = "font_enabled"
     const val KEY_FONT_SETTINGS_ENABLED = "font_settings_enabled"
     const val KEY_ACCOUNT_ENABLED = "account_enabled"
@@ -70,6 +82,7 @@ object ModuleSettings {
     const val DEFAULT_MODULE_ENABLED = true
     const val DEFAULT_ASSOCIATION_ENABLED = true
     const val DEFAULT_ASSOCIATION_MANUAL_EDIT_ENABLED = false
+    const val DEFAULT_ASSOCIATION_MANUAL_EDIT_UNLOCKED = false
     const val DEFAULT_ASSOCIATION_UNLINK_ENABLED = false
     const val DEFAULT_ASSOCIATION_COVER_FIX_ENABLED = false
     const val DEFAULT_READER_ENABLED = true
@@ -198,11 +211,15 @@ data class ModuleSettingsSnapshot(
     val apiDebugUnlocked: Boolean = ModuleSettings.DEFAULT_API_DEBUG_UNLOCKED,
     val associationEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_ENABLED,
     val associationManualEditEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_ENABLED,
+    val associationManualEditUnlocked: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_UNLOCKED,
+    val onlineEnhancedParserUnlocked: Boolean = false,
+    val onlineEnhancedParserEnabled: Boolean = false,
     val associationUnlinkEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED,
     val associationCoverFixEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_COVER_FIX_ENABLED,
     val readerEnabled: Boolean = ModuleSettings.DEFAULT_READER_ENABLED,
     val readerLongPressEnabled: Boolean = ModuleSettings.DEFAULT_READER_LONG_PRESS_ENABLED,
     val readerAutoPageEnabled: Boolean = ModuleSettings.DEFAULT_READER_AUTO_PAGE_ENABLED,
+    val readerPageAnimationEnabled: Boolean = true,
     val readerOverwriteCheckEnabled: Boolean = ModuleSettings.DEFAULT_READER_OVERWRITE_CHECK_ENABLED,
     val readerEditOverwriteEnabled: Boolean = ModuleSettings.DEFAULT_READER_EDIT_OVERWRITE_ENABLED,
     val readerDictionaryEnabled: Boolean = ModuleSettings.DEFAULT_READER_DICTIONARY_ENABLED,
@@ -220,6 +237,14 @@ data class ModuleSettingsSnapshot(
     val shelfAutoUpdate: Boolean = false,
     val shelfCurrentOnly: Boolean = false,
     val shelfSkipCompleted: Boolean = false,
+    val homeDefaultPageEnabled: Boolean = true,
+    val onlineDiscoverEnabled: Boolean = true,
+    val merchantEndTimeEnabled: Boolean = true,
+    val bookImageSelectionEnabled: Boolean = true,
+    val bookLocalExportEnabled: Boolean = true,
+    val bookBackupScrollEnabled: Boolean = true,
+    val accountPreferenceRestoreEnabled: Boolean = true,
+    val accountSwitchEntryEnabled: Boolean = true,
     val fontEnabled: Boolean = ModuleSettings.DEFAULT_FONT_ENABLED,
     val fontSettingsEnabled: Boolean = ModuleSettings.DEFAULT_FONT_SETTINGS_ENABLED,
     val accountEnabled: Boolean = ModuleSettings.DEFAULT_ACCOUNT_ENABLED,
@@ -260,7 +285,10 @@ data class ModuleSettingsSnapshot(
         get() = canRunAssociation && associationSearchSources.any { it.value }
 
     val canUseManualEdit: Boolean
-        get() = canRunAssociation && associationManualEditEnabled
+        get() = canRunAssociation && associationManualEditUnlocked && associationManualEditEnabled
+
+    val canUseEnhancedOnlineParser: Boolean
+        get() = moduleEnabled && onlineEnhancedParserUnlocked && onlineEnhancedParserEnabled
 
     val canUseAssociationUnlink: Boolean
         get() = canRunAssociation && associationUnlinkEnabled

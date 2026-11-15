@@ -7,32 +7,12 @@ import com.reamicro.fix.online.OnlineJsonPathCompat
 import com.reamicro.fix.online.search.formatOnlineWordCountValue
 import com.reamicro.fix.online.search.inferOnlineStatusFromLastChapterTitle
 import com.reamicro.fix.online.search.resolveOnlineUrlCompat
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
 import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 import com.reamicro.fix.hook.webdav.*
-
-internal fun sanitizeHostCloudSearchResults(param: XC_MethodHook.MethodHookParam, map: Map<*, *>) {
-    runCatching {
-
-        val hasOnlineEntry = map.containsKey(BACKUP_TYPE_ONLINE_COMPLETION)
-        if (!hasOnlineEntry) return
-        val sanitized = LinkedHashMap<Any?, Any?>()
-        map.forEach { (key, value) ->
-            if (key == BACKUP_TYPE_ONLINE_COMPLETION) return@forEach
-
-            if (value is List<*> && value.isEmpty()) return@forEach
-            sanitized[key] = value
-        }
-        param.args?.set(2, sanitized)
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX sanitize host cloud results failed: ${it.stackTraceToString()}")
-    }
-}
 
 internal fun indexOfOptionsBlock(raw: String): Int {
 
@@ -57,7 +37,7 @@ internal fun onlineDataUrlStringResponse(url: String): String {
         .trim()
     if (dataPart.isBlank()) return ""
     val bytes = Base64.decode(dataPart, Base64.DEFAULT)
-    return if (url.substringAfter(dataPart, "").contains(""""type"""")) {
+    return if (url.substringAfter(dataPart, "").contains("\"type\"")) {
         bytes.toLowerHexString()
     } else {
         String(bytes, Charsets.UTF_8)
@@ -345,17 +325,4 @@ internal fun sourceBaseUrl(source: OnlineSourceEntry): String =
 internal fun resolveOnlineUrl(baseUrl: String, value: String): String =
     resolveOnlineUrlCompat(baseUrl, value)
 
-internal fun homeCloudSearchResults(state: Any): Map<*, *>? =
-    if (HostHomeSearchState.isB4(state)) HostHomeSearchState.cloudResults(state)
-    else state.javaClass.methods.firstOrNull {
-        it.name == "getCloudSearchResults" && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }?.invoke(state) as? Map<*, *>
-
-internal fun homeCloudSearchResultsComponentIndex(state: Any, parameterCount: Int): Int? {
-    val current = homeCloudSearchResults(state) ?: return null
-    for (index in 0 until parameterCount) {
-        val component = state.invokeNoArg("component${index + 1}")
-        if (component === current) return index
-    }
-    return null
-}
+internal fun homeCloudSearchResults(state: Any): Map<*, *>? = HostHomeSearchState.cloudResults(state)

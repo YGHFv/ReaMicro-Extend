@@ -33,9 +33,16 @@ internal object VerifiedFileIO {
             throw EpubWriteNotConfirmed("写入已发生，但 ${file.name} 的写后校验未通过。请重新打开检查，不要重复提交。", error)
         }
     }
-    fun copyAtomic(source: File, target: File): Digest {
+    fun copyAtomic(
+        source: File,
+        target: File,
+        commit: (() -> Unit) -> Unit = { it() },
+        checkCurrent: () -> Unit = {},
+    ): Digest {
+        checkCurrent()
         val expected = digest(source)
         if (source.canonicalFile == target.canonicalFile) {
+            checkCurrent()
             requireMatches(target, expected)
             return expected
         }
@@ -45,14 +52,32 @@ internal object VerifiedFileIO {
         val temp = File.createTempFile(".reamicro-copy-", ".tmp", parent)
         try {
             source.inputStream().use { input -> temp.outputStream().use { output ->
-                input.copyTo(output); output.fd.sync()
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    checkCurrent()
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                }
+                output.fd.sync()
             } }
+            checkCurrent()
             check(digest(temp) == expected) { "复制期间源文件发生变化，未替换目标" }
             check(if (oldTarget == null) !target.exists() else digest(target) == oldTarget) {
                 "目标文件已被其他操作修改，未覆盖"
             }
-            try { Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING) }
-            catch (_: AtomicMoveNotSupportedException) { Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+            var committed = false
+            commit {
+                check(!committed) { "复制目标已经提交，不能重复替换" }
+                checkCurrent()
+                check(if (oldTarget == null) !target.exists() else digest(target) == oldTarget) {
+                    "等待提交期间目标文件已被其他操作修改，未覆盖"
+                }
+                try { Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING) }
+                catch (_: AtomicMoveNotSupportedException) { Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+                committed = true
+            }
+            check(committed) { "复制未提交，目标内容已保留" }
             requireMatches(target, expected)
             return expected
         } finally { temp.delete() }

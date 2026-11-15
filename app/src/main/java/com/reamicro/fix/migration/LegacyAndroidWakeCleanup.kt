@@ -44,7 +44,7 @@ object LegacyAndroidWakeCleanup {
     @Synchronized
     fun runForHost(context: Context) {
         val app = context.applicationContext
-        if (app.packageName != "app.zhendong.reamicro") return
+        if (!com.reamicro.fix.core.HostPackages.contains(app.packageName)) return
         val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getBoolean("host_wake_removed_v1", false)) return
         runCatching {

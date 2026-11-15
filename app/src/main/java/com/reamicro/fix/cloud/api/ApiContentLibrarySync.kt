@@ -3,6 +3,10 @@ package com.reamicro.fix.cloud.api
 import android.content.Context
 import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.online.OnlineSourceEntry
+import com.reamicro.fix.online.OnlineSourceTask
+import com.reamicro.fix.online.readOnlineSourceBytes
+import com.reamicro.fix.reload.TaskCancellation
 import com.reamicro.fix.settings.ReaderHighlightStyle
 import com.reamicro.fix.settings.XposedModuleSettings
 import java.io.File
@@ -11,9 +15,10 @@ import org.json.JSONObject
 
 class ApiContentLibrarySync(
     private val context: Context,
-    private val client: ApiServerClient,
+    client: ApiServerClient,
     private val settings: XposedModuleSettings,
 ) {
+    private val client = client.snapshot()
     private val manager by lazy { ApiPackageManager(context, client, settings) }
 
     private val builtInHighlightStyleIds: Set<String> by lazy {
@@ -37,18 +42,20 @@ class ApiContentLibrarySync(
         val messages = mutableListOf<String>()
         targets.forEachIndexed { index, item ->
             onProgress(index + 1, targets.size, item.name)
-            runCatching { client.uploadPackage(item) }
+            runCatching {
+                val source = currentSource(item)
+                val result = if (source == null) client.uploadPackage(item)
+                    else OnlineSourceTask(source).use { operation -> operation.run { client.uploadPackage(item) } }
+                val summary = requireNotNull(result.summary) { "服务器未返回内容包信息" }
+                check(result.uploaded || result.linked) { "服务器未确认内容包已上传或关联" }
+                registerLink(item, summary, source)
+                result
+            }
                 .onSuccess { result ->
-                    val summary = result.summary
-                    if (summary == null) {
-                        failed++
-                        messages += "${item.name}：服务器未返回内容包信息"
-                        return@onSuccess
-                    }
-                    registerLink(item, summary)
                     if (result.uploaded) uploaded++ else linked++
                 }
                 .onFailure { error ->
+                    TaskCancellation.rethrowIfCancelled(error)
                     failed++
                     messages += "${item.name}：${error.message ?: "上传失败"}"
                 }
@@ -77,9 +84,10 @@ class ApiContentLibrarySync(
         val messages = mutableListOf<String>()
         pairs.forEachIndexed { index, (item, summary) ->
             onProgress(index + 1, pairs.size, item.name)
-            runCatching { registerLink(item, summary) }
+            runCatching { registerLink(item, summary, currentSource(item)) }
                 .onSuccess { linked++ }
                 .onFailure { error ->
+                    TaskCancellation.rethrowIfCancelled(error)
                     failed++
                     messages += "${item.name}：${error.message ?: "关联失败"}"
                 }
@@ -88,18 +96,35 @@ class ApiContentLibrarySync(
         return ApiLibrarySyncSummary(pairs.size, 0, linked, failed, messages.take(20))
     }
 
-    private fun registerLink(item: ApiLibraryItem, summary: ApiPackageSummary) {
+    private fun currentSource(item: ApiLibraryItem): OnlineSourceEntry? {
+        TaskCancellation.checkCurrent()
+        if (item.kind != ApiPackageKind.ONLINE_SOURCE) return null
+        val source = OnlineSourceStore.list(context).firstOrNull { it.id == item.localContentId }
+            ?: throw java.util.concurrent.CancellationException("在线源已删除，请重新读取内容库")
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(item.payload)
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        if (source.revision.substringBefore(':') != digest)
+            throw java.util.concurrent.CancellationException("在线源已更新，请重新读取内容库")
+        return source
+    }
+
+    private fun registerLink(item: ApiLibraryItem, summary: ApiPackageSummary, source: OnlineSourceEntry? = null) {
+        require(summary.kind == item.kind) { "服务器返回了不同类型的内容包" }
+        var linkedSource: OnlineSourceEntry? = null
         if (item.kind == ApiPackageKind.ONLINE_SOURCE) {
-            OnlineSourceStore.linkPackage(
+            check(OnlineSourceStore.linkPackage(
                 context = context,
                 sourceId = item.localContentId,
                 packageId = summary.packageId,
                 aliases = summary.aliases + summary.contentId + item.identities,
 
                 names = summary.names + summary.name + item.name,
-            )
+                expected = source,
+            )) { "在线源已变化，未保存内容库关联" }
+            linkedSource = OnlineSourceStore.list(context).firstOrNull { it.id == item.localContentId }
+                ?: throw java.util.concurrent.CancellationException("在线源已删除，未保存内容库关联")
         }
-        manager.link(summary.kind, summary.packageId, item.localContentId)
+        manager.link(summary.kind, summary.packageId, item.localContentId, linkedSource)
     }
 
     private fun collectHighlightStyles(): List<ApiLibraryItem> =
@@ -124,7 +149,11 @@ class ApiContentLibrarySync(
     private fun collectOnlineSources(): List<ApiLibraryItem> =
         OnlineSourceStore.list(context).mapNotNull { source ->
             val file = File(File(context.filesDir, ONLINE_SOURCE_DIR), source.fileName)
-            val bytes = file.takeIf(File::isFile)?.let { runCatching(it::readBytes).getOrNull() } ?: return@mapNotNull null
+            val bytes = file.takeIf(File::isFile)?.let {
+                runCatching { it.inputStream().use(::readOnlineSourceBytes) }
+                    .onFailure(TaskCancellation::rethrowIfCancelled).getOrNull()
+            } ?: return@mapNotNull null
+            OnlineSourceStore.requireCurrent(source)
             val domains = buildSet {
                 normalizeSourceDomain(source.sourceUrl).takeIf(String::isNotEmpty)?.let(::add)
                 normalizeSourceDomain(source.origin).takeIf(String::isNotEmpty)?.let(::add)
@@ -133,7 +162,7 @@ class ApiContentLibrarySync(
                 kind = ApiPackageKind.ONLINE_SOURCE,
                 name = source.name,
 
-                names = linkedSetOf(source.name) + OnlineSourceStore.knownNames(context, source.id),
+                names = linkedSetOf(source.name) + source.knownNames,
                 contentId = source.id,
                 domains = domains,
 

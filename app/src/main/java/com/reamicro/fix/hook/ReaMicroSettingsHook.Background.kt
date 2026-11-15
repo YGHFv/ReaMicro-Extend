@@ -1,10 +1,8 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
-
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
-import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -22,7 +20,7 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.Toast
 import com.reamicro.fix.settings.ModuleSettings
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.util.Locale
 import com.reamicro.fix.hook.settings.*
@@ -134,10 +132,10 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundPercentDialog(
     onApply: (Int) -> Unit,
 ) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, title, colors))
             var pendingValue = initialValue.coerceIn(0, 100)
@@ -197,7 +195,7 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundPercentDialog(
             card.addView(actions)
             showSettingsDialog(dialog, card, activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX profile background percent dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX profile background percent dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -209,10 +207,10 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundColorDialog() {
 
 internal fun ReaMicroSettingsHook.openProfileBackgroundCustomColorDialog(initialHex: String) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, "\u80cc\u666f\u989c\u8272", colors))
             var pendingHex = profileBackgroundNormalizeArgbHexOrNull(initialHex)
@@ -282,7 +280,7 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundCustomColorDialog(initial
             card.addView(actions)
             showSettingsDialog(dialog, card, activity)
         }.onFailure {
-            XposedBridge.log("ReaMicro LSP profile custom color dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("ReaMicro LSP profile custom color dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -315,10 +313,10 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundOptionDialog(
     logName: String,
 ) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, title, colors))
             options.forEach { option ->
@@ -345,7 +343,7 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundOptionDialog(
             card.addView(actions)
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX profile background $logName dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX profile background $logName dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -420,7 +418,7 @@ internal fun ReaMicroSettingsHook.openProfileBackgroundImagePicker() {
         activity.startActivityForResult(chooser, PROFILE_BACKGROUND_IMAGE_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         showToast("\u6253\u5f00\u80cc\u666f\u56fe\u7247\u9009\u62e9\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX open profile background image picker failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX open profile background image picker failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -435,7 +433,7 @@ internal fun ReaMicroSettingsHook.importProfileBackgroundImageFromUri(activity: 
         bumpProfileBackgroundVersion()
     }.onFailure {
         showToast(it.message ?: "\u9009\u62e9\u80cc\u666f\u56fe\u7247\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX import profile background image failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX import profile background image failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -488,7 +486,7 @@ internal fun ReaMicroSettingsHook.removeProfileBackgroundImage() {
         bumpProfileBackgroundVersion()
     }.onFailure {
         showToast(it.message ?: "\u79fb\u9664\u80cc\u666f\u56fe\u7247\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX remove profile background image failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX remove profile background image failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -517,10 +515,8 @@ internal fun ReaMicroSettingsHook.profileBackgroundVersionValue(): Int =
 internal fun ReaMicroSettingsHook.bumpProfileBackgroundVersion() {
     val state = profileBackgroundVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    setStateValue(state, value + 1)
 }
 
 internal fun ReaMicroSettingsHook.backgroundDim(composer: Any): Long =
-    method(THEME_KT_CLASS, BACKGROUND_DIM_METHOD, 1).invoke(null, colorScheme(composer)) as Long
+    requireNotNull(com.reamicro.fix.core.HostUiBindings.current).method("backgroundDim").invoke(null, colorScheme(composer)) as Long

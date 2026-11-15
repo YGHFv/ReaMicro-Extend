@@ -1,9 +1,7 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-
-import android.app.Dialog
 import android.graphics.Typeface
 import android.text.Editable
 import android.text.InputType
@@ -13,7 +11,7 @@ import android.widget.ProgressBar
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
@@ -28,8 +26,7 @@ internal fun ReaMicroSettingsHook.renderAiApiSwitch(config: AiApiConfig, compose
     val targetChecked = latest.enabled
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
+        setStateValue(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
     val checked = if (rememberedChecked != targetChecked) {
@@ -48,7 +45,7 @@ internal fun ReaMicroSettingsHook.renderAiApiSwitch(config: AiApiConfig, compose
         }
         targetUnit()
     }
-    renderAbiSwitch(checked, onCheckedChange, composer)
+    nativeUi.settingsSwitch(checked, onCheckedChange, composer)
 }
 
 internal fun ReaMicroSettingsHook.openAiApiConfigDialog() {
@@ -57,10 +54,10 @@ internal fun ReaMicroSettingsHook.openAiApiConfigDialog() {
 
 internal fun ReaMicroSettingsHook.openAiApiConfigDialog(existing: AiApiConfig?) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val nameInput = settingsDialogInput(activity, "\u540d\u79f0\uff08\u9ed8\u8ba4\u6a21\u578b\u540d\uff09", singleLine = true, colors = colors).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
@@ -203,7 +200,7 @@ internal fun ReaMicroSettingsHook.openAiApiConfigDialog(existing: AiApiConfig?) 
                 refreshButtons()
                 com.reamicro.fix.reload.ModuleResources.thread({
                     val result = AiApiStore.fetchModels(values.baseUrl, values.apiKey)
-                    activity.runOnUiThread {
+                    activity.runOnModuleUiThread {
                         fetchingModels = false
                         progress.visibility = View.GONE
                         status.text = result.message
@@ -232,7 +229,7 @@ internal fun ReaMicroSettingsHook.openAiApiConfigDialog(existing: AiApiConfig?) 
                 refreshButtons()
                 com.reamicro.fix.reload.ModuleResources.thread({
                     val result = AiApiStore.test(values.baseUrl, values.apiKey, values.model)
-                    activity.runOnUiThread {
+                    activity.runOnModuleUiThread {
                         testing = false
                         progress.visibility = View.GONE
                         status.text = result.message
@@ -287,7 +284,7 @@ internal fun ReaMicroSettingsHook.openAiApiConfigDialog(existing: AiApiConfig?) 
             refreshButtons()
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open AI API config dialog: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open AI API config dialog: ${it.stackTraceToString()}")
             showToast("\u65e0\u6cd5\u6253\u5f00 API \u914d\u7f6e")
         }
     }
@@ -304,7 +301,5 @@ internal fun ReaMicroSettingsHook.aiApiVersionValue(): Int =
 internal fun ReaMicroSettingsHook.bumpAiApiVersion() {
     val state = aiApiVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    setStateValue(state, value + 1)
 }

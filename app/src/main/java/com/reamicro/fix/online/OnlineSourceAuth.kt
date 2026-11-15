@@ -3,6 +3,7 @@ package com.reamicro.fix.online
 import android.content.Context
 import android.provider.Settings
 import com.reamicro.fix.settings.ModuleSettings
+import com.reamicro.fix.reload.TaskCancellation
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
@@ -19,6 +20,69 @@ object OnlineSourceAuth {
     private const val KEY_COOKIE_PREFIX = "online_login_cookie_"
     private const val KEY_COOKIE_TIME_PREFIX = "online_login_cookie_time_"
     private const val KEY_VARIABLE_PREFIX = "online_source_variable_"
+    private const val KEY_LOGIN_HEADER_PREFIX = "online_login_header_"
+    private const val KEY_DOMAIN_COOKIE_PREFIX = "online_cookie_domain_"
+
+    /** The imported engine uses the same account preferences as the source editor. */
+    internal fun parserLoginInfo(context: Context, source: OnlineSourceEntry): String? =
+        prefs(context)?.getString(KEY_INFO_PREFIX + source.id, null)
+            ?: loginInfo(context, source).takeIf { it.isNotEmpty() }?.let { JSONObject(it).toString() }
+
+    internal fun parserLoginHeader(context: Context, source: OnlineSourceEntry): String? =
+        prefs(context)?.getString(KEY_LOGIN_HEADER_PREFIX + source.id, null)
+
+    internal fun putParserLoginInfo(context: Context, source: OnlineSourceEntry, value: String?) =
+        putParserValue(context, source, KEY_INFO_PREFIX, value)
+
+    internal fun putParserLoginHeader(context: Context, source: OnlineSourceEntry, value: String?) =
+        putParserValue(context, source, KEY_LOGIN_HEADER_PREFIX, value)
+
+    internal fun putParserVariable(context: Context, source: OnlineSourceEntry, value: String?) =
+        putParserValue(context, source, KEY_VARIABLE_PREFIX, value)
+
+    private fun putParserValue(context: Context, source: OnlineSourceEntry, prefix: String, value: String?) {
+        OnlineSourceStore.withCurrent(source) {
+            val edit = requireNotNull(prefs(context)).edit()
+            if (value == null) edit.remove(prefix + source.id) else edit.putString(prefix + source.id, value)
+            check(edit.commit()) { "无法保存书源登录状态" }
+        }
+    }
+
+    internal fun parserCookie(context: Context, domain: String, source: OnlineSourceEntry?): String? {
+        val preferences = prefs(context) ?: return null
+        val key = KEY_DOMAIN_COOKIE_PREFIX + domain
+        if (preferences.contains(key)) return preferences.getString(key, null)
+        // Read the legacy per-source cookie only for that source's own domain.
+        val host = source?.sourceUrl?.let { runCatching { URL(it).host }.getOrNull() }
+        return if (host == domain || host?.endsWith(".$domain") == true) {
+            preferences.getString(KEY_COOKIE_PREFIX + source!!.id, null)
+        } else null
+    }
+
+    internal fun putParserCookie(context: Context, domain: String, value: String?, source: OnlineSourceEntry?) {
+        fun write() {
+            val edit = requireNotNull(prefs(context)).edit()
+            // A tombstone prevents deleted cookies from reappearing through the legacy fallback.
+            edit.putString(KEY_DOMAIN_COOKIE_PREFIX + domain, value.orEmpty())
+            val host = source?.sourceUrl?.let { runCatching { URL(it).host }.getOrNull() }
+            if (source != null && (host == domain || host?.endsWith(".$domain") == true)) {
+                edit.putString(KEY_COOKIE_PREFIX + source.id, value.orEmpty())
+                edit.putLong(KEY_COOKIE_TIME_PREFIX + source.id, System.currentTimeMillis())
+            }
+            check(edit.commit()) { "无法保存书源 Cookie" }
+        }
+        if (source == null) write() else OnlineSourceStore.withCurrent(source, ::write)
+    }
+
+    internal fun clearParserCookies(context: Context) {
+        val preferences = requireNotNull(prefs(context))
+        val edit = preferences.edit()
+        preferences.all.keys.filter {
+            it.startsWith(KEY_DOMAIN_COOKIE_PREFIX) || it.startsWith(KEY_COOKIE_PREFIX) ||
+                it.startsWith(KEY_COOKIE_TIME_PREFIX)
+        }.forEach(edit::remove)
+        check(edit.commit()) { "无法删除书源 Cookie" }
+    }
 
     fun supportsCredentialLogin(source: OnlineSourceEntry): Boolean =
         loginEndpoint(source) != null || loginFields(source).isNotEmpty()
@@ -42,7 +106,11 @@ object OnlineSourceAuth {
         val preferences = prefs(context) ?: return OnlineSourceAuthResult(false, "缺少设置存储")
         val normalized = value.trim()
         if (normalized.isBlank()) return OnlineSourceAuthResult(false, "请输入${source.variableComment.ifBlank { "源变量" }}")
-        preferences.edit().putString(KEY_VARIABLE_PREFIX + source.id, normalized).apply()
+        runCatching {
+            OnlineSourceStore.withCurrent(source) {
+                preferences.edit().putString(KEY_VARIABLE_PREFIX + source.id, normalized).apply()
+            }
+        }.getOrElse { return OnlineSourceAuthResult(false, "在线源已变化，请重新打开配置") }
         return OnlineSourceAuthResult(true, "共享Token已保存")
     }
 
@@ -60,7 +128,8 @@ object OnlineSourceAuth {
             if (token.isBlank()) {
                 OnlineSourceAuthResult(false, OnlineSourceTrxsCompat.responseMessage(body).ifBlank { "邀请码注册成功，但响应未返回 Token" })
             } else {
-                saveSourceVariable(appContext, source, token)
+                val saved = saveSourceVariable(appContext, source, token)
+                if (!saved.success) return@let saved
                 val info = OnlineSourceTrxsCompat.responseData(body) as? JSONObject
                 val user = info?.optString("id", "").orEmpty()
                 val left = info?.optString("left", "").orEmpty()
@@ -118,9 +187,13 @@ object OnlineSourceAuth {
             return OnlineSourceAuthResult(false, "请输入${missing.joinToString("、")}")
         }
         val merged = loginInfo(appContext, source).toMutableMap().apply { putAll(normalized) }
-        prefs(appContext)?.edit()
-            ?.putString(KEY_INFO_PREFIX + source.id, OnlineSourceLoginConfig.encode(merged))
-            ?.apply()
+        runCatching {
+            OnlineSourceStore.withCurrent(source) {
+                prefs(appContext)?.edit()
+                    ?.putString(KEY_INFO_PREFIX + source.id, OnlineSourceLoginConfig.encode(merged))
+                    ?.apply()
+            }
+        }.getOrElse { return OnlineSourceAuthResult(false, "在线源已变化，请重新打开配置") }
         val label = fields.joinToString("、") { it.name }
         return OnlineSourceAuthResult(true, "已保存$label")
     }
@@ -204,6 +277,7 @@ object OnlineSourceAuth {
             ?.remove(KEY_COOKIE_PREFIX + sourceId)
             ?.remove(KEY_COOKIE_TIME_PREFIX + sourceId)
             ?.remove(KEY_VARIABLE_PREFIX + sourceId)
+            ?.remove(KEY_LOGIN_HEADER_PREFIX + sourceId)
             ?.apply()
     }
 
@@ -244,6 +318,7 @@ object OnlineSourceAuth {
         password: String,
         rememberCredentials: Boolean = true,
     ): OnlineSourceAuthResult {
+        OnlineSourceStore.requireCurrent(source)
         val appContext = context?.applicationContext
             ?: return OnlineSourceAuthResult(false, "缺少 Context")
         val endpoint = loginEndpoint(source)
@@ -260,22 +335,30 @@ object OnlineSourceAuth {
                 .put("password", password)
                 .toString()
                 .toByteArray(Charsets.UTF_8)
-            val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = source.respondTime.coerceIn(15_000, 300_000).coerceAtMost(30_000)
-                readTimeout = source.respondTime.coerceIn(15_000, 300_000)
-                doOutput = true
-                setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
-                setRequestProperty("Accept", "application/json,text/plain,*/*")
-                parseHeaders(source.header).forEach { (name, value) ->
-                    if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
-                }
-                setRequestProperty("Content-Type", "application/json")
-            }
+            TaskCancellation.checkCurrent()
+            val connection = URL(requestUrl).openConnection() as HttpURLConnection
+            val cancellation = TaskCancellation.current()?.register(connection::disconnect)
             try {
-                connection.outputStream.use { it.write(payload) }
+                TaskCancellation.checkCurrent()
+                connection.requestMethod = "POST"
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = source.respondTime.coerceIn(15_000, 300_000).coerceAtMost(30_000)
+                connection.readTimeout = source.respondTime.coerceIn(15_000, 300_000)
+                connection.doOutput = true
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
+                connection.setRequestProperty("Accept", "application/json,text/plain,*/*")
+                parseHeaders(source.header).forEach { (name, value) ->
+                    if (name.isNotBlank() && value.isNotBlank()) connection.setRequestProperty(name, value)
+                }
+                connection.setRequestProperty("Content-Type", "application/json")
+                TaskCancellation.checkCurrent()
+                connection.outputStream.use {
+                    TaskCancellation.checkCurrent()
+                    it.write(payload)
+                }
                 val code = connection.responseCode
                 val body = responseBody(connection, code)
+                TaskCancellation.checkCurrent()
                 if (code !in 200..299) {
                     return@runCatching OnlineSourceAuthResult(false, "登录失败：HTTP $code")
                 }
@@ -288,21 +371,25 @@ object OnlineSourceAuth {
                 if (source.enabledCookieJar && cookie.isBlank()) {
                     return@runCatching OnlineSourceAuthResult(false, "登录成功但未收到 Cookie")
                 }
-                prefs(appContext)?.edit()
-                    ?.apply {
-                        if (rememberCredentials) {
-                            putString(KEY_USER_PREFIX + source.id, user)
-                            putString(KEY_PASSWORD_PREFIX + source.id, password)
+                OnlineSourceStore.withCurrent(source) {
+                    prefs(appContext)?.edit()
+                        ?.apply {
+                            if (rememberCredentials) {
+                                putString(KEY_USER_PREFIX + source.id, user)
+                                putString(KEY_PASSWORD_PREFIX + source.id, password)
+                            }
+                            putString(KEY_COOKIE_PREFIX + source.id, cookie)
+                            putLong(KEY_COOKIE_TIME_PREFIX + source.id, System.currentTimeMillis())
                         }
-                        putString(KEY_COOKIE_PREFIX + source.id, cookie)
-                        putLong(KEY_COOKIE_TIME_PREFIX + source.id, System.currentTimeMillis())
-                    }
-                    ?.apply()
+                        ?.apply()
+                }
                 OnlineSourceAuthResult(true, loginSuccessMessage(root))
             } finally {
+                cancellation?.close()
                 connection.disconnect()
             }
         }.getOrElse {
+            TaskCancellation.rethrowIfCancelled(it)
             OnlineSourceAuthResult(false, "登录失败：${it.message ?: it.javaClass.simpleName}")
         }
     }
@@ -312,24 +399,32 @@ object OnlineSourceAuth {
 
     private fun requestTrxsApi(source: OnlineSourceEntry, requestUrl: String, token: String): Pair<Boolean, String> =
         runCatching {
-            val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = source.respondTime.coerceIn(15_000, 300_000).coerceAtMost(30_000)
-                readTimeout = source.respondTime.coerceIn(15_000, 300_000)
-                setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
-                setRequestProperty("Accept", "application/json,text/plain,*/*")
-                if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
-            }
+            OnlineSourceStore.requireCurrent(source)
+            val connection = URL(requestUrl).openConnection() as HttpURLConnection
+            val cancellation = TaskCancellation.current()?.register(connection::disconnect)
             try {
+                TaskCancellation.checkCurrent()
+                connection.requestMethod = "GET"
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = source.respondTime.coerceIn(15_000, 300_000).coerceAtMost(30_000)
+                connection.readTimeout = source.respondTime.coerceIn(15_000, 300_000)
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 ReaMicro-Extend/online-source")
+                connection.setRequestProperty("Accept", "application/json,text/plain,*/*")
+                if (token.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer $token")
+                TaskCancellation.checkCurrent()
                 val code = connection.responseCode
                 val body = responseBody(connection, code)
-                val root = runCatching { JSONObject(body) }.getOrNull()
-                val apiSuccess = root?.optString("msg", "").orEmpty().let { it.isBlank() || it == "success" }
-                (code in 200..299 && apiSuccess) to body
+                TaskCancellation.checkCurrent()
+                OnlineSourceStore.requireCurrent(source)
+                trxsApiResponseSuccess(code, body) to body
             } finally {
+                cancellation?.close()
                 connection.disconnect()
             }
-        }.getOrElse { false to (it.message ?: it.javaClass.simpleName) }
+        }.getOrElse {
+            TaskCancellation.rethrowIfCancelled(it)
+            false to (it.message ?: it.javaClass.simpleName)
+        }
 
     private fun loginEndpoint(source: OnlineSourceEntry): String? {
         val loginUrl = source.loginUrl.trim()

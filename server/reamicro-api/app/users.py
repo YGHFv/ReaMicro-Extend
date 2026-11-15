@@ -29,22 +29,9 @@ def users_path():
 
 
 def load_users() -> dict[str, dict[str, Any]]:
-    path = users_path()
-    if not path.is_file():
-        return {}
-    try:
-        stored = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return stored if isinstance(stored, dict) else {}
-
-
-def save_users(users: dict[str, dict[str, Any]]) -> None:
-    path = users_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    store = runtime.get_state_store()
+    store.import_json_namespace("users", users_path())
+    return store.load_namespace("users")
 
 
 def normalize_account_id(value: Any) -> str:
@@ -90,36 +77,32 @@ def upsert_user(account_id: str, **fields) -> dict[str, Any]:
     account_id = normalize_account_id(account_id)
     if not account_id:
         raise ValueError("阅微账号 ID 无效")
-    users = load_users()
-    user = users.get(account_id) or default_user(account_id)
-    allowed = {"note", "enabled", "capabilities", "uploadQuota", "firstSeenAt", "lastSeenAt"}
-    for key, value in fields.items():
-        if key not in allowed:
-            continue
-        if key == "capabilities":
-            user[key] = normalize_capabilities(value)
-        elif key == "enabled":
-            user[key] = bool(value)
-        elif key == "uploadQuota":
-            user[key] = bounded_config_int(value, 0, 0)
-        elif key in {"firstSeenAt", "lastSeenAt"}:
-            user[key] = bounded_config_int(value, 0, 0)
-        else:
-            user[key] = str(value)[:200]
-    user["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-    users[account_id] = user
-    save_users(users)
-    return user
+    load_users()
+    def update(users):
+        user = users.setdefault(account_id, default_user(account_id))
+        allowed = {"note", "enabled", "capabilities", "uploadQuota", "firstSeenAt", "lastSeenAt"}
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key == "capabilities":
+                user[key] = normalize_capabilities(value)
+            elif key == "enabled":
+                user[key] = bool(value)
+            elif key == "uploadQuota":
+                user[key] = bounded_config_int(value, 0, 0)
+            elif key in {"firstSeenAt", "lastSeenAt"}:
+                user[key] = bounded_config_int(value, 0, 0)
+            else:
+                user[key] = str(value)[:200]
+        user["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+        return user
+    return runtime.get_state_store().mutate_namespace("users", update)
 
 
 def delete_user(account_id: str) -> bool:
     account_id = normalize_account_id(account_id)
-    users = load_users()
-    if account_id not in users:
-        return False
-    users.pop(account_id)
-    save_users(users)
-    return True
+    load_users()
+    return runtime.get_state_store().mutate_namespace("users", lambda users: users.pop(account_id, None) is not None)
 
 
 def touch_user(account_id: str) -> dict[str, Any] | None:
@@ -127,16 +110,17 @@ def touch_user(account_id: str) -> dict[str, Any] | None:
     account_id = normalize_account_id(account_id)
     if not account_id:
         return None
-    users = load_users()
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    user = users.get(account_id)
-    if user is None:
-        user = default_user(account_id)
-        user["firstSeenAt"] = now
-    user["lastSeenAt"] = now
-    users[account_id] = user
-    save_users(users)
-    return user
+    load_users()
+    def touch(users):
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        user = users.get(account_id)
+        if user is None:
+            user = default_user(account_id)
+            user["firstSeenAt"] = now
+        user["lastSeenAt"] = now
+        users[account_id] = user
+        return user
+    return runtime.get_state_store().mutate_namespace("users", touch)
 
 
 def user_enabled(account_id: str) -> bool:
@@ -247,15 +231,17 @@ def known_account_ids() -> list[str]:
 
 def sync_users_from_activity() -> int:
 
-    users = load_users()
-    added = 0
-    for account_id in known_account_ids():
-        if account_id in users:
-            continue
-        users[account_id] = default_user(account_id)
-        added += 1
+    accounts = known_account_ids()
+    def sync(users):
+        added = 0
+        for account_id in accounts:
+            if account_id in users:
+                continue
+            users[account_id] = default_user(account_id)
+            added += 1
+        return added
+    added = runtime.get_state_store().mutate_namespace("users", sync)
     if added:
-        save_users(users)
         audit_event("users_synced", metadata={"added": added})
     return added
 

@@ -3,55 +3,110 @@ package com.reamicro.fix.reload
 import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
-import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.HostCompositionBindings
+import java.lang.reflect.Constructor
+import java.lang.reflect.Field
+import java.lang.reflect.Member
+import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 
-/** 只支持已核对的正式版宿主：替换根 Composition，不销毁 Activity 或重放 onCreate。 */
+/** Replace the root Composition while retaining the Activity and its original host callback. */
 internal object HostCompositionReload {
-    fun capture(activity: Activity): Array<Any> {
-        check(HostSymbols.profileId == "2.3.3") { "当前宿主尚未验证原地热重载" }
+    private val host get() = requireNotNull(HostCompositionBindings.current) { "宿主原地热重载绑定尚未就绪" }
+    private fun root(activity: Activity): View {
         val container = activity.findViewById<ViewGroup>(android.R.id.content)
-        val root = (0 until container.childCount).map(container::getChildAt)
-            .single { it.javaClass.name == "hq1" }
-        val loader = activity.classLoader
-        val state = root.javaClass.getDeclaredField("j").get(root)
-        val content = state.javaClass.getMethod("getValue").invoke(state)
-        check(content?.javaClass?.name == "ro1") { "宿主根内容已变化" }
-        val callback = content.javaClass.getDeclaredField("c").get(content)
-        check(callback.javaClass.name == "ch" &&
-            callback.javaClass.getDeclaredField("c").get(callback) === activity) {
+        return (0 until container.childCount).map(container::getChildAt).single { it.javaClass == host.type("root") }
+    }
+    fun capture(activity: Activity): Array<Any> {
+        val api = host
+        check(api.type("activity").isInstance(activity))
+        val state = api.field("state").get(root(activity))
+        val content = api.method("stateGet").invoke(state)
+        check(content?.javaClass == api.type("wrapper")) { "宿主根内容已变化" }
+        val callback = requireNotNull(api.field("callback").get(content))
+        check(callback.javaClass == api.type("callback") &&
+            api.field("callbackActivity").get(callback) === activity) {
             "宿主根回调不是已验证的入口"
         }
-        check(callback.javaClass.classLoader === loader)
-        loader.loadClass("v0").getDeclaredMethod("e")
-        loader.loadClass("hq1").getConstructor(activity.javaClass)
-        loader.loadClass("hq1").getDeclaredMethod("setContent", loader.loadClass("sq3"))
-        val key = content.javaClass.getDeclaredField("a").getInt(content)
-        val tracked = content.javaClass.getDeclaredField("b").getBoolean(content)
-        return arrayOf(activity, callback, key, tracked)
+        val key = api.field("key").getInt(content)
+        val tracked = api.field("tracked").getBoolean(content)
+        // Method/Field/Constructor are bootstrap objects referring only to host classes. Keep
+        // the exact validated member, including its return type when a bridge overload exists.
+        // The new generation can then restore the UI even when its DexKit initialization fails.
+        val rootConstructor = api.constructor("root")
+        val wrapperConstructor = api.constructor("wrapper")
+        val setContent = api.method("setContent")
+        val navigation = api.field("navCache")
+        val callbackActivity = api.field("callbackActivity")
+        return arrayOf(activity, callback, key, tracked, rootConstructor, wrapperConstructor, setContent,
+            navigation, callbackActivity)
     }
 
-    fun detach(state: Array<Any>) {
+    /** Re-enter current content after late hook installation, retaining navigation and ViewModels. */
+    fun refresh(activity: Activity) {
+        val state = capture(activity)
+        val api = host
+        val content = api.constructor("wrapper").newInstance(state[2], state[3], state[1])
+        api.method("setContent").invoke(root(activity), content)
+    }
+
+    fun detach(state: Array<Any>, beforeMutation: () -> Unit) {
         val activity = state[0] as Activity
         val container = activity.findViewById<ViewGroup>(android.R.id.content)
-        val root = (0 until container.childCount).map(container::getChildAt)
-            .single { it.javaClass.name == "hq1" }
+        val root = root(activity)
         // 先释放 remember/effect/导航闭包，再移除旧 View，整个任务及 Activity 留在前台。
-        activity.classLoader.loadClass("v0").getDeclaredMethod("e").invoke(root)
+        com.reamicro.fix.hook.ReaMicroSettingsHook.prepareNavigationReload(activity)
+        beforeMutation()
+        host.method("dispose").invoke(root)
+        host.field("navCache").set(null, null)
         container.removeView(root)
-        activity.classLoader.loadClass("qkd").getDeclaredField("c").set(null, null)
     }
 
     fun restore(state: Array<*>) {
         val activity = state[0] as Activity
         check(!activity.isDestroyed && !activity.isFinishing) { "宿主页面已退出" }
-        val loader = activity.classLoader
-        val root = loader.loadClass("hq1").getConstructor(activity.javaClass).newInstance(activity) as View
+        val members = restoreMembers(state)
+        val loader = activity.javaClass.classLoader
+        check(listOf<Member>(members.root, members.wrapper, members.content, members.navigation, members.callbackActivity).all {
+            it.declaringClass.classLoader === loader
+        } && state[1]?.javaClass?.classLoader === loader) { "热重载恢复状态不属于宿主" }
+        check(members.callbackActivity.get(state[1]) === activity) { "宿主根回调不是已验证的入口" }
+        check(Modifier.isStatic(members.navigation.modifiers)) { "宿主导航状态不是静态字段" }
+        val root = members.root.newInstance(activity) as View
         // 新 wrapper 不携带旧 Composition 的 RecomposeScope，原始回调完全属于宿主。
-        val content = loader.loadClass("ro1").getConstructor(
-            Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Any::class.java,
-        ).newInstance(state[2], state[3], state[1])
-        root.javaClass.getDeclaredMethod("setContent", loader.loadClass("sq3")).invoke(root, content)
-        activity.findViewById<ViewGroup>(android.R.id.content).addView(root,
+        val content = members.wrapper.newInstance(state[2], state[3], state[1])
+        members.content.invoke(root, content)
+        val container = activity.findViewById<ViewGroup>(android.R.id.content)
+        // A failed detach may leave the disposed root attached. Replace it as part of rollback.
+        val previous = (0 until container.childCount).map(container::getChildAt)
+            .filter { it.javaClass == members.root.declaringClass }
+        check(previous.size <= 1) { "宿主存在多个根页面" }
+        members.navigation.set(null, null)
+        previous.forEach(container::removeView)
+        container.addView(root,
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    fun restoreIfMissing(state: Array<*>) {
+        val activity = state[0] as Activity
+        val type = restoreMembers(state).root.declaringClass
+        val container = activity.findViewById<ViewGroup>(android.R.id.content)
+        if ((0 until container.childCount).none { container.getChildAt(it).javaClass == type }) restore(state)
+    }
+
+    private class RestoreMembers(
+        val root: Constructor<*>,
+        val wrapper: Constructor<*>,
+        val content: Method,
+        val navigation: Field,
+        val callbackActivity: Field,
+    )
+
+    private fun restoreMembers(state: Array<*>): RestoreMembers {
+        require(state.size >= 9) { "Incomplete neutral composition state" }
+        return RestoreMembers(
+            state[4] as Constructor<*>, state[5] as Constructor<*>,
+            state[6] as Method, state[7] as Field, state[8] as Field,
+        )
     }
 }

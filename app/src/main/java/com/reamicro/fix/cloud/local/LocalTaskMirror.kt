@@ -6,13 +6,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.os.SystemClock
 import com.reamicro.fix.cloud.api.ApiServerSettingsBridgeProvider
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
+import org.json.JSONObject
 
 object LocalTaskMirror {
     const val ACTION = "com.reamicro.fix.LOCAL_TASK_MIRROR"
@@ -20,17 +21,31 @@ object LocalTaskMirror {
     const val MODULE_PACKAGE = "com.reamicro.fix"
     const val RECEIVER_CLASS = "com.reamicro.fix.cloud.local.LocalTaskMirrorReceiver"
     const val PAYLOAD_ACCOUNTS = "accounts"
+    private val activationRevision = AtomicLong()
+    @Volatile private var confirmedActivation: Boolean? = null
+
+    internal fun activationConfirmed(enabled: Boolean): Boolean = confirmedActivation == enabled
 
     fun push(context: Context, onComplete: (() -> Unit)? = null): Boolean =
         exchange(context, LocalTaskBridgeProtocol.SYNC, null) { onComplete?.invoke() }
 
     fun pushWithResult(context: Context, onResult: (LocalTaskMirrorResult) -> Unit): Boolean =
-        exchange(context, LocalTaskBridgeProtocol.SYNC, null, onResult)
+        exchange(context, LocalTaskBridgeProtocol.SYNC, null, onResult = onResult)
 
     fun refresh(context: Context, accountId: String? = null, onResult: (LocalTaskMirrorResult) -> Unit): Boolean =
-        exchange(context, LocalTaskBridgeProtocol.READ, accountId, onResult)
+        exchange(context, LocalTaskBridgeProtocol.READ, accountId, onResult = onResult)
 
-    private fun exchange(context: Context, operation: String, accountId: String?,
+    fun setModuleEnabled(context: Context, enabled: Boolean, onResult: (LocalTaskMirrorResult) -> Unit): Boolean {
+        val revision = activationRevision.incrementAndGet()
+        confirmedActivation = null
+        return exchange(context, LocalTaskBridgeProtocol.ACTIVATE, null,
+            JSONObject().put("moduleEnabled", enabled).toString()) { result ->
+            if (activationRevision.get() == revision) confirmedActivation = if (result.success) enabled else null
+            onResult(result)
+        }
+    }
+
+    private fun exchange(context: Context, operation: String, accountId: String?, controlPayload: String? = null,
                          onResult: (LocalTaskMirrorResult) -> Unit): Boolean {
         val lease = com.reamicro.fix.reload.ModuleResources.lease() ?: return false
         val app = context.applicationContext
@@ -41,11 +56,11 @@ object LocalTaskMirror {
         val transport = if (Build.VERSION.SDK_INT >= 34) "ordered-broadcast" else "legacy-provider"
         val started = SystemClock.elapsedRealtime()
         fun deliver(result: LocalTaskMirrorResult) {
-            if (result.success) XposedBridge.logAlways("ReaMicro local task bridge $operation acknowledged transport=$transport ms=${SystemClock.elapsedRealtime() - started}")
-            else XposedBridge.logError("ReaMicro local task bridge $operation unconfirmed transport=$transport code=${result.error}")
+            if (result.success) HookRuntime.logAlways("ReaMicro local task bridge $operation acknowledged transport=$transport ms=${SystemClock.elapsedRealtime() - started}")
+            else HookRuntime.logError("ReaMicro local task bridge $operation unconfirmed transport=$transport code=${result.error}")
             main.post {
                 try {
-                    runCatching { onResult(result) }.onFailure { XposedBridge.logError("ReaMicro local task bridge UI callback failed") }
+                    runCatching { onResult(result) }.onFailure { HookRuntime.logError("ReaMicro local task bridge UI callback failed") }
                 } finally { lease.close() }
             }
         }
@@ -55,23 +70,28 @@ object LocalTaskMirror {
             deliver(LocalTaskMirrorResult(false, code))
         }
         fun accept(reply: LocalTaskBridgeReply) {
-            val error = LocalTaskBridgeProtocol.validateReply(id, reply)
+            val expectedActivation = if (operation == LocalTaskBridgeProtocol.ACTIVATE)
+                JSONObject(controlPayload!!).getBoolean("moduleEnabled") else null
+            val error = LocalTaskBridgeProtocol.validateReply(id, reply, expectedActivation)
             if (error != null) { fail(error); return }
             if (!completion.claim()) return
             main.removeCallbacksAndMessages(timerToken)
             if (!LocalTaskBridgeRuntime.enqueue {
                 val applied = runCatching {
-                    applyLocalTaskSyncReceipt(LocalTaskStore { app }, operation, reply.snapshot!!)
+                    if (operation != LocalTaskBridgeProtocol.ACTIVATE) {
+                        applyLocalTaskSyncReceipt(LocalTaskStore { app }, operation, reply.snapshot!!)
+                    }
                 }.isSuccess
                 deliver(LocalTaskMirrorResult(applied, if (applied) null else "snapshot_apply_failed", operation,
                     if (applied) reply.snapshot else null))
             }) deliver(LocalTaskMirrorResult(false, "busy"))
         }
-        main.postAtTime({ fail("timeout") }, timerToken, SystemClock.uptimeMillis() + 15_000L)
+        val timeout = if (operation == LocalTaskBridgeProtocol.ACTIVATE) 120_000L else 15_000L
+        main.postAtTime({ fail("timeout") }, timerToken, SystemClock.uptimeMillis() + timeout)
         val queued = LocalTaskBridgeRuntime.enqueue dispatch@ {
             if (completion.isClaimed()) return@dispatch
             try {
-                val payload = if (operation == LocalTaskBridgeProtocol.SYNC) LocalTaskStore { app }.mirrorPayload().toString() else null
+                val payload = if (operation == LocalTaskBridgeProtocol.SYNC) LocalTaskStore { app }.mirrorPayload().toString() else controlPayload
                 if (payload != null && !LocalTaskBridgeProtocol.fits(payload)) { fail("payload_too_large"); return@dispatch }
                 val request = LocalTaskBridgeRequest(id, operation, payload, accountId)
                 if (app.packageName == MODULE_PACKAGE && app.applicationInfo.uid == Process.myUid()) {

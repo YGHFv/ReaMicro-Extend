@@ -50,15 +50,9 @@ internal fun localTaskFromJson(taskType: String, obj: JSONObject): LocalTask {
     )
 }
 
-internal fun applyLocalTaskExecution(current: JSONObject, task: LocalTask, state: JSONObject) {
-    for (key in LocalTaskStore.RUNTIME_STATE_KEYS) {
-        if (key != LocalTaskStore.KEY_NEXT_RUN_AT && state.has(key)) current.put(key, state.get(key))
-    }
-    if (!current.optBoolean("enabled")) current.put("nextRunAt", 0L)
-    else if (current.optLong("configUpdatedAt") <= task.configUpdatedAt) {
-        current.put("nextRunAt", state.optLong("nextRunAt"))
-    }
-}
+internal fun applyLocalTaskExecution(
+    current: JSONObject, task: LocalTask, state: JSONObject, now: Long = System.currentTimeMillis(),
+) = LocalTaskRuntimeMerge.complete(current, task.configUpdatedAt, state, now)
 
 internal fun appendLocalTaskRecord(root: JSONObject, record: LocalTaskRecord) {
     val records = root.optJSONArray("records") ?: JSONArray()
@@ -91,14 +85,8 @@ internal fun nextLocalTaskAt(task: LocalTask, state: JSONObject, checkin: JSONOb
     return AutoReadTimeLock.clampNextAt(task, state, task.nextRunAt.coerceAtLeast(1L), now)
 }
 
-internal fun mergeLocalTaskSnapshot(current: JSONObject?, incoming: JSONObject): JSONObject {
-    if (current == null || current.optLong("configUpdatedAt") <= incoming.optLong("configUpdatedAt")) {
-        return JSONObject(incoming.toString())
-    }
-    return JSONObject(current.toString()).apply {
-        applyLocalTaskExecution(this, localTaskFromJson("", incoming), localTaskRuntimeState(incoming))
-    }
-}
+internal fun mergeLocalTaskSnapshot(current: JSONObject?, incoming: JSONObject): JSONObject =
+    LocalTaskRuntimeMerge.snapshot(current, incoming)
 
 internal fun rescheduleLocalTasks(store: LocalTaskRepository, now: Long): Int {
     var updated = 0
@@ -116,7 +104,8 @@ internal fun rescheduleLocalTasks(store: LocalTaskRepository, now: Long): Int {
             } else rescheduledNextRunAt(task.taskType, task.timeOfDay, task.nextRunAt.takeIf { it > 0L }, now, pendingClaim)
             val next = AutoReadTimeLock.clampNextAt(task, state, candidate, now)
             if (next == task.nextRunAt) continue
-            store.recordState(accountId, task.taskType, JSONObject().put("nextRunAt", next))
+            store.recordState(accountId, task.taskType, JSONObject().put("nextRunAt", next)
+                .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt))
             updated++
         }
     }
@@ -136,8 +125,20 @@ internal fun clearLocalTaskRecordsBefore(account: JSONObject, clearedAt: Long) {
 }
 
 internal fun applyLocalTaskRecordsSnapshot(current: JSONObject, incoming: JSONObject) {
-    val clearedAt = maxOf(current.optLong("recordsClearedAt"), incoming.optLong("recordsClearedAt"))
-    incoming.optJSONArray("records")?.let { current.put("records", it) }
+    val restoredAt = current.optLong(LocalTaskAccountBundle.RECORDS_IMPORTED_AT)
+    val restoredHistory = if (restoredAt > 0L && incoming.optJSONArray("records") != null) {
+        // Apply new tombstones to the already restored baseline independently of raw module history.
+        JSONObject(current.toString()).also { baseline ->
+            val deletionOnly = JSONObject(incoming.toString()).apply { remove("records") }
+            applyLocalTaskRecordDeletionsSnapshot(baseline, deletionOnly)
+        }.optJSONArray("records")
+    } else null
+    val incomingClear = incoming.optLong("recordsClearedAt").takeIf { restoredAt <= 0L || it >= restoredAt } ?: 0L
+    val clearedAt = maxOf(current.optLong("recordsClearedAt"), incomingClear)
+    applyLocalTaskRecordDeletionsSnapshot(current, incoming)
+    if (restoredHistory != null) current.put("records", mergeRestoredLocalTaskRecords(
+        restoredHistory, current.optJSONArray("records") ?: JSONArray(), restoredAt,
+    ))
     current.remove("recordsClearedAt")
     clearLocalTaskRecordsBefore(current, clearedAt)
 }

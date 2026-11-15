@@ -1,6 +1,6 @@
 package com.reamicro.fix.hook.discover
 
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 internal class DiscoverIcon(private val classLoader: ClassLoader) {
 
@@ -16,7 +16,7 @@ internal class DiscoverIcon(private val classLoader: ClassLoader) {
                     viewport = DiscoverIconArtwork.viewport)
                     ?: error("ImageVector.build returned null")
             }.onFailure {
-                XposedBridge.logAlways("$LOG_PREFIX failed to build discover icon: ${it.stackTraceToString()}")
+                HookRuntime.logAlways("$LOG_PREFIX failed to build discover icon: ${it.stackTraceToString()}")
             }.getOrNull()?.also { cached = it }
         }
     }

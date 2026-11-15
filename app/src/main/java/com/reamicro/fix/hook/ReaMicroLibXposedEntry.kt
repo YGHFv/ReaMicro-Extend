@@ -1,7 +1,8 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.association.provider.ExternalSourceLoader
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.core.HostPackages
+import com.reamicro.fix.xposed.HookRuntime
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
@@ -15,14 +16,23 @@ import android.content.pm.ApplicationInfo
 
 class ReaMicroLibXposedEntry : XposedModule() {
     private lateinit var hookEntry: ReaMicroHookEntry
+    private val startupLoaders = java.util.IdentityHashMap<ClassLoader, MutableSet<String>>()
+    private var processName: String? = null
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
-        initializeGeneration()
+        if (param.isSystemServer || !HostPackages.contains(param.processName)) {
+            detach()
+            return
+        }
+        initializeGeneration(param)
     }
 
-    private fun initializeGeneration() {
+    private fun initializeGeneration(param: ModuleLoadedParam) {
+        check(!param.isSystemServer && HostPackages.contains(param.processName)) { "Unsupported host process" }
+        processName = param.processName
+        synchronized(startupLoaders) { startupLoaders.clear() }
         ModuleResources.enable()
-        XposedBridge.attachFramework(this)
+        HookRuntime.attachFramework(this)
         val moduleInfo = getModuleApplicationInfo()
         com.reamicro.fix.core.InjectedModuleContext.configure(moduleInfo)
         ExternalSourceLoader.configure(moduleInfo.sourceDir)
@@ -32,15 +42,52 @@ class ReaMicroLibXposedEntry : XposedModule() {
     }
 
     override fun onPackageReady(param: PackageReadyParam) {
-        if (param.packageName != "app.zhendong.reamicro" && param.packageName != "app.zhendong.reamicro.fix") return
-        installPackage(param.packageName, param.classLoader, param.applicationInfo)
+        if (!param.isFirstPackage || !HostPackages.contains(param.packageName) || param.packageName != processName) return
+        if (!synchronized(startupLoaders) {
+                startupLoaders.getOrPut(param.classLoader) { mutableSetOf() }.add(param.packageName)
+            }) return
+        val started = android.os.SystemClock.elapsedRealtime()
+        val startup = HostStartupBootstrap(param.packageName, param.classLoader, hookEntry)
+        val packageName = param.packageName
+        val loader = param.classLoader
+        val applicationInfo = ApplicationInfo(param.applicationInfo)
+        configureHostQueries(loader, applicationInfo)
+        startup.observe(
+            accept = { application ->
+                val version = com.reamicro.fix.core.HostSupportedVersions.inspect(application, applicationInfo.sourceDir)
+                if (!version.accepted) {
+                    HookRuntime.logAlways("ReaMicro skipped unsupported host: ${version.reason}")
+                    false
+                } else {
+                    HookRuntime.setFeaturesEnabled(application.getSharedPreferences(
+                        com.reamicro.fix.settings.ModuleSettings.PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                        .getBoolean(com.reamicro.fix.settings.ModuleSettings.KEY_MODULE_ENABLED,
+                            com.reamicro.fix.settings.ModuleSettings.DEFAULT_MODULE_ENABLED))
+                    // Application.attach precedes ContentProvider/Sentry initialization. Verify
+                    // the archive before these guards as well as before all functional hooks.
+                    HostCrashReportBlocker.attachExistingApplication(application)
+                    com.reamicro.fix.core.HostCrashBindings.initialize(loader,
+                        applicationInfo.sourceDir, applicationInfo.dataDir)
+                    com.reamicro.fix.core.HookInstallReport.install("Entry", "EarlyCrashReportBlocker") {
+                        HostCrashReportBlocker.install(loader, packageName)
+                    }
+                    true
+                }
+            },
+            install = { installPackage(packageName, loader, applicationInfo) },
+        )
+        HookRuntime.logAlways("ReaMicro startup package callback released earlyMs=" +
+            "${android.os.SystemClock.elapsedRealtime() - started} pid=${android.os.Process.myPid()}")
     }
 
     override fun onHotReloading(param: HotReloadingParam): Boolean {
-        val state = HostGeneration.prepare(param.extras?.getBoolean(HotReloadContract.IN_PLACE) == true)
-            ?: return false
-        param.setSavedInstanceState(state)
-        return true
+        // APK replacement has no module extras. Both automatic and explicit requests use
+        // the same retirement path; only a user-requested in-place reload requires focus.
+        return HostGeneration.prepare(
+            param.extras?.getBoolean(HotReloadContract.IN_PLACE) == true &&
+                param.extras?.getBoolean(HotReloadContract.PACKAGE_UPGRADE) != true,
+            param::setSavedInstanceState,
+        )
     }
 
     override fun onHotReloaded(param: HotReloadedParam) {
@@ -49,55 +96,98 @@ class ReaMicroLibXposedEntry : XposedModule() {
         val application = state.getOrNull(0) as? Application ?: error("Missing host application")
         val loader = state.getOrNull(1) as? ClassLoader ?: error("Missing host classloader")
         val packageName = state.getOrNull(2) as? String ?: error("Missing host package")
-        val composition = state.getOrNull(3) as? Array<*>
-        initializeGeneration()
-        param.oldHookHandles.forEach { it.unhook() }
-        val prepared = android.os.SystemClock.elapsedRealtime()
-        installPackage(packageName, loader, application.applicationInfo)
-        HostGeneration.attach(application)
-        HostCrashReportBlocker.attachExistingApplication(application)
-        if (composition != null) HostGeneration.onMain {
-            val activity = composition[0] as android.app.Activity
-            HostGeneration.adopt(activity)
-            hookEntry.attachAfterHotReload(activity)
-            com.reamicro.fix.reload.HostCompositionReload.restore(composition)
+        check(HostPackages.contains(packageName) && packageName == param.processName) { "Unexpected reload target" }
+        val composition = (state.getOrNull(3) as? Array<*>)?.takeIf { it.isNotEmpty() }
+        // Version 92 handed off a foreground-only composition without this fifth value.
+        val resumed = state.getOrNull(4) as? Boolean ?: (composition != null)
+        try {
+            val version = com.reamicro.fix.core.HostSupportedVersions.inspect(
+                application, application.applicationInfo.sourceDir,
+            )
+            check(version.accepted) { version.reason }
+            initializeGeneration(param)
+            configureHostQueries(loader, application.applicationInfo)
+            hookEntry.attachStartupContext(application)
+            HostCrashReportBlocker.attachExistingApplication(application)
+            com.reamicro.fix.core.HostCrashBindings.initialize(loader,
+                application.applicationInfo.sourceDir, application.applicationInfo.dataDir)
+            val guardMethods = requireNotNull(com.reamicro.fix.core.HostCrashBindings.current)
+                .guards.map { it.first }.toSet()
+            val previousPrivacy = param.oldHookHandles.filter {
+                it.id?.startsWith(HostCrashReportBlocker.GUARD_ID_PREFIX) == true ||
+                    (it.id == null && it.executable in guardMethods)
+            }
+            // Replace privacy callbacks before removing any other callback. Legacy null-id handles
+            // are recognized by the current host contract and remain recognizable after replacement.
+            check(com.reamicro.fix.core.HookInstallReport.install("Entry", "EarlyCrashReportBlocker") {
+                HostCrashReportBlocker.install(loader, packageName, previousPrivacy)
+            }) { "Privacy guard replacement incomplete; previous guards retained" }
+            var oldHookError: Throwable? = null
+            param.oldHookHandles.filterNot { it in previousPrivacy }.forEach { handle ->
+                try {
+                    handle.unhook()
+                } catch (error: Throwable) {
+                    val previous = oldHookError
+                    if (previous == null) oldHookError = error else if (previous !== error) previous.addSuppressed(error)
+                }
+            }
+            oldHookError?.let { throw it }
+            val prepared = android.os.SystemClock.elapsedRealtime()
+            installPackage(packageName, loader, application.applicationInfo)
+            HostGeneration.attach(application, loader)
+            HostCrashReportBlocker.attachExistingApplication(application)
+            if (composition != null) HostGeneration.onMain {
+                val activity = composition[0] as android.app.Activity
+                HostGeneration.adopt(activity, resumed)
+                hookEntry.attachAfterHotReload(activity, resumed)
+                com.reamicro.fix.reload.HostCompositionReload.restore(composition)
+            }
+            check(com.reamicro.fix.core.HookInstallReport.failures().isEmpty()) {
+                "New generation hook installation incomplete: ${com.reamicro.fix.core.HookInstallReport.failures()}"
+            }
+            HookRuntime.logAlways("ReaMicro API102 new generation ready pid=${android.os.Process.myPid()} " +
+                "oldHooks=${param.oldHookHandles.size} ${com.reamicro.fix.core.HookInstallReport.summaryLine()} " +
+                "prepareMs=${prepared - started} installMs=${android.os.SystemClock.elapsedRealtime() - prepared} " +
+                "activity=${composition?.getOrNull(0)?.let(System::identityHashCode)} resumed=$resumed")
+        } catch (error: Throwable) {
+            if (composition != null) try {
+                HostGeneration.onMain { com.reamicro.fix.reload.HostCompositionReload.restoreIfMissing(composition) }
+            } catch (restoreError: Throwable) {
+                if (restoreError !== error) error.addSuppressed(restoreError)
+            }
+            throw error
         }
-        check(com.reamicro.fix.core.HookInstallReport.failures().isEmpty()) {
-            "New generation hook installation incomplete: ${com.reamicro.fix.core.HookInstallReport.failures()}"
-        }
-        XposedBridge.logAlways("ReaMicro API102 new generation ready pid=${android.os.Process.myPid()} " +
-            "oldHooks=${param.oldHookHandles.size} ${com.reamicro.fix.core.HookInstallReport.summaryLine()} " +
-            "prepareMs=${prepared - started} installMs=${android.os.SystemClock.elapsedRealtime() - prepared} " +
-            "activity=${composition?.getOrNull(0)?.let(System::identityHashCode)}")
     }
 
     private fun installPackage(packageName: String, classLoader: ClassLoader, applicationInfo: ApplicationInfo) {
-
-        // 符号解析必须先于任何 hook：混淆版据此把逻辑符号名改写成真实类/方法名
-        val apkSize = runCatching {
-            java.io.File(applicationInfo.sourceDir).length()
-        }.getOrDefault(0L)
-        com.reamicro.fix.core.HostSymbols.initialize(
-            classLoader = classLoader,
-            hostPackage = packageName,
-            apkSize = apkSize,
-            hostApkPath = applicationInfo.sourceDir,
-            hostDataDir = applicationInfo.dataDir,
-        )
-        if (!com.reamicro.fix.core.HostSymbols.isIdentity) {
-            com.reamicro.fix.core.HookInstallReport.install("Entry", "HostCoroutineProtocol") {
-                com.reamicro.fix.core.HostCoroutines.verifyProtocol(classLoader)
-            }
+        configureHostQueries(classLoader, applicationInfo)
+        com.reamicro.fix.core.HostQuerySession.use(classLoader, applicationInfo.sourceDir, applicationInfo.dataDir) {
+            installWithQueries(packageName, classLoader, applicationInfo)
         }
-        com.reamicro.fix.core.HookInstallReport.install("Entry", "HostCrashReportBlocker") {
-            HostCrashReportBlocker.install(classLoader, packageName)
-        }
-        XposedBridge.log(
-            "ReaMicro API102 entry ready: package=$packageName, " +
-                "symbols=${com.reamicro.fix.core.HostSymbols.summary()}, " +
-                "api=${getApiVersion()}, framework=$frameworkName $frameworkVersion($frameworkVersionCode)",
+    }
+    private fun configureHostQueries(classLoader: ClassLoader, applicationInfo: ApplicationInfo) {
+        com.reamicro.fix.core.HostQuerySession.configure(
+            classLoader, applicationInfo.sourceDir, applicationInfo.splitSourceDirs?.toList().orEmpty(),
         )
-        if (packageName == "app.zhendong.reamicro") StructureHost232Colors.install(classLoader)
+    }
+    private fun installWithQueries(packageName: String, classLoader: ClassLoader, applicationInfo: ApplicationInfo) {
+        com.reamicro.fix.core.HostBindingBootstrap.initialize(classLoader, packageName,
+            applicationInfo.sourceDir, applicationInfo.dataDir,
+            afterCrash = Runnable {
+                com.reamicro.fix.core.HookInstallReport.install("Entry", "HostCrashReportBlocker") {
+                    HostCrashReportBlocker.install(classLoader, packageName)
+                }
+            },
+            afterUi = Runnable {
+                com.reamicro.fix.core.HookInstallReport.install("Entry", "NativeThemeCapture") {
+                    HookRuntime.withManagementHooks { HostThemeColors.install(classLoader) }
+                }
+            },
+        )
+        HookRuntime.log("ReaMicro API102 entry ready: package=$packageName, " +
+            "symbols=${com.reamicro.fix.core.HostSymbols.summary()}, " +
+            "api=${getApiVersion()}, framework=$frameworkName $frameworkVersion($frameworkVersionCode)")
         hookEntry.handleLoadedPackage(packageName, classLoader)
+        com.reamicro.fix.core.HostAutoScanner.markInstalled()
     }
 }

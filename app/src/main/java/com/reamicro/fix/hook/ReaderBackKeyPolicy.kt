@@ -1,7 +1,7 @@
 package com.reamicro.fix.hook
 
 internal fun shouldReleaseReaderBackKey(
-    profile: String,
+    contractAvailable: Boolean,
     keyCode: Int,
     action: Int,
     repeatCount: Int,
@@ -11,6 +11,6 @@ internal fun shouldReleaseReaderBackKey(
     selectionKnownEmpty: Boolean,
     editorOrDialogOpen: Boolean,
 ): Boolean =
-    profile in listOf("2.3.3-rc3", "2.3.3", "2.3.4-b1") && keyCode == 4 && action == 0 && repeatCount == 0 &&
+    contractAvailable && keyCode == 4 && action == 0 && repeatCount == 0 &&
         !cancelled && readerStatus in listOf("Reader", "Menu") &&
         sheetHidden && selectionKnownEmpty && !editorOrDialogOpen

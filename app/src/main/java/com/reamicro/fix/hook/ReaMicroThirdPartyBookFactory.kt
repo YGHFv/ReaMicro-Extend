@@ -1,12 +1,10 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.HostAssociationBindings
 
 
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.ManualAssociationCandidate
-import com.reamicro.fix.core.HostClasses
 
 class ReaMicroThirdPartyBookFactory(
     private val classLoader: ClassLoader,
@@ -43,11 +41,9 @@ class ReaMicroThirdPartyBookFactory(
     }
 
     fun createThirdPartyGroup(publisher: String, books: List<Any>): Any {
-        val thirdPartyClass = classLoader.hostClass(THIRD_PARTY_CLASS)
-        val constructor = thirdPartyClass.getConstructor(String::class.java, List::class.java)
-        return constructor.newInstance(publisher, books)
+        return host.create("group", mapOf("publisher" to publisher, "books" to books))
     }
-
+    private val host get() = requireNotNull(HostAssociationBindings.current) { "Association contract unavailable" }
     private fun createThirdPartyBook(
         title: String,
         author: String,
@@ -60,79 +56,11 @@ class ReaMicroThirdPartyBookFactory(
         rating: Double,
         status: String,
     ): Any {
-        val thirdPartyBookClass = classLoader.hostClass(THIRD_PARTY_BOOK_CLASS)
-        val stringClass = String::class.java
-        val commonArgs = arrayOf(
-            title,
-            author,
-            alias,
-            "",
-            "",
-            intro,
-            cover,
-            "",
-            publisher,
-            "",
-            "",
-            "",
-            words,
-        )
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val types = arrayOf(
-                Int::class.javaPrimitiveType!!,
-                *Array(14) { stringClass },
-                Double::class.javaPrimitiveType!!,
-                stringClass,
-            )
-            // B4 仅保留序列化构造器；全部必填/可选字段均显式提供。
-            return thirdPartyBookClass.getDeclaredConstructor(*types)
-                .newInstance(65535, *commonArgs, detail, rating, status)
-        }
-        return runCatching {
-            thirdPartyBookClass
-                .getConstructor(
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    java.lang.Double.TYPE,
-                    stringClass,
-                )
-                .newInstance(*commonArgs, detail, rating, status)
-        }.getOrElse {
-            thirdPartyBookClass
-                .getConstructor(
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                    stringClass,
-                )
-                .newInstance(*commonArgs, status)
-        }
-    }
-
-    private companion object {
-        const val THIRD_PARTY_BOOK_CLASS = HostClasses.Host.THIRD_PARTY_BOOK
-        const val THIRD_PARTY_CLASS = HostClasses.Host.THIRD_PARTY
+        return host.create("candidate", mapOf(
+            "title" to title, "author" to author, "alias" to alias, "subtitle" to "", "original" to "",
+            "intro" to intro, "cover" to cover, "translator" to "", "publisher" to publisher,
+            "publishDate" to "", "price" to "", "isbn" to "", "words" to words,
+            "detail" to detail, "rating" to rating, "status" to status,
+        ))
     }
 }

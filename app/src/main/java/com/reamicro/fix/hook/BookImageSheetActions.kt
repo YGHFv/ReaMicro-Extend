@@ -3,18 +3,13 @@ package com.reamicro.fix.hook
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object BookImageSheetActions {
-    enum class Id { Pick, Online, Generate, Save, Restore, Remove, Fix, Cancel }
+    enum class Id { Online, Generate, Save, Fix }
     data class Action(val id: Id, val label: String, val icon: String)
-    fun items(cover: Boolean, hasSecondary: Boolean): List<Action> = buildList {
-        val label = if (cover) "封面" else "横幅"
-        add(Action(Id.Pick, "选取图片", "Image"))
+    fun additions(cover: Boolean, hasSecondary: Boolean): List<Action> = buildList {
         add(Action(Id.Online, "在线图片", "Link"))
-        add(Action(Id.Generate, "生成$label", "AutoAwesome"))
-        if (cover || hasSecondary) add(Action(Id.Save, "保存$label", "Download"))
-        if (hasSecondary) add(if (cover) Action(Id.Restore, "恢复封面", "RestartAlt")
-            else Action(Id.Remove, "删除横幅", "DeleteOutline"))
-        if (cover) add(Action(Id.Fix, "封面修复", "Build"))
-        add(Action(Id.Cancel, "取消", "Cancel"))
+        add(Action(Id.Generate, "生成${if (cover) "封面" else "横幅"}", "AutoAwesome"))
+        if (!cover && hasSecondary) add(Action(Id.Save, "保存横幅", "Download"))
+        if (cover) add(Action(Id.Fix, "封面修复", "Edit"))
     }
 }
 

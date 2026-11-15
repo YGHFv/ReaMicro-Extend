@@ -1,17 +1,10 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostNameMatches
-
-
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
-import android.os.Handler
 import android.os.Looper
 import android.os.Build
 import android.text.Editable
@@ -35,25 +28,19 @@ import com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
 import com.reamicro.fix.cloud.webdav.WebDavBackupSnapshot
 import com.reamicro.fix.cloud.webdav.WebDavCredentials
-import com.reamicro.fix.cloud.webdav.WebDavHttpException
 import com.reamicro.fix.cloud.webdav.WebDavImportSource
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
-import java.io.ByteArrayInputStream
+import com.reamicro.fix.cloud.webdav.WebDavOperationTicket
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.lang.ref.WeakReference
 import java.net.URI
 import java.net.URL
 import java.util.UUID
-import javax.xml.parsers.DocumentBuilderFactory
-import org.w3c.dom.Element
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.online.search.homeCloudSearchResults
 import com.reamicro.fix.online.download.importCacheFile
-import com.reamicro.fix.online.download.enqueueNativeImport
 import com.reamicro.fix.online.download.cleanupDownloadToken
 import com.reamicro.fix.online.download.cancelExistingBackupTasks
-import com.reamicro.fix.online.download.findImportBookMethod
 import com.reamicro.fix.cloud.webdav.cleartextHostOf
 import com.reamicro.fix.cloud.webdav.webDavDisplayDir
 import com.reamicro.fix.cloud.webdav.webDavDownloadKey
@@ -63,6 +50,9 @@ import com.reamicro.fix.cloud.webdav.childWebDavPath
 import com.reamicro.fix.cloud.webdav.parentWebDavPath
 import com.reamicro.fix.cloud.webdav.webDavPrefs
 import com.reamicro.fix.logging.logWebDav
+import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.reload.TaskCancellation
+import java.util.concurrent.CancellationException
 
 internal fun WebDavDriveHook.canShowWebDavEntry(): Boolean =
     settingsProvider().canRunWebDavCloud
@@ -82,20 +72,20 @@ internal fun WebDavDriveHook.logCleartextAllowed(value: Any?, via: String) {
 
 internal fun WebDavDriveHook.renderSyncWebDavAvailableCard(composer: Any, onAuthorize: Any?) {
     runCatching {
+        val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.syncUi)
+        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
         withWebDavIcon {
-            method(AUTH_CARD_CLASS, DRIVE_OTHER_AVAILABLE_CARD_METHOD, 4).invoke(
-                null,
+            host.call("available",
                 listOf(BACKUP_TYPE_WEBDAV),
-                functionProxy("WebDavOnlyAuthorize", FUNCTION1_CLASS) {
-                    onAuthorize?.let { invokeFunction1(it, BACKUP_TYPE_WEBDAV) }
-                    targetUnit()
+                ui.callback(host.type("function1")) {
+                    onAuthorize?.let { host.method("invoke1").invoke(it, BACKUP_TYPE_WEBDAV) }
                 },
                 composer,
                 0,
             )
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render WebDAV sync available card: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render WebDAV sync available card: ${it.stackTraceToString()}")
     }
 }
 
@@ -106,30 +96,30 @@ internal fun WebDavDriveHook.renderSyncWebDavAuthorizedCard(
     isRunning: Boolean = false,
 ): Boolean {
     return runCatching {
+        val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.syncUi)
+        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
         val icon = getComposeWebDavVector() ?: return@runCatching false
         val backupDir = currentWebDavBackupDir()
+        val previous = webDavRenderingSyncAuthCard.get()
         webDavRenderingSyncAuthCard.set(true)
         try {
-            method(AUTH_CARD_CLASS, DRIVE_AUTH_CARD_METHOD, 8).invoke(
-                null,
+            host.call("card",
                 icon,
                 "上传到 $WEBDAV_TITLE",
                 webDavDisplayDir(backupDir),
                 isRunning,
-                functionProxy("WebDavSyncDefaultDir", FUNCTION0_CLASS) {
+                ui.callback(host.type("function0")) {
                     if (backupDir.isBlank()) {
                         logWebDav("sync default click setup dir")
-                        onSetupDefaultDir?.let { invokeFunction1(it, BACKUP_TYPE_WEBDAV) }
+                        onSetupDefaultDir?.let { host.method("invoke1").invoke(it, BACKUP_TYPE_WEBDAV) }
                     } else {
                         logWebDav("sync default click upload dir=$backupDir")
-                        onPick?.let { invokeFunction2(it, BACKUP_TYPE_WEBDAV, backupDir) }
+                        onPick?.let { host.method("invoke2").invoke(it, BACKUP_TYPE_WEBDAV, backupDir) }
                     }
-                    targetUnit()
                 },
-                functionProxy("WebDavSyncPickDir", FUNCTION0_CLASS) {
+                ui.callback(host.type("function0")) {
                     logWebDav("sync pick click")
-                    onPick?.let { invokeFunction2(it, BACKUP_TYPE_WEBDAV, null) }
-                    targetUnit()
+                    onPick?.let { host.method("invoke2").invoke(it, BACKUP_TYPE_WEBDAV, null) }
                 },
                 composer,
                 0,
@@ -137,10 +127,10 @@ internal fun WebDavDriveHook.renderSyncWebDavAuthorizedCard(
             logWebDav("sync auth card rendered dir=$backupDir")
             true
         } finally {
-            webDavRenderingSyncAuthCard.remove()
+            if (previous == null) webDavRenderingSyncAuthCard.remove() else webDavRenderingSyncAuthCard.set(previous)
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render WebDAV sync auth card: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render WebDAV sync auth card: ${it.stackTraceToString()}")
     }.getOrDefault(false)
 }
 
@@ -156,7 +146,7 @@ internal fun WebDavDriveHook.renderImportWebDavRow(composer: Any) {
             )
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render WebDAV import row: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render WebDAV import row: ${it.stackTraceToString()}")
     }
 }
 
@@ -167,155 +157,173 @@ internal fun WebDavDriveHook.webDavImportClickCallback(): Any =
     }
 
 internal fun WebDavDriveHook.enqueueWebDavDownload(workerManager: Any, book: Any): Any {
+    val execution = storageExecutionGeneration.get()
+    check(!storageClosed && settingsProvider().canRunWebDavCloud) { "WebDAV 已停用" }
+    val operation = webDavOperationTicket()
+    val context = currentContext() ?: error("Android context not available")
     val name = book.callString("getName").ifBlank { WEBDAV_TITLE }
     val path = cloudPathOf(book)
     val sourceUrl = book.callString("getUrl")
     val sourceSize = book.invokeNoArg("getSize") as? Number
     val uniqueName = path.ifBlank { name }
-    val tracker = workerManager.javaClass.hostField("tracker")
-        .apply { isAccessible = true }
-        .get(workerManager)
+    val work = com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+    val tracker = work.tracker(workerManager)
+    checkWebDavOperation(operation)
     rememberWorkerManager(workerManager)
     val id = UUID.randomUUID().toString()
-    val stateFlow = tracker.javaClass.methods.first {
-        it.hostNameMatches("createTask") && it.parameterTypes.size == 4
-    }.apply { isAccessible = true }.invoke(
-        tracker,
-        id,
-        "download",
-        uniqueName,
-        newWorkState("Running", 0, null, null, name),
-    )
+    val stateFlow = work.create(tracker, id, "download", uniqueName, newWorkState("Running", 0, null, null, name))
     val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
-    val localFile = importCacheFile(
-        currentContext()?.cacheDir,
-        "reamicro-webdav",
-        name,
-    )
-    val downloadKey = webDavDownloadKey(path, name)
+    val localFile = importCacheFile(context.cacheDir, "reamicro-webdav", name)
+    val downloadKey = webDavDownloadKey(operation.storageIdentity, path, name)
     val token = CancellableWebDavDownload(
-        id = id,
-        key = downloadKey,
-        name = name,
-        tracker = tracker,
-        localFile = localFile,
-        createdAtMs = System.currentTimeMillis(),
-        handle = handle,
+        storageIdentity = operation.storageIdentity,
+        id = id, key = downloadKey, name = name, tracker = tracker,
+        localFile = localFile, createdAtMs = System.currentTimeMillis(), handle = handle,
     )
+    fun checkActive() {
+        if (storageClosed || !settingsProvider().canRunWebDavCloud || execution != storageExecutionGeneration.get()) {
+            throw com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException("WebDAV 或模块状态已变化")
+        }
+        throwIfWebDavDownloadCancelled(token)
+        if (work.cancelled(tracker, id)) throw com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException()
+        checkWebDavOperation(operation)
+    }
     runningWebDavDownloads[downloadKey] = token
 
     val thread = com.reamicro.fix.reload.ModuleResources.thread({
+        var queued = false
+        ImportCompletionState.retain(localFile)
         runCatching {
-            throwIfWebDavDownloadCancelled(token)
+            checkActive()
             setTrackedWorkState(tracker, id, "Running", 2, null, null, name)
             var lastProgress = 0
-            webDavDownload(path, localFile) { downloadProgress ->
-                throwIfWebDavDownloadCancelled(token)
+            webDavDownload(path, localFile, operation.credentials, ::checkActive) { downloadProgress ->
+                checkActive()
                 val progress = (downloadProgress * 70 / 100).coerceIn(2, 70)
                 if (progress >= lastProgress + 4 || progress == 70) {
                     lastProgress = progress
                     setTrackedWorkState(tracker, id, "Running", progress, null, null, name)
                 }
             }
-            throwIfWebDavDownloadCancelled(token)
+            checkActive()
             setTrackedWorkState(tracker, id, "Running", 78, null, null, name)
             val platformFile = platformFile(localFile)
-
             if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
                 cancelTrackedWork(tracker, id)
+                cleanupDownloadToken(token)
                 logWebDav("download import cancelled before native queue path=$path")
                 return@runCatching
             }
-            rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong())
-            setTrackedWorkState(tracker, id, "Running", 90, null, null, name)
-            enqueueNativeImport(workerManager, platformFile)
-            setTrackedWorkState(tracker, id, "Success", 100, null, sourceUrl.ifBlank { localFile.absolutePath }, name)
-            logWebDav("download complete native import queued path=$path url=${sourceUrl.redactWebDavUrl()}")
+            checkActive()
+            val source = rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong(),
+                operation.storageIdentity, ::checkActive)
+            setTrackedWorkState(tracker, id, "Running", 80, null, null, name)
+            checkActive()
+            // 队列调用前保留源 ticket；真实 worker/normal/TXT 路径继续校验同一账号。
+            val result = NativeImportTaskBridge.await(workerManager, platformFile, ::checkActive,
+                onProgress = { progress -> setTrackedWorkState(tracker, id, "Running", progress, null, null, name) },
+                onQueued = { queued = true }, workerFinished = source::isWorkerFinished,
+                onCancellationRequested = { token.cancelRequested = true })
+            runCatching { work.completeImport(tracker, id, result ?: sourceUrl.ifBlank { localFile.absolutePath }, name) }
+                .onFailure { HookRuntime.logError("$LOG_PREFIX completed WebDAV import status publication failed", it) }
+            logWebDav("download and native import completed path=$path url=${sourceUrl.redactWebDavUrl()}")
         }.onFailure {
-            if (it is CloudDownloadCancelledException || token.cancelRequested) {
+            val cancelled = it is java.util.concurrent.CancellationException || token.cancelRequested ||
+                !AccountHostRuntime.isCurrentStorage(operation.storageIdentity, activityProvider())
+            token.cancelRequested = true
+            if (!queued) cleanupDownloadToken(token)
+            if (cancelled) {
                 cancelTrackedWork(tracker, id)
-                cleanupDownloadToken(token)
                 logWebDav("download cancelled path=$path")
             } else {
-                XposedBridge.log("$LOG_PREFIX WebDAV tracked download failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX WebDAV tracked download failed: ${it.stackTraceToString()}")
                 setTrackedWorkState(tracker, id, "Error", 100, it.message ?: "WebDAV download failed", null, name)
             }
         }.also {
+            if (!queued) forgetPendingWebDavImport(localFile)
             runningWebDavDownloads.remove(downloadKey, token)
             webDavDownloadCancelPrompts.remove(id)
         }
     }, "ReaMicroWebDavDownload")
     token.thread = thread
     thread.start()
-
     return handle
 }
 
 internal fun WebDavDriveHook.enqueueWebDavBackup(workerManager: Any, bookId: Long, dir: String): Any {
+    val operation = webDavOperationTicket()
+    val context = currentContext() ?: error("Android context not available")
+    val work = com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+    val bookshelf = work.bookshelf(workerManager)
+    checkWebDavOperation(operation)
     rememberWorkerManager(workerManager)
-    val tracker = workerManager.javaClass.hostField("tracker")
-        .apply { isAccessible = true }
-        .get(workerManager)
-    val normalizedDir = normalizeWebDavPath(dir.ifBlank { currentWebDavBackupDir() })
+    val tracker = work.tracker(workerManager)
+    val normalizedDir = normalizeWebDavPath(dir.ifBlank { operation.backupDir })
     cancelExistingBackupTasks(tracker, bookId)
     val id = UUID.randomUUID().toString()
-    val stateFlow = tracker.javaClass.methods.first {
-        it.hostNameMatches("createTask") && it.parameterTypes.size == 4
-    }.apply { isAccessible = true }.invoke(
-        tracker,
-        id,
-        "backup:$BACKUP_TYPE_YUN115",
-        bookId.toString(),
-        newWorkState("Running", 0, null, null, null),
-    )
+    val stateFlow = work.create(tracker, id, "backup:$BACKUP_TYPE_WEBDAV", bookId.toString(), newWorkState("Running", 0, null, null, null))
     val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
-
-    webDavRunningBackupBookIds[bookId] = true
+    fun checkActive() {
+        if (Thread.currentThread().isInterrupted || work.cancelled(tracker, id)) {
+            throw java.util.concurrent.CancellationException("WebDAV backup cancelled")
+        }
+        checkWebDavOperation(operation)
+    }
     com.reamicro.fix.reload.ModuleResources.thread({
+        var archive: File? = null
         try {
             runCatching {
-                val book = findLocalBookById(bookId) ?: error("Book $bookId not found")
+                checkActive()
+                val book = findLocalBookById(bookId, operation.storageIdentity, bookshelf, ::checkActive)
+                    ?: error("Book $bookId not found for this account")
+                val uuid = book.callString("getUuid")
+                check(uuid.isNotBlank() && File(uuid).name == uuid && uuid != "." && uuid != "..") { "图书目录无效" }
+                val originalDirectory = bookDirectory(book).canonicalFile
+                check(originalDirectory.parentFile == File(context.filesDir, "${operation.storageIdentity.accountId}/books").canonicalFile) {
+                    "图书目录与备份账号不一致"
+                }
                 val fileName = exportFileName(book)
-                val localFile = File(
-                    currentContext()?.cacheDir ?: File("/data/local/tmp"),
-                    "reamicro-webdav-backup/${System.currentTimeMillis()}_${fileName.safeWebDavFileName()}",
-                )
+                val localFile = File(context.cacheDir, "reamicro-webdav-backup/${UUID.randomUUID()}_${fileName.safeWebDavFileName()}")
+                archive = localFile
                 localFile.parentFile?.mkdirs()
                 setTrackedWorkState(tracker, id, "Running", 8, null, null, fileName)
-                localFile.outputStream().use { output ->
-                    zipBookDirectory(book, output)
-                }
+                localFile.outputStream().use { output -> zipBookDirectory(book, output, ::checkActive) }
+                checkActive()
                 setTrackedWorkState(tracker, id, "Running", 45, null, null, fileName)
                 val remotePath = childWebDavPath(normalizedDir, fileName)
-                webDavUpload(remotePath, localFile)
+                webDavUpload(remotePath, localFile, operation.credentials, ::checkActive)
+                checkActive()
                 setTrackedWorkState(tracker, id, "Running", 88, null, null, fileName)
                 val updatedBook = copyBookWithBackup(book, BACKUP_TYPE_WEBDAV, remotePath, "")
-                updateLocalBook(updatedBook)
-                val backupBook = newCloudBook(
-                    WebDavEntry(
-                        name = fileName,
-                        path = remotePath,
-                        isDirectory = false,
-                        size = localFile.length(),
-                        updatedAt = System.currentTimeMillis(),
-                    ),
-                )
-                webDavRecentBackups[bookId] = WebDavBackupSnapshot(updatedBook, backupBook)
-                updateWebDavBackupViewModels(bookId, updatedBook, backupBook)
-                refreshWebDavBackupViewModelsLater(bookId, updatedBook, backupBook)
+                updateLocalBook(updatedBook, operation.storageIdentity, bookshelf, ::checkActive)
+                checkActive()
+                val backupBook = newCloudBook(WebDavEntry(fileName, remotePath, false, localFile.length(), System.currentTimeMillis()))
+                AccountHostRuntime.withCurrentStorage(operation.storageIdentity, activityProvider()) {
+                    checkActive()
+                    webDavRecentBackups[bookId] = WebDavBackupSnapshot(updatedBook, backupBook, operation.storageIdentity, uuid)
+                }
+                updateWebDavBackupViewModels(bookId, updatedBook, backupBook, operation.storageIdentity, uuid)
+                refreshWebDavBackupViewModelsLater(bookId, updatedBook, backupBook, operation.storageIdentity, uuid)
+                checkActive()
                 refreshWebDavLibrary(parentWebDavPath(remotePath))
+                checkActive()
                 setTrackedWorkState(tracker, id, "Success", 100, null, remotePath, fileName)
                 logWebDav("backup uploaded bookId=$bookId remote=$remotePath metadata updated")
             }.onFailure {
-                XposedBridge.log("$LOG_PREFIX WebDAV tracked backup failed: ${it.stackTraceToString()}")
-                setTrackedWorkState(tracker, id, "Error", 100, it.message ?: "WebDAV backup failed", null, WEBDAV_TITLE)
+                if (it is java.util.concurrent.CancellationException || work.cancelled(tracker, id) ||
+                    !AccountHostRuntime.isCurrentStorage(operation.storageIdentity, activityProvider())) {
+                    work.cancel(tracker, id)
+                    logWebDav("backup cancelled bookId=$bookId")
+                } else {
+                    HookRuntime.log("$LOG_PREFIX WebDAV tracked backup failed: ${it.stackTraceToString()}")
+                    setTrackedWorkState(tracker, id, "Error", 100, it.message ?: "WebDAV backup failed", null, WEBDAV_TITLE)
+                }
             }
         } finally {
-            webDavRunningBackupBookIds.remove(bookId)
+            archive?.delete()
             logWebDav("backup running cleared bookId=$bookId")
         }
     }, "ReaMicroWebDavBackup").start()
-
     return handle
 }
 
@@ -323,7 +331,9 @@ internal fun WebDavDriveHook.tryHandleRunningWebDavDownloadTap(book: Any): Boole
     if (!canCancelCloudDownload()) return false
     val path = cloudPathOf(book)
     val name = book.callString("getName").ifBlank { WEBDAV_TITLE }
-    val token = runningWebDavDownloads[webDavDownloadKey(path, name)] ?: return false
+    val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return false
+    val token = runningWebDavDownloads[webDavDownloadKey(identity, path, name)] ?: return false
+    if (!AccountHostRuntime.isCurrentStorage(token.storageIdentity, activityProvider())) return false
     val now = System.currentTimeMillis()
     val last = webDavDownloadCancelPrompts[token.id] ?: 0L
     if (now - last > DOWNLOAD_CANCEL_CONFIRM_WINDOW_MS) {
@@ -335,71 +345,74 @@ internal fun WebDavDriveHook.tryHandleRunningWebDavDownloadTap(book: Any): Boole
     token.thread?.interrupt()
     cancelTrackedWork(token.tracker, token.id)
     cleanupDownloadToken(token)
-    val stateFlow = token.handle.javaClass.hostField("state").get(token.handle)
-    val state = XposedHelpers.callMethod(stateFlow, "getValue")
-    val status = XposedHelpers.callMethod(state, "getStatus")
-    XposedBridge.logAlways("ReaMicro WebDAV cancellation verified status=$status cacheExists=${token.localFile.exists()}")
+    val work = com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+    val stateFlow = work.field("handle.state").get(token.handle)
+    val state = requireNotNull(work.method("flow.get").invoke(stateFlow))
+    val status = work.stateName(state)
+    HookRuntime.logAlways("ReaMicro WebDAV cancellation verified status=$status cacheExists=${token.localFile.exists()}")
     runningWebDavDownloads.remove(token.key, token)
     webDavDownloadCancelPrompts.remove(token.id)
     showToast("\u5df2\u53d6\u6d88\u4e0b\u8f7d\u5e76\u6e05\u7406\u7f13\u5b58")
     return true
 }
 
-internal fun WebDavDriveHook.updateWebDavBackupViewModels(bookId: Long, book: Any, backup: Any) {
+private val webDavBackupViewModelAccounts = java.util.Collections.synchronizedMap(
+    java.util.WeakHashMap<Any, AccountHostRuntime.Identity>(),
+)
+
+internal fun WebDavDriveHook.rememberWebDavBackupViewModelIdentity(viewModel: Any) {
+    val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return
+    synchronized(webDavBackupViewModelAccounts) { webDavBackupViewModelAccounts.putIfAbsent(viewModel, identity) }
+}
+
+internal fun clearWebDavBackupViewModelIdentities() = webDavBackupViewModelAccounts.clear()
+
+internal fun WebDavDriveHook.updateWebDavBackupViewModels(
+    bookId: Long, book: Any, backup: Any,
+    storageIdentity: AccountHostRuntime.Identity = requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())),
+    uuid: String = book.callString("getUuid"),
+) {
+    if (storagePaused || storageClosed || !AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider()) ||
+        book.callLong("getUid") != storageIdentity.accountId || book.callString("getUuid") != uuid) return
     if (Looper.myLooper() != Looper.getMainLooper()) {
-        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-            updateWebDavBackupViewModels(bookId, book, backup)
-        }
+        postStorageUi { updateWebDavBackupViewModels(bookId, book, backup, storageIdentity, uuid) }
         return
     }
     val viewModels = synchronized(webDavBackupViewModels) {
-        webDavBackupViewModels.mapNotNull { it.get() }.also {
-            webDavBackupViewModels.removeAll { ref -> ref.get() == null }
-        }
-    }
-    if (viewModels.isEmpty()) {
-        logWebDav("backup ui state update skipped bookId=$bookId no active viewModel")
-        return
+        webDavBackupViewModels.mapNotNull { it.get() }.also { webDavBackupViewModels.removeAll { ref -> ref.get() == null } }
     }
     viewModels.forEach { viewModel ->
         runCatching {
-            val vmBookId = (fieldValue(viewModel, "bookId") as? Number)?.toLong()
-                ?: fieldValue(viewModel, "bookId")?.toString()?.toLongOrNull()
-                ?: return@runCatching
-            if (vmBookId != bookId) return@runCatching
-            val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-                it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-            } ?: viewModel.javaClass.methods.first {
-                it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-            }
-            updateMethod.apply { isAccessible = true }.invoke(
-                viewModel,
-                functionProxy("WebDavBackupUiState", FUNCTION1_CLASS) { args ->
-                    val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
-                    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-                        return@functionProxy state.javaClass.getDeclaredConstructor(
-                            cls(BOOK_CLASS), cls(CLOUD_BOOK_CLASS), Boolean::class.javaPrimitiveType,
-                        ).newInstance(book, backup, false)
-                    }
-                    state.javaClass.methods.first {
-                        it.hostNameMatches("copy") && it.parameterTypes.size == 3
-                    }.apply { isAccessible = true }.invoke(state, book, backup, false)
-                },
-            )
-            logWebDav("backup ui state updated bookId=$bookId")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to update WebDAV backup ui state: ${it.stackTraceToString()}")
-        }
+            val owner = webDavBackupViewModelAccounts[viewModel] ?: return@runCatching
+            if (owner.accountId != storageIdentity.accountId || owner.generation != storageIdentity.generation ||
+                !AccountHostRuntime.isCurrentStorage(owner, activityProvider())) return@runCatching
+            val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup)
+            if (host.field("vm.bookId").getLong(viewModel) != bookId) return@runCatching
+            val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+            host.method("update").invoke(viewModel, ui.function(host.type("function"), fallback = { args -> args?.firstOrNull() }) { args ->
+                val before = args?.firstOrNull() ?: return@function null
+                if (!AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider())) return@function before
+                val visibleBook = host.field("state.book").get(before)
+                if (visibleBook != null && (visibleBook.callLong("getUid") != storageIdentity.accountId ||
+                        visibleBook.callString("getUuid") != uuid)) return@function before
+                host.backupState(book, backup, false)
+            })
+        }.onFailure { HookRuntime.log("$LOG_PREFIX failed to update WebDAV backup ui state: ${it.stackTraceToString()}") }
     }
 }
 
-internal fun WebDavDriveHook.refreshWebDavBackupViewModelsLater(bookId: Long, book: Any, backup: Any) {
-    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
+internal fun WebDavDriveHook.refreshWebDavBackupViewModelsLater(
+    bookId: Long, book: Any, backup: Any,
+    storageIdentity: AccountHostRuntime.Identity = requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())),
+    uuid: String = book.callString("getUuid"),
+) {
+    postStorageUi(800L) {
+        if (!AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider())) return@postStorageUi
         val current = webDavRecentBackups[bookId]
-        if (current?.book !== book || current.backup !== backup) return@postDelayed
-        updateWebDavBackupViewModels(bookId, book, backup)
-        logWebDav("backup ui state delayed refresh bookId=$bookId")
-    }, 800L)
+        if (current?.book !== book || current.backup !== backup || current.uuid != uuid ||
+            current.storageIdentity.generation != storageIdentity.generation) return@postStorageUi
+        updateWebDavBackupViewModels(bookId, book, backup, storageIdentity, uuid)
+    }
 }
 
 internal fun WebDavDriveHook.renderWebDavLoginRoute(navGraphScope: Any, composer: Any) {
@@ -413,7 +426,7 @@ internal fun WebDavDriveHook.renderWebDavLoginRoute(navGraphScope: Any, composer
         val modifier = fillMaxSizeModifier()
         androidViews.render(factory, modifier, composer, null)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render WebDAV login route: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render WebDAV login route: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
@@ -430,7 +443,7 @@ internal fun WebDavDriveHook.renderWebDavAccountRoute(navGraphScope: Any, compos
         )
         return true
     } catch (throwable: Throwable) {
-        XposedBridge.log("$LOG_PREFIX failed to render WebDAV account route: ${throwable.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render WebDAV account route: ${throwable.stackTraceToString()}")
         return false
     } finally {
         val next = (webDavAccountScreenDepth.get() ?: 0) - 1
@@ -471,7 +484,7 @@ internal fun WebDavDriveHook.createWebDavLoginRouteView(context: Context, navGra
         onBack = { popBackStack(navGraphScope) },
         onSaved = {
             popBackStack(navGraphScope)
-            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
+            postStorageUi {
                 refreshWebDavLibraryAsync(currentWebDavBrowseDir())
                 navigateStorage(navGraphScope)
             }
@@ -496,25 +509,10 @@ internal fun WebDavDriveHook.webDavAuth(): Any {
 internal fun WebDavDriveHook.webDavYun115Auth(): Any {
     val backupDir = currentWebDavBackupDir()
     val dir = newDir(backupDir, webDavDisplayDir(backupDir))
-    return cls(AUTH_YUN115_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-        List::class.java,
-        cls(DIR_CLASS),
-    ).apply { isAccessible = true }.newInstance(
-        "webdav",
-        "user_utime",
-        "0",
-        WEBDAV_TITLE,
-        0L,
-        0L,
-        listOf(dir),
-        dir,
-    )
+    return requireNotNull(com.reamicro.fix.core.HostStorageBindings.records).record("localAuth", mapOf(
+        "token" to "webdav", "orderBy" to "user_utime", "orderDirection" to "0", "nickname" to WEBDAV_TITLE,
+        "usedSize" to 0L, "totalSize" to 0L, "libraryDir" to listOf(dir), "backupDir" to dir,
+    ))
 }
 
 internal fun WebDavDriveHook.webDavCloudUserInfo(): Any {
@@ -536,7 +534,7 @@ internal fun WebDavDriveHook.webDavResult(block: () -> Any?): Any? =
         .fold(
             onSuccess = { kotlinResultSuccess(it) },
             onFailure = {
-                XposedBridge.log("$LOG_PREFIX WebDAV repository operation failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX WebDAV repository operation failed: ${it.stackTraceToString()}")
                 kotlinResultFailure(it)
             },
         )
@@ -562,63 +560,121 @@ internal fun WebDavDriveHook.updateWebDavAccountAuthFlow() {
 }
 
 internal fun WebDavDriveHook.onWebDavLoginSaved() {
+    invalidateWebDavConnection()
     updateWebDavAccountAuthFlow()
     val path = currentWebDavBrowseDir()
     updateWebDavStorageTrees(path)
     refreshWebDavLibraryAsync(path)
 }
 
-internal fun WebDavDriveHook.refreshWebDavLibrary(path: String = currentWebDavBrowseDir()) {
-    val flow = synchronized(webDavLibraryLock) { webDavLibraryFlow } ?: return
-    runCatching {
-        val normalizedPath = normalizeWebDavPath(path.ifBlank { "/" })
-        val items = listWebDav(normalizedPath)
+private data class WebDavRefresh(
+    val sequence: Long,
+    val connection: Long,
+    val path: String,
+    val order: String,
+    val direction: String,
+    val flow: Any,
+    val credentials: WebDavCredentials,
+)
+
+private fun WebDavDriveHook.webDavRefresh(path: String): WebDavRefresh? {
+    if (storageClosed || storagePaused || !settingsProvider().canRunWebDavCloud) return null
+    val normalized = normalizeWebDavPath(path.ifBlank { "/" })
+    if (normalized != currentWebDavBrowseDir()) return null
+    val flow = synchronized(webDavLibraryLock) { webDavLibraryFlow } ?: return null
+    val credentials = webDavCredentials() ?: return null
+    return WebDavRefresh(webDavRefreshSequence.incrementAndGet(), webDavConnectionGeneration.get(),
+        normalized, currentWebDavOrderBy(), currentWebDavOrderDirection(), flow, credentials)
+}
+
+private fun WebDavDriveHook.isCurrent(request: WebDavRefresh): Boolean =
+    !storageClosed && !storagePaused && settingsProvider().canRunWebDavCloud &&
+        request.sequence == webDavRefreshSequence.get() &&
+        request.connection == webDavConnectionGeneration.get() && request.path == currentWebDavBrowseDir() &&
+        request.order == currentWebDavOrderBy() && request.direction == currentWebDavOrderDirection() &&
+        synchronized(webDavLibraryLock) { webDavLibraryFlow === request.flow }
+
+private fun WebDavDriveHook.loadWebDavLibrary(request: WebDavRefresh, ticket: LatestSearchWorker.Ticket) {
+    try {
+        TaskCancellation.checkCurrent()
+        if (!ticket.isCurrent() || !isCurrent(request)) return
+        val items = loadWebDavEntries(request.path, request.credentials)
             .filter { it.isDirectory || isSupportedBookFile(it.name) }
             .map {
+                TaskCancellation.checkCurrent()
                 if (it.isDirectory) newCloudFolder(it) else newCloudBook(it)
             }
-        logWebDav("refresh library path=$normalizedPath items=${items.size}")
-        flow.javaClass.methods.first {
-            it.hostNameMatches("setValue") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(flow, pagingDataFrom(items))
-        logWebDav("refresh library setValue done path=$normalizedPath")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to refresh WebDAV library: ${it.stackTraceToString()}")
-        runCatching {
-            flow.javaClass.methods.first { method ->
-                method.hostNameMatches("setValue") && method.parameterTypes.size == 1
-            }.apply { isAccessible = true }.invoke(flow, emptyPagingData())
+        TaskCancellation.checkCurrent()
+        if (!ticket.isCurrent() || !isCurrent(request)) return
+        val paging = pagingDataFrom(items)
+        postStorageUi {
+            if (ticket.isCurrent() && isCurrent(request)) {
+                setMutableStateFlowValue(request.flow, paging)
+                logWebDav("refresh library path=${request.path} items=${items.size}")
+            }
+        }
+    } catch (error: Throwable) {
+        TaskCancellation.rethrowIfCancelled(error)
+        HookRuntime.logError("$LOG_PREFIX failed to refresh WebDAV library", error)
+    }
+}
+
+internal fun WebDavDriveHook.refreshWebDavLibrary(path: String = currentWebDavBrowseDir()) {
+    refreshWebDavLibraryAsync(path)
+}
+
+internal fun WebDavDriveHook.refreshWebDavLibraryAsync(path: String = currentWebDavBrowseDir()) {
+    if (storageClosed || storagePaused) return
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+        postStorageUi { refreshWebDavLibraryAsync(path) }
+        return
+    }
+    val request = webDavRefresh(path) ?: return
+    try {
+        webDavRefreshWorker.submitIf({ isCurrent(request) }) { ticket -> loadWebDavLibrary(request, ticket) }
+    } catch (error: Throwable) {
+        if (ModuleResources.accepting && !storageClosed) {
+            HookRuntime.logError("$LOG_PREFIX WebDAV refresh start failed", error)
         }
     }
 }
 
-internal fun WebDavDriveHook.refreshWebDavLibraryAsync(path: String = currentWebDavBrowseDir()) {
-    com.reamicro.fix.reload.ModuleResources.thread {
-        refreshWebDavLibrary(path)
-    }.start()
-}
-
 internal fun WebDavDriveHook.searchWebDavBooks(query: String): List<Any> {
+    TaskCancellation.checkCurrent()
     val needle = query.trim()
     if (needle.isBlank()) return emptyList()
+    val generation = webDavConnectionGeneration.get()
+    val credentials = webDavCredentials() ?: return emptyList()
+    fun checkConnection() {
+        TaskCancellation.checkCurrent()
+        if (storageClosed || generation != webDavConnectionGeneration.get()) {
+            throw CancellationException("WebDAV connection changed")
+        }
+    }
     searchAlistBooks(needle)?.let { entries ->
+        checkConnection()
         logWebDav("OpenList/AList search query=$needle results=${entries.size}")
         return entries
             .distinctBy { normalizeWebDavPath(it.path) }
             .let(::sortWebDavEntries)
-            .map { newCloudBook(it) }
+            .map { checkConnection(); newCloudBook(it) }
     }
     val queue = java.util.ArrayDeque<String>()
     val visited = mutableSetOf<String>()
     val results = mutableListOf<WebDavEntry>()
     queue.add("/")
     while (queue.isNotEmpty() && visited.size < WEBDAV_SEARCH_MAX_DIRS) {
+        checkConnection()
         val dir = normalizeWebDavPath(queue.removeFirst())
         if (!visited.add(dir)) continue
-        val entries = runCatching { listWebDav(dir) }
-            .onFailure { XposedBridge.log("$LOG_PREFIX WebDAV search skipped $dir: ${it.message}") }
-            .getOrDefault(emptyList())
+        val entries = try { loadWebDavEntries(dir, credentials) } catch (error: Throwable) {
+            TaskCancellation.rethrowIfCancelled(error)
+            checkConnection()
+            HookRuntime.log("$LOG_PREFIX WebDAV search skipped $dir: ${error.message}")
+            emptyList()
+        }
         entries.forEach { entry ->
+            checkConnection()
             when {
                 entry.isDirectory -> queue.add(entry.path)
                 isSupportedBookFile(entry.name) && entry.name.contains(needle, ignoreCase = true) -> results.add(entry)
@@ -629,7 +685,7 @@ internal fun WebDavDriveHook.searchWebDavBooks(query: String): List<Any> {
     return results
         .distinctBy { normalizeWebDavPath(it.path) }
         .let(::sortWebDavEntries)
-        .map { newCloudBook(it) }
+        .map { checkConnection(); newCloudBook(it) }
 }
 
 internal fun WebDavDriveHook.searchAlistBooks(query: String): List<WebDavEntry>? =
@@ -652,6 +708,7 @@ internal fun WebDavDriveHook.searchAlistBooks(query: String): List<WebDavEntry>?
             )
         }
     }.onFailure {
+        TaskCancellation.rethrowIfCancelled(it)
         logWebDav("OpenList/AList search unavailable: ${it.message}")
     }.getOrNull()
 
@@ -660,48 +717,27 @@ internal fun WebDavDriveHook.updateHomeWebDavSearchResults(
     webDavResults: List<Any>,
     localResults: List<Any>,
     onlineResults: List<Any>? = null,
+    isCurrent: () -> Boolean = { !storageClosed && settingsProvider().moduleEnabled },
 ) {
-    if (viewModel == null) return
+    if (viewModel == null || !isCurrent()) return
     rememberHomeViewModelDependencies(viewModel)
     runCatching {
-        val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-        } ?: viewModel.javaClass.methods.first {
-            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-        }
-        updateMethod.apply { isAccessible = true }.invoke(
-            viewModel,
-            functionProxy("WebDavHomeSearchState", FUNCTION1_CLASS) { args ->
-                val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
+        com.reamicro.fix.core.HostHomeSearchBindings.requireCurrent().update(viewModel) { state ->
+                if (!isCurrent()) return@update state
                 runCatching {
                     val current = homeCloudSearchResults(state)
-                    val merged = linkedMapOf<Any?, Any?>()
-                    current?.forEach { (key, value) -> merged[key] = value }
-                    if (webDavResults.isEmpty()) {
-                        merged.remove(BACKUP_TYPE_WEBDAV)
-                    } else {
-                        merged[BACKUP_TYPE_WEBDAV] = webDavResults
-                    }
-                    if (localResults.isEmpty()) {
-                        merged.remove(BACKUP_TYPE_LOCAL_LIBRARY)
-                    } else {
-                        merged[BACKUP_TYPE_LOCAL_LIBRARY] = localResults
-                    }
-                    if (onlineResults != null) {
-                        if (onlineResults.isEmpty()) {
-                            merged.remove(BACKUP_TYPE_ONLINE_COMPLETION)
-                        } else {
-                            merged[BACKUP_TYPE_ONLINE_COMPLETION] = onlineResults
-                        }
-                    }
-                    copyHomeUiStateWithCloudResults(state, merged)
+                    val merged = com.reamicro.fix.core.mergeHomeSearchResults(current, mapOf(
+                        BACKUP_TYPE_WEBDAV to webDavResults,
+                        BACKUP_TYPE_LOCAL_LIBRARY to localResults,
+                        BACKUP_TYPE_ONLINE_COMPLETION to onlineResults,
+                    ))
+                    if (!isCurrent() || merged == current) state else copyHomeUiStateWithCloudResults(state, merged)
                 }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX failed to copy WebDAV home search state: ${it.stackTraceToString()}")
+                    HookRuntime.log("$LOG_PREFIX failed to copy WebDAV home search state: ${it.stackTraceToString()}")
                 }.getOrDefault(state)
-            },
-        )
+        }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to update WebDAV home search state: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to update WebDAV home search state: ${it.stackTraceToString()}")
     }
 }
 
@@ -715,73 +751,47 @@ internal fun WebDavDriveHook.addHomeWebDavSearchSection(
     navGraphScope: Any? = null,
 ) {
     runCatching {
-        val itemMethod = lazyListScope.javaClass.methods.firstOrNull {
-            it.hostNameMatches("item") && it.parameterTypes.size == 3
-        } ?: lazyListScope.javaClass.declaredMethods.first {
-            it.hostNameMatches("item") && it.parameterTypes.size == 3
-        }
-        itemMethod.isAccessible = true
-        itemMethod.invoke(
+        val host = com.reamicro.fix.core.HostHomeSearchBindings.requireCurrent()
+        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+        host.method("item").invoke(
             lazyListScope,
             "cloud-search-$generation-$type-${title.ifBlank { type.toString() }.hashCode()}",
             type,
-            functionProxy("WebDavHomeSearchItem", FUNCTION3_CLASS) { args ->
-                val item = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-                val composer = args.getOrNull(1) ?: return@functionProxy targetUnit()
+            ui.callback(host.type("function3")) { args ->
+                val item = args?.getOrNull(0) ?: return@callback
+                val composer = args.getOrNull(1) ?: return@callback
                 val render = {
-                    method(HOME_SEARCH_BAR_CLASS, HOME_CLOUD_RESULT_LIST_METHOD, 6).invoke(
-                        null,
-                        item,
-                        type,
-                        results,
-                        functionProxy("WebDavHomeSearchTap", FUNCTION1_CLASS) { tapArgs ->
-                            tapArgs?.getOrNull(0)?.let { book ->
-                                if (isOnlineCompletionPath(cloudPathOf(book))) {
-                                    handleOnlineCompletionSearchTap(book)
-                                } else if (!tryHandleRunningCloudDownloadTap(book, type)) {
-                                    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-                                        B4HomeSearchEvents.open(this, intentReceiver, book, requireNotNull(navGraphScope))
-                                    } else {
-                                        homeSearchTapMethod().invoke(null, intentReceiver, book)
-                                    }
-                                }
+                    val call = arrayOfNulls<Any>(6)
+                    call[host.slot("results.scope")] = item
+                    call[host.slot("results.type")] = type
+                    call[host.slot("results.list")] = results
+                    call[host.slot("results.callback")] = ui.callback(host.type("function1")) { tapArgs ->
+                        tapArgs?.getOrNull(0)?.let { book ->
+                            if (isOnlineCompletionPath(cloudPathOf(book))) {
+                                handleOnlineCompletionSearchTap(book)
+                            } else if (!tryHandleRunningCloudDownloadTap(book, type)) {
+                                HostHomeSearchEvents.open(intentReceiver, book)
                             }
-                            targetUnit()
-                        },
-                        composer,
-                        0,
-                    )
+                        }
+                    }
+                    call[4] = composer
+                    call[5] = 0
+                    host.method("results").invoke(null, *call)
                 }
                 if (type == BACKUP_TYPE_LOCAL_LIBRARY) {
                     pushLocalLibraryIcon()
-                    try {
-                        render()
-                    } finally {
-                        popLocalLibraryIcon()
-                    }
+                    try { render() } finally { popLocalLibraryIcon() }
                 } else if (isOnlineCompletionRenderType(type)) {
                     pushOnlineCompletionCloudTitle(onlineCompletionTitleForType(type, title))
-                    try {
-                        withWebDavIcon { render() }
-                    } finally {
-                        popOnlineCompletionCloudTitle()
-                    }
+                    try { withWebDavIcon { render() } } finally { popOnlineCompletionCloudTitle() }
                 } else {
                     withWebDavIcon { render() }
                 }
-                targetUnit()
             },
         )
-        val firstBook = results.firstOrNull()
-        val firstType = firstBook?.callInt("getType") ?: 0
-        val firstId = firstBook?.callString("getId").orEmpty()
-        val firstPath = cloudPathOf(firstBook)
-        logWebDav(
-            "home search section rendered type=$type results=${results.size} " +
-                "firstType=$firstType firstId=$firstId firstPath=$firstPath",
-        )
+        logWebDav("home search section rendered type=$type results=${results.size}")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render WebDAV home search section: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render WebDAV home search section: ${it.stackTraceToString()}")
     }
 }
 
@@ -810,21 +820,17 @@ internal fun WebDavDriveHook.updateWebDavStorageTrees(path: String) {
 internal fun WebDavDriveHook.updateWebDavStorageTree(viewModel: Any, path: String) {
     runCatching {
         val tree = webDavDirTree(path)
-        val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-        } ?: viewModel.javaClass.methods.first {
-            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-        }
+        val updateMethod = requireNotNull(com.reamicro.fix.core.HostStorageBindings.data).method("update")
         updateMethod.apply { isAccessible = true }.invoke(
             viewModel,
-            functionProxy("WebDavStorageTreeState", FUNCTION1_CLASS) { args ->
+            functionProxy("WebDavStorageTreeState", FUNCTION1_CLASS, fallback = { args -> args?.firstOrNull() }) { args ->
                 val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
                 storageStateWithTree(state, tree)
             },
         )
         logWebDav("update storage tree path=${normalizeWebDavPath(path)} size=${tree.size}")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to update WebDAV storage tree: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to update WebDAV storage tree: ${it.stackTraceToString()}")
     }
 }
 
@@ -832,11 +838,9 @@ internal fun WebDavDriveHook.webDavLocalBookFlow(url: String): Any {
     if (url.isBlank()) return emptyFlow()
     return runCatching {
         val bookshelf = currentBookshelfRepository() ?: return@runCatching emptyFlow()
-        bookshelf.javaClass.methods.first {
-            it.hostNameMatches("liveBookByUrl") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(bookshelf, url)
+        requireNotNull(com.reamicro.fix.core.HostStorageBindings.library).method("liveUri").invoke(bookshelf, url)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to create WebDAV local book flow: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to create WebDAV local book flow: ${it.stackTraceToString()}")
     }.getOrDefault(emptyFlow())
 }
 
@@ -844,23 +848,47 @@ internal fun WebDavDriveHook.webDavWorkFlow(uniqueName: String): Any {
     if (uniqueName.isBlank()) return emptyFlow()
     return runCatching {
         val tracker = currentWorkTracker() ?: return@runCatching emptyFlow()
-        tracker.javaClass.methods.first {
-            it.hostNameMatches("getWorkInfosForUniqueWorkFlow") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(tracker, uniqueName)
+        com.reamicro.fix.core.HostWorkBindings.requireCurrent().unique(tracker, uniqueName)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to create WebDAV work flow: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to create WebDAV work flow: ${it.stackTraceToString()}")
     }.getOrDefault(emptyFlow())
 }
 
 internal fun WebDavDriveHook.webDavCredentials(): WebDavCredentials? {
-    val prefs = webDavPrefs(activityProvider()) ?: return null
-    val url = normalizeServerUrl(prefs.getString(KEY_URL, "").orEmpty())
-    val username = prefs.getString(KEY_USERNAME, "").orEmpty()
-    val password = prefs.getString(KEY_PASSWORD, "").orEmpty()
+    val values = webDavPrefs(activityProvider())?.all ?: return null
+    val url = normalizeServerUrl(values[KEY_URL] as? String ?: "")
+    val username = values[KEY_USERNAME] as? String ?: ""
+    val password = values[KEY_PASSWORD] as? String ?: ""
     return if (url.isBlank() || username.isBlank() || password.isBlank()) {
         null
     } else {
         WebDavCredentials(url, username, password)
+    }
+}
+
+internal fun WebDavDriveHook.webDavOperationTicket(): WebDavOperationTicket {
+    val identity = requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())) {
+        "账号状态正在变化，请稍后重新操作"
+    }
+    return AccountHostRuntime.withCurrentStorage(identity, activityProvider()) {
+        val values = webDavPrefs(activityProvider())?.all ?: error("WebDAV not authorized")
+        val credentials = WebDavCredentials(
+            normalizeServerUrl(values[KEY_URL] as? String ?: ""),
+            values[KEY_USERNAME] as? String ?: "", values[KEY_PASSWORD] as? String ?: "",
+        )
+        check(credentials.url.isNotBlank() && credentials.username.isNotBlank() && credentials.password.isNotBlank()) {
+            "WebDAV not authorized"
+        }
+        WebDavOperationTicket(identity, credentials, webDavConnectionGeneration.get(),
+            normalizeWebDavPath((values[KEY_BACKUP_DIR] as? String).orEmpty().ifBlank { DEFAULT_DIR }))
+    }
+}
+
+internal fun WebDavDriveHook.checkWebDavOperation(operation: WebDavOperationTicket) {
+    if (storageClosed || !settingsProvider().canRunWebDavCloud || Thread.currentThread().isInterrupted ||
+        !AccountHostRuntime.isCurrentStorage(operation.storageIdentity, activityProvider()) ||
+        operation.connectionGeneration != webDavConnectionGeneration.get() || webDavCredentials() != operation.credentials) {
+        throw com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException("账号或 WebDAV 连接已变化，请重新操作")
     }
 }
 
@@ -889,6 +917,7 @@ internal fun WebDavDriveHook.saveWebDavBrowseDir(path: String) {
     webDavPrefs(activityProvider())?.edit()
         ?.putString(KEY_BROWSE_DIR, normalizeWebDavPath(path.ifBlank { "/" }))
         ?.apply()
+    invalidateWebDavRefresh()
 }
 
 internal fun WebDavDriveHook.saveWebDavBackupDir(path: String) {
@@ -908,6 +937,7 @@ internal fun WebDavDriveHook.saveWebDavOrderBy(value: String) {
     webDavPrefs(activityProvider())?.edit()
         ?.putString(KEY_ORDER_BY, normalized)
         ?.apply()
+    invalidateWebDavRefresh()
 }
 
 internal fun WebDavDriveHook.saveWebDavOrderDirection(value: String) {
@@ -915,6 +945,23 @@ internal fun WebDavDriveHook.saveWebDavOrderDirection(value: String) {
     webDavPrefs(activityProvider())?.edit()
         ?.putString(KEY_ORDER_DIRECTION, normalized)
         ?.apply()
+    invalidateWebDavRefresh()
+}
+
+private fun WebDavDriveHook.invalidateWebDavRefresh() {
+    val sequence = webDavRefreshSequence.incrementAndGet()
+    if (webDavRefreshWorkerState.isInitialized()) {
+        webDavRefreshWorker.cancelIf { webDavRefreshSequence.get() == sequence }
+    }
+}
+
+private fun WebDavDriveHook.invalidateWebDavConnection() {
+    webDavConnectionGeneration.incrementAndGet()
+    invalidateWebDavRefresh()
+    if (homeSearchState.isInitialized()) {
+        homeSearch.pause()
+        if (!storagePaused && !storageClosed) homeSearch.resume()
+    }
 }
 
 internal fun WebDavDriveHook.clearWebDavLogin() {
@@ -924,6 +971,7 @@ internal fun WebDavDriveHook.clearWebDavLogin() {
         ?.remove(KEY_PASSWORD)
         ?.remove(KEY_AUTHORIZED)
         ?.apply()
+    invalidateWebDavConnection()
     synchronized(webDavLibraryLock) {
         webDavLibraryFlow = null
     }
@@ -941,70 +989,29 @@ internal fun WebDavDriveHook.sortWebDavEntries(entries: List<WebDavEntry>): List
     )
 
 internal fun WebDavDriveHook.listWebDav(path: String): List<WebDavEntry> {
-    val credentials = webDavCredentials() ?: return emptyList()
+    TaskCancellation.checkCurrent()
+    val credentials = webDavCredentials() ?: error("WebDAV not authorized")
+    return loadWebDavEntries(path, credentials)
+}
+
+private fun WebDavDriveHook.loadWebDavEntries(path: String, credentials: WebDavCredentials): List<WebDavEntry> {
+    TaskCancellation.checkCurrent()
     val normalizedPath = normalizeWebDavPath(path.ifBlank { "/" })
     val requestUrl = webDavRemoteClient.buildUrl(credentials.url, normalizedPath, directory = true)
     logWebDav("PROPFIND ${requestUrl.toString().redactWebDavUrl()}")
-    return runCatching {
-        val response = webDavRemoteClient.request(
-            credentials = credentials,
-            method = "PROPFIND",
-            path = normalizedPath,
-            directory = true,
-            body = WEBDAV_PROPFIND_BODY,
-            headers = mapOf(
-                "Depth" to "1",
-                "Content-Type" to "application/xml; charset=utf-8",
-            ),
-        )
-        val code = response.code
-        val responseBody = response.bodyString.orEmpty()
-        logWebDav("PROPFIND response path=$normalizedPath code=$code bytes=${responseBody.length}")
-        if (code !in 200..299 && code != 207) {
-            throw WebDavHttpException(code, "WebDAV PROPFIND failed: HTTP $code")
-        }
-        val document = DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = true
-        }.newDocumentBuilder().parse(ByteArrayInputStream(responseBody.toByteArray(Charsets.UTF_8)))
-        val nodes = document.getElementsByTagNameNS("*", "response")
-        val current = normalizedPath
-        (0 until nodes.length).mapNotNull { index ->
-            val element = nodes.item(index) as? Element ?: return@mapNotNull null
-            val href = element.textOf("href")
-            val entryPath = normalizeWebDavPath(webDavRemoteClient.pathFromHref(credentials.url, href))
-            if (entryPath == current) return@mapNotNull null
-            val name = element.textOf("displayname").ifBlank { entryPath.substringAfterLast('/') }
-            if (name.isBlank()) return@mapNotNull null
-            val isDirectory = element.getElementsByTagNameNS("*", "collection").length > 0
-            WebDavEntry(
-                name = name,
-                path = entryPath,
-                isDirectory = isDirectory,
-                size = element.textOf("getcontentlength").toLongOrNull() ?: 0L,
-                updatedAt = webDavRemoteClient.parseWebDavDate(element.textOf("getlastmodified")),
-                rawHref = href,
-            )
-        }.filterNot { it.name.startsWith(".") }
-            .let(::sortWebDavEntries)
-    }.getOrElse {
-        logWebDav("failed to list $normalizedPath: ${it.stackTraceToString()}")
-        if (it is WebDavHttpException && it.code == 404 && normalizedPath != "/") {
-            logWebDav("dir $normalizedPath not found, fallback to / without changing saved dirs")
-            listWebDav("/")
-        } else {
-            emptyList()
-        }
-    }.also { entries ->
+    return webDavRemoteClient.list(credentials, normalizedPath).map { resource ->
+        WebDavEntry(resource.name, resource.path, resource.isDirectory, resource.size,
+            resource.updatedAt, resource.rawHref)
+    }.let(::sortWebDavEntries).also { entries ->
+        TaskCancellation.checkCurrent()
         logWebDav("list path=$normalizedPath entries=${entries.size}")
     }
 }
 
-internal fun WebDavDriveHook.webDavMkcol(path: String) {
-    val credentials = webDavCredentials() ?: error("WebDAV not authorized")
-    val code = webDavRemoteClient.request(credentials, "MKCOL", normalizeWebDavPath(path)).code
-    if (code !in 200..299 && code != 405) {
-        error("WebDAV MKCOL failed: HTTP $code")
-    }
+internal fun WebDavDriveHook.webDavMkcol(
+    path: String, credentials: WebDavCredentials = webDavCredentials() ?: error("WebDAV not authorized"),
+) {
+    webDavRemoteClient.ensureCollection(credentials, normalizeWebDavPath(path))
 }
 
 internal fun WebDavDriveHook.webDavMove(from: String, to: String) {
@@ -1023,45 +1030,59 @@ internal fun WebDavDriveHook.webDavMove(from: String, to: String) {
     }
 }
 
-internal fun WebDavDriveHook.webDavDelete(path: String) {
-    val credentials = webDavCredentials() ?: error("WebDAV not authorized")
+internal fun WebDavDriveHook.webDavDelete(
+    path: String, credentials: WebDavCredentials = webDavCredentials() ?: error("WebDAV not authorized"),
+    checkActive: () -> Unit = {},
+) {
+    checkActive()
     val code = webDavRemoteClient.request(credentials, "DELETE", normalizeWebDavPath(path)).code
     if (code !in 200..299 && code != 404) {
         error("WebDAV DELETE failed: HTTP $code")
     }
-    // 远端删除成功后撤销同路径的临时卡片，防止数据库已清空却被旧快照补回。
+    checkActive()
+    // 远端删除成功后仅撤销当前账号同路径的临时卡片。
     val deletedPath = normalizeWebDavPath(path)
     webDavRecentBackups.entries.forEach { (bookId, snapshot) ->
-        if (normalizeWebDavPath(snapshot.backup.callString("getPath")) == deletedPath) {
+        if (AccountHostRuntime.isCurrentStorage(snapshot.storageIdentity, activityProvider()) &&
+            normalizeWebDavPath(snapshot.backup.callString("getPath")) == deletedPath) {
             webDavRecentBackups.remove(bookId, snapshot)
         }
     }
 }
 
-internal fun WebDavDriveHook.webDavDownload(path: String, outputFile: File, onProgress: ((Int) -> Unit)? = null) {
-    val credentials = webDavCredentials() ?: error("WebDAV not authorized")
+internal fun WebDavDriveHook.webDavDownload(path: String, outputFile: File, onProgress: ((Int) -> Unit)? = null) =
+    webDavDownload(path, outputFile, webDavCredentials() ?: error("WebDAV not authorized"), onProgress = onProgress)
+
+internal fun WebDavDriveHook.webDavDownload(
+    path: String, outputFile: File, credentials: WebDavCredentials,
+    checkActive: () -> Unit = {}, onProgress: ((Int) -> Unit)? = null,
+) {
+    checkActive()
     outputFile.parentFile?.mkdirs()
     val normalizedPath = normalizeWebDavPath(path)
 
-    if (tryWebDavGetWithHref(credentials, normalizedPath, outputFile, onProgress)) return
+    if (tryWebDavGetWithHref(credentials, normalizedPath, outputFile, onProgress, checkActive)) return
 
     val segments = normalizedPath.trim('/').split('/').filter { it.isNotBlank() }
     val maxStrip = minOf(2, segments.size - 1).coerceAtLeast(0)
     for (strip in 1..maxStrip) {
         val candidate = "/" + segments.drop(strip).joinToString("/")
         logWebDav("GET 404 retry with mount prefix stripped ($strip): $candidate")
-        if (tryWebDavGetWithHref(credentials, candidate, outputFile, onProgress)) {
+        if (tryWebDavGetWithHref(credentials, candidate, outputFile, onProgress, checkActive)) {
             logWebDav("GET 404 recovered by stripping $strip leading segment(s): $normalizedPath -> $candidate")
             return
         }
     }
 
     outputFile.delete()
+    checkActive()
     if (webDavRemoteClient.tryAlistDownloadFallback(credentials, normalizedPath, outputFile, onProgress)) {
+        checkActive()
         logWebDav("GET 404 recovered via AList raw_url path=$normalizedPath")
         return
     }
 
+    checkActive()
     logWebDav("GET 404 path unresolvable after all fallbacks path=$normalizedPath")
     error("WebDAV GET failed: HTTP 404")
 }
@@ -1070,27 +1091,40 @@ internal fun WebDavDriveHook.tryWebDavGetWithHref(
     credentials: WebDavCredentials,
     candidatePath: String,
     outputFile: File,
-    onProgress: ((Int) -> Unit)?,
+    onProgress: ((Int) -> Unit)?, checkActive: () -> Unit = {},
 ): Boolean {
+    checkActive()
     outputFile.delete()
     try {
         webDavRemoteClient.requestToFile(credentials, "GET", candidatePath, outputFile, onProgress)
+        checkActive()
         return true
     } catch (e: IllegalStateException) {
+        checkActive()
         if (!e.message.orEmpty().contains("HTTP 404")) throw e
-        val href = resolveWebDavHref(candidatePath) ?: return false
+        val href = resolveWebDavHref(candidatePath, credentials, checkActive) ?: return false
         if (href.isBlank()) return false
-        return runCatching {
+        return try {
+            checkActive()
             val absoluteUrl = webDavRemoteClient.absoluteUrlFromHref(credentials.url, href)
             logWebDav("GET 404 retry via href from=$candidatePath url=${absoluteUrl.redactWebDavUrl()}")
             outputFile.delete()
             webDavRemoteClient.requestToFileByUrl(credentials, absoluteUrl, outputFile, onProgress)
+            checkActive()
             true
-        }.getOrDefault(false)
+        } catch (failure: Throwable) {
+            checkActive()
+            if (failure is java.util.concurrent.CancellationException) throw failure
+            false
+        }
     }
 }
 
-internal fun WebDavDriveHook.resolveWebDavHref(truncatedPath: String): String? {
+internal fun WebDavDriveHook.resolveWebDavHref(
+    truncatedPath: String, credentials: WebDavCredentials = webDavCredentials() ?: error("WebDAV not authorized"),
+    checkActive: () -> Unit = {},
+): String? {
+    checkActive()
     val parent = parentWebDavPath(truncatedPath)
     val truncatedName = truncatedPath.substringAfterLast('/')
     if (truncatedName.isBlank()) return null
@@ -1108,8 +1142,9 @@ internal fun WebDavDriveHook.resolveWebDavHref(truncatedPath: String): String? {
 
     val prefixSkeleton = skeletonForMatch(prefix)
     val suffixSkeleton = skeletonForMatch(suffix)
-    val entries = runCatching { listWebDav(parent) }.getOrNull().orEmpty()
+    val entries = runCatching { loadWebDavEntries(parent, credentials) }.onFailure { checkActive() }.getOrNull().orEmpty()
         .filterNot { it.isDirectory }
+    checkActive()
 
     val match = entries.firstOrNull { entry ->
         entry.name.isNotBlank() && skeletonForMatch(entry.name) == prefixSkeleton && suffixSkeleton.isEmpty()
@@ -1128,20 +1163,31 @@ internal fun WebDavDriveHook.resolveWebDavHref(truncatedPath: String): String? {
     return href
 }
 
-internal fun WebDavDriveHook.webDavUpload(path: String, file: File) {
-    val credentials = webDavCredentials() ?: error("WebDAV not authorized")
+internal fun WebDavDriveHook.webDavUpload(path: String, file: File, checkActive: () -> Unit = {}) =
+    webDavUpload(path, file, webDavCredentials() ?: error("WebDAV not authorized"), checkActive)
+
+internal fun WebDavDriveHook.webDavUpload(
+    path: String, file: File, credentials: WebDavCredentials, checkActive: () -> Unit = {},
+) {
+    checkActive()
     val normalizedPath = normalizeWebDavPath(path)
-    ensureWebDavParentDirs(normalizedPath)
+    ensureWebDavParentDirs(normalizedPath, credentials, checkActive)
+    checkActive()
     var response = webDavPut(credentials, normalizedPath, file)
+    checkActive()
     if (response.code in WEBDAV_UPLOAD_RETRY_CODES) {
         logWebDav("PUT retry path=$normalizedPath code=${response.code} body=${response.bodyString.orEmpty().take(160)}")
-        runCatching { webDavDelete(normalizedPath) }
-            .onFailure { logWebDav("PUT retry delete skipped path=$normalizedPath error=${it.message}") }
-        ensureWebDavParentDirs(normalizedPath)
+        checkActive()
+        runCatching { webDavDelete(normalizedPath, credentials, checkActive) }
+            .onFailure { checkActive(); logWebDav("PUT retry delete skipped path=$normalizedPath error=${it.message}") }
+        ensureWebDavParentDirs(normalizedPath, credentials, checkActive)
+        checkActive()
         response = webDavPut(credentials, normalizedPath, file)
+        checkActive()
     }
     if (response.code !in 200..299 && response.code != 201 && response.code != 204) {
         if (response.code == 405 && webDavRemoteClient.tryAlistUploadFallback(credentials, normalizedPath, file, EPUB_MIME_TYPE)) {
+            checkActive()
             return
         }
         val detail = response.bodyString.orEmpty().take(200).ifBlank { "no response body" }
@@ -1152,15 +1198,21 @@ internal fun WebDavDriveHook.webDavUpload(path: String, file: File) {
 internal fun WebDavDriveHook.webDavPut(credentials: WebDavCredentials, path: String, file: File) =
     webDavRemoteClient.putFile(credentials, path, file, EPUB_MIME_TYPE)
 
-internal fun WebDavDriveHook.ensureWebDavParentDirs(path: String) {
+internal fun WebDavDriveHook.ensureWebDavParentDirs(
+    path: String, credentials: WebDavCredentials = webDavCredentials() ?: error("WebDAV not authorized"),
+    checkActive: () -> Unit = {},
+) {
+    checkActive()
     val parent = parentWebDavPath(path)
     if (parent == "/" || parent.isBlank()) return
     val segments = parent.trim('/').split('/').filter { it.isNotBlank() }
     var current = ""
     segments.forEach { segment ->
         current = childWebDavPath(current.ifBlank { "/" }, segment)
-        runCatching { webDavMkcol(current) }
-            .onFailure { logWebDav("MKCOL skipped path=$current error=${it.message}") }
+        checkActive()
+        runCatching { webDavMkcol(current, credentials) }
+            .onFailure { checkActive(); logWebDav("MKCOL skipped path=$current error=${it.message}") }
+        checkActive()
     }
 }
 
@@ -1212,10 +1264,11 @@ internal fun applyWebDavSystemBarAppearance(window: Window, dark: Boolean) {
 internal fun WebDavDriveHook.showWebDavAuthIntroPage() {
     val activity = activityProvider()
     if (activity == null) {
-        XposedBridge.log("$LOG_PREFIX WebDAV auth page skipped: no activity")
+        HookRuntime.log("$LOG_PREFIX WebDAV auth page skipped: no activity")
         return
     }
-    activity.runOnUiThread {
+    postStorageUi {
+        if (storageActivityRef?.get() !== activity) return@postStorageUi
         webDavAuthDialog?.takeIf { it.isShowing }?.dismiss()
         val colors = WebDavPageColors(activity)
         val dialog = Dialog(
@@ -1386,10 +1439,11 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(
 internal fun WebDavDriveHook.showWebDavLoginPage() {
     val activity = activityProvider()
     if (activity == null) {
-        XposedBridge.log("$LOG_PREFIX WebDAV login skipped: no activity")
+        HookRuntime.log("$LOG_PREFIX WebDAV login skipped: no activity")
         return
     }
-    activity.runOnUiThread {
+    postStorageUi {
+        if (storageActivityRef?.get() !== activity) return@postStorageUi
         webDavLoginDialog?.takeIf { it.isShowing }?.dismiss()
         val colors = WebDavPageColors(activity)
 
@@ -1633,7 +1687,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
                         .putString(KEY_BROWSE_DIR, DEFAULT_DIR)
                         .putBoolean(KEY_AUTHORIZED, true)
                         .apply()
-                    XposedBridge.log("$LOG_PREFIX WebDAV login saved: ${url.redactWebDavUrl()}")
+                    HookRuntime.log("$LOG_PREFIX WebDAV login saved: ${url.redactWebDavUrl()}")
                     onWebDavLoginSaved()
                     context.toast("WebDAV 已保存")
                     onSaved()
@@ -1739,78 +1793,36 @@ internal inline fun <T> WebDavDriveHook.withWebDavIcon(block: () -> T): T {
 
 internal fun WebDavDriveHook.getComposeWebDavVector(): Any? {
     composeWebDavVector?.let { return it }
-    return runCatching {
-        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-            return@runCatching B4WebDavVector(this).build().also { composeWebDavVector = it }
+    return runCatching { HostWebDavVector(this).build().also { composeWebDavVector = it } }
+        .onFailure { HookRuntime.logError("$LOG_PREFIX WebDAV vector binding failed", it) }.getOrNull()
+}
+
+internal fun WebDavDriveHook.rememberPendingWebDavImport(
+    platformFile: Any, localFile: File, sourceUrl: String, sourceSize: Long?,
+    storageIdentity: AccountHostRuntime.Identity,
+    checkActive: () -> Unit = {},
+): WebDavImportSource {
+    val execution = storageExecutionGeneration.get()
+    val source = WebDavImportSource(sourceUrl, sourceSize, storageIdentity, localFile) {
+        if (storageClosed || !settingsProvider().moduleEnabled || execution != storageExecutionGeneration.get()) {
+            throw com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException("模块状态已变化，已停止原生导入")
         }
-        val builderClass = cls(IMAGE_VECTOR_BUILDER_CLASS)
-        val markerClass = cls(DEFAULT_CONSTRUCTOR_MARKER_CLASS)
-        val builder = builderClass.getDeclaredConstructor(
-            String::class.java,
-            java.lang.Float.TYPE,
-            java.lang.Float.TYPE,
-            java.lang.Float.TYPE,
-            java.lang.Float.TYPE,
-            java.lang.Long.TYPE,
-            java.lang.Integer.TYPE,
-            java.lang.Boolean.TYPE,
-            java.lang.Integer.TYPE,
-            markerClass,
-        ).apply { isAccessible = true }.newInstance(
-            "Colored.WebDAV",
-            24f,
-            24f,
-            24f,
-            24f,
-            0L,
-            0,
-            false,
-            224,
-            null,
-        )
-        addVectorPath(builderClass, builder, WEBDAV_ICON_BODY_PATH, 0xFF4BAFA7L)
-        addVectorPath(builderClass, builder, WEBDAV_ICON_CLOUD_PATH, 0xFFFFFFFFL)
-        addVectorPath(builderClass, builder, WEBDAV_ICON_SLOT_PATH, 0xFFFFFFFFL, 0.84f)
-        val imageVector = builderClass.hostMethod("build")
-            .apply { isAccessible = true }
-            .invoke(builder)
-        composeWebDavVector = imageVector
-        imageVector
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to build WebDAV compose icon: ${it.stackTraceToString()}")
-    }.getOrNull()
-}
-
-internal fun WebDavDriveHook.rememberPendingWebDavImport(platformFile: Any, localFile: File, sourceUrl: String, sourceSize: Long?) {
-    val source = WebDavImportSource(sourceUrl, sourceSize)
+        checkActive()
+    }
+    source.checkCurrent()
     val keys = (platformFileKeys(platformFile) + localFile.absolutePath + runCatching { localFile.canonicalPath }.getOrNull())
-        .filterNotNull()
-        .filter { it.isNotBlank() }
-        .distinct()
-    keys.forEach { pendingWebDavImports[it] = source }
+        .filterNotNull().filter { it.isNotBlank() }.distinct()
+    AccountHostRuntime.withCurrentStorage(storageIdentity, activityProvider()) {
+        source.checkCurrent()
+        keys.forEach { pendingWebDavImports[it] = source }
+    }
     logWebDav("pending import keys=${keys.size} url=${sourceUrl.redactWebDavUrl()}")
+    return source
 }
 
-internal fun WebDavDriveHook.importWebDavDownloadedBook(
-    workerManager: Any,
-    platformFile: Any,
-    sourceUrl: String,
-    sourceSize: Long?,
-): Any? {
-    rememberWorkerManager(workerManager)
-    val bookshelf = currentBookshelfRepository()
-        ?: error("BookshelfRepository not available for WebDAV import")
-    val importMethod = findImportBookMethod(bookshelf)
-    return invokeSuspendBlocking(
-        importMethod,
-        bookshelf,
-        *importBookArgs(
-            importMethod,
-            platformFile,
-            null,
-            null,
-            sourceUrl.ifBlank { null },
-            sourceSize?.takeIf { it > 0L }?.let { java.lang.Long.valueOf(it) },
-        ),
-    )
+internal fun WebDavDriveHook.forgetPendingWebDavImport(localFile: File) {
+    pendingWebDavImports.entries.forEach { (key, source) ->
+        if (source.localFile == localFile) pendingWebDavImports.remove(key, source)
+    }
+    ImportCompletionState.release(localFile)
 }

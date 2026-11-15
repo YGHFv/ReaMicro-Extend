@@ -1,21 +1,21 @@
 package com.reamicro.fix.core
 
-/** B2 的 tryLock(owner) 被 R8 改为 tryLock()，锁的 owner 固定为 null。 */
+/** Exact native mutex methods are validated with the reader window contract. */
 internal class HostMutex(private val target: Any, private val owner: Any) {
-    private val tryLockWithOwner = target.javaClass.hostMethodOrNull("tryLock", Any::class.java)
-    private val tryLock = tryLockWithOwner ?: target.javaClass.hostMethod("tryLock")
-    private val unlock = target.javaClass.hostMethod("unlock", Any::class.java)
+    private val host = requireNotNull(HostReaderWindowBindings.current) { "Reader mutex contract unavailable" }
+    private val tryLock = host.method("tryLock")
+    private val unlock = host.method("unlock")
+    private val withOwner = tryLock.parameterCount == 1
     private var acquired = false
-
+    init { require(host.type("mutex").isInstance(target)) }
     fun tryAcquire(): Boolean {
         check(!acquired) { "Mutex lease already acquired" }
-        acquired = if (tryLockWithOwner != null) tryLock.invoke(target, owner) == true else tryLock.invoke(target) == true
+        acquired = if (withOwner) tryLock.invoke(target, owner) == true else tryLock.invoke(target) == true
         return acquired
     }
-
     fun release() {
         check(acquired) { "Mutex lease was not acquired" }
-        unlock.invoke(target, if (tryLockWithOwner != null) owner else null)
+        unlock.invoke(target, if (withOwner) owner else null)
         acquired = false
     }
 }

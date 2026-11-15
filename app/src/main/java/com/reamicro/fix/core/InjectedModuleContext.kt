@@ -7,7 +7,7 @@ import com.reamicro.fix.BuildConfig
 import com.reamicro.fix.R
 import android.widget.Toast
 import java.io.File
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 object InjectedModuleContext {
     @Volatile private var moduleInfo: ApplicationInfo? = null
@@ -24,7 +24,7 @@ object InjectedModuleContext {
 
     fun runUiAction(base: Context?, action: () -> Unit) {
         ModuleResourceRecovery.run(action) { error ->
-            XposedBridge.logError("Module resource generation expired; restart the host instead of loading another APK", error)
+            HookRuntime.logError("Module resource generation expired; restart the host instead of loading another APK", error)
             base?.let { Toast.makeText(it, ModuleResourceRecovery.RESTART_MESSAGE, Toast.LENGTH_LONG).show() }
         }
     }

@@ -10,11 +10,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.dp
+import com.reamicro.fix.ui.LocalModuleThemeConfig
+import com.reamicro.fix.ui.ModuleUiStyle
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.blur.BlurColors
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.textureBlur
+import top.yukonga.miuix.kmp.material.GlassDefaults
+import top.yukonga.miuix.kmp.material.GlassMaterials
+import top.yukonga.miuix.kmp.material.GlassShape
+import top.yukonga.miuix.kmp.material.GlassEdgeStrokes
+import top.yukonga.miuix.kmp.glass.glassPanel
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal val LocalAboutBackdrop = staticCompositionLocalOf<LayerBackdrop?> { null }
@@ -26,6 +34,10 @@ internal fun AboutEffectCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val backdrop = LocalAboutBackdrop.current
+    val config = LocalModuleThemeConfig.current
+    val os4 = config.style == ModuleUiStyle.OS4
+    val glassActive = os4 && config.active.glassEnabled && config.active.blurEnabled &&
+        isRuntimeShaderSupported() && backdrop != null
     val dark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
     val blendColors = remember(dark) {
         BlurColors(
@@ -33,19 +45,36 @@ internal fun AboutEffectCard(
             else ColorBlendToken.Pured_Regular_Light,
         )
     }
+    val effectModifier = when {
+        glassActive -> Modifier.glassPanel(
+            backdrop = backdrop,
+            shape = remember { GlassShape(16.dp) },
+            style = GlassDefaults.style(dark),
+            material = GlassMaterials.puredThinGlass(dark),
+            stroke = GlassEdgeStrokes.forTheme(
+                isDark = dark,
+                light = GlassEdgeStrokes.SmallLight,
+                dark = GlassEdgeStrokes.SmallDark,
+            ),
+            shadow = null,
+            shading = false,
+        )
+        os4 -> Modifier
+        backdrop != null -> Modifier.textureBlur(
+            backdrop = backdrop,
+            shape = RoundedCornerShape(16.dp),
+            blurRadius = 60f,
+            colors = blendColors,
+        )
+        else -> Modifier
+    }
     Card(
-        modifier = modifier.then(
-            if (backdrop != null) Modifier.textureBlur(
-                backdrop = backdrop,
-                shape = RoundedCornerShape(16.dp),
-                blurRadius = 60f,
-                colors = blendColors,
-            ) else Modifier,
-        ),
+        modifier = modifier.then(effectModifier),
         cornerRadius = 16.dp,
         insideMargin = insideMargin,
         colors = CardDefaults.defaultColors(
-            color = if (backdrop != null) Color.Transparent else MiuixTheme.colorScheme.surfaceContainer,
+            color = if (glassActive || (!os4 && backdrop != null)) Color.Transparent
+                else MiuixTheme.colorScheme.surfaceContainer,
         ),
         content = content,
     )

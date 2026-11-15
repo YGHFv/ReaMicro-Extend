@@ -66,7 +66,7 @@ val bundleModule by tasks.registering(Zip::class) {
 
     doFirst {
         check(rootModuleSourceDir.file("bin/wake-timer").asFile.let { it.isFile && it.length() > 0 }) {
-            "Root wake helper missing; run python3 tools/build-wake-timer.py before bundling"
+            "Root wake helper missing: module/reamicro-automation/bin/wake-timer"
         }
         destinationDirectory.get().asFile.listFiles()?.filter {
             it.name.startsWith("ReaMicro-Automation-Root-") && it.extension == "zip" &&
@@ -107,9 +107,9 @@ android {
         applicationId = "com.reamicro.fix"
         ndk { abiFilters += "arm64-v8a" }
         minSdk = 26
-        targetSdk = 35
-        versionCode = 81
-        versionName = "2.3.19"
+        targetSdk = 37
+        versionCode = 82
+        versionName = "2.3.20"
     }
 
     compileOptions {
@@ -150,6 +150,10 @@ android {
     }
     sourceSets["main"].assets.srcDir(generatedBundledSourcesRoot)
     sourceSets["main"].assets.srcDir(generatedRootModuleRoot)
+    packaging {
+        // Upstream excludes META-INF/*; only the duplicated Hutool index needs exclusion here.
+        resources.excludes.add("META-INF/INDEX.LIST")
+    }
 }
 
 tasks.matching { task ->
@@ -185,27 +189,33 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 }
 
 dependencies {
+    implementation(project(":legado-parser"))
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
 
     implementation("androidx.compose.material3:material3:1.5.0-rc01")
 
     implementation("androidx.activity:activity-compose:1.13.0")
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.4")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.4")
-
-    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.4")
+    // The app's event relay uses the same public dispatcher API as the vendored Miuix modules.
+    implementation("androidx.navigationevent:navigationevent-compose:1.2.0")
+    implementation(project(":miuix-ui"))
+    implementation(project(":miuix-preference"))
+    implementation(project(":miuix-icons"))
+    implementation(project(":miuix-material"))
+    implementation(project(":miuix-glass"))
+    implementation(project(":miuix-glass-icons"))
+    implementation(project(":miuix-nav"))
 
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.2")
 
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
 
-    // 运行期 dex 结构校验（宿主重新混淆后用于判定 profile 是否仍然适用）。
+    // 从当前宿主 DEX 查询语义契约。
     implementation("org.luckypray:dexkit:2.3.0")
+    // Resolve record properties from StringBuilder register flow, not field order.
+    implementation("com.android.tools.smali:smali-dexlib2:3.0.3")
     implementation("com.highcapable.kavaref:kavaref-core:1.1.1")
     implementation("com.highcapable.kavaref:kavaref-android:1.1.1")
 
-    testImplementation("junit:junit:4.13.2")
 }

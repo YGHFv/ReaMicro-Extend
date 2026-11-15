@@ -13,9 +13,21 @@ internal object EpubResourceTransaction {
     private const val MAX_TEXT=8L*1024*1024
 
     fun execute(storage: EpubStorageFiles, path: String, newName: String?, backupBase: File, currentCover: String,
+        commitBook: (String)->Unit = {}, rollbackBook: ()->Unit = {}, checkpoint: (String)->Unit = {},
+    ): Result = executeGuarded(storage, path, newName, backupBase, currentCover, commitBook, rollbackBook,
+        commit = { it() }, checkCurrent = {}, checkpoint = checkpoint)
+
+    fun executeGuarded(storage: EpubStorageFiles, path: String, newName: String?, backupBase: File, currentCover: String,
         commitBook: (String)->Unit = {}, rollbackBook: ()->Unit = {},
+        commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {},
         checkpoint: (String)->Unit = {},
     ): Result {
+        checkCurrent()
+        fun publish(action: () -> Unit) {
+            var published = false
+            commit { check(!published) { "联动操作已提交" }; checkCurrent(); action(); published = true }
+            check(published) { "联动操作未提交" }
+        }
         val root=storage.root
         require(!backupBase.canonicalFile.toPath().startsWith(root.toPath())) { "联动备份必须存放在图书目录外" }
         val source=storage.child(path);require(source.isFile){"源文件不存在"}
@@ -24,7 +36,7 @@ internal object EpubResourceTransaction {
         val inventory=storage.visibleFiles()
         val container=storage.child("META-INF/container.xml")
         val primary=if(container.isFile) {
-            val name=EpubOpfMetadata.packagePath(EpubTextFiles.load(container,MAX_TEXT).text)
+            val name=EpubOpfMetadata.packagePath(EpubTextFiles.load(container,MAX_TEXT,checkCurrent).text)
             storage.child(name).takeIf { it.isFile }?.let(storage::relative)
                 ?: EpubLinkRewriter.resolve(File(root,"_container.xml"),name,root).orEmpty()
         } else
@@ -69,11 +81,11 @@ internal object EpubResourceTransaction {
             val before=VerifiedFileIO.digest(file)
             require(expected==null || expected==before){"文件在规划时被改变"}
             val saved=File(backup,"${changes.size}.before")
-            VerifiedFileIO.copyAtomic(file,saved)
+            VerifiedFileIO.copyAtomic(file,saved,commit,checkCurrent)
             VerifiedFileIO.requireMatches(saved,before)
             val stage=if(remove)null else File(backup,"${changes.size}.after").also {
-                VerifiedFileIO.copyAtomic(saved,it)
-                if(next!=null){val loaded=EpubTextFiles.load(it,MAX_TEXT);EpubTextFiles.save(it,next,loaded.snapshot)}
+                VerifiedFileIO.copyAtomic(saved,it,commit,checkCurrent)
+                if(next!=null){val loaded=EpubTextFiles.load(it,MAX_TEXT,checkCurrent);EpubTextFiles.save(it,next,loaded.snapshot,commit,checkCurrent)}
             }
             changes[rel]=Change(rel,before,stage?.let(VerifiedFileIO::digest),saved,stage)
         }
@@ -83,7 +95,8 @@ internal object EpubResourceTransaction {
                 if(rel==deleted)continue
                 if(file.extension.lowercase() !in textTypes && file.name!="reamicro-online-chapters.json")continue
                 checkpoint("scan:$rel")
-                val loaded=EpubTextFiles.load(file,MAX_TEXT)
+                checkCurrent()
+                val loaded=EpubTextFiles.load(file,MAX_TEXT,checkCurrent)
                 require(!loaded.text.contains("<!ENTITY",ignoreCase=true)) { "引用文件含自定义 XML 实体，请先展开实体再联动：$rel" }
                 scanned[rel]=VerifiedFileIO.Digest(loaded.snapshot.fingerprint.size,loaded.snapshot.fingerprint.sha256)
                 val next=when {
@@ -100,6 +113,7 @@ internal object EpubResourceTransaction {
             if(deleted!=null)record(source,null,true)
             writeJournal("prepared")
             checkpoint("prepared")
+            checkCurrent()
             for((rel,digest) in scanned)check(VerifiedFileIO.digest(storage.child(rel))==digest){"引用文件被并发修改：$rel"}
             for(c in changes.values)check(VerifiedFileIO.digest(storage.child(c.path))==c.before){"文件被并发修改，未开始提交：${c.path}"}
             for(target in moved.values)require(!storage.child(target).exists()){"目标被其他操作创建，未覆盖"}
@@ -107,32 +121,41 @@ internal object EpubResourceTransaction {
         val applied=linkedSetOf<String>();val renamed=linkedSetOf<String>();var metadataAttempted=false
         try {
             checkpoint("commit")
+            checkCurrent()
             writeJournal("committing")
             for(c in changes.values) {
                 if(c.stage==null)continue
                 if(c.before!=c.after) {
                     check(VerifiedFileIO.digest(storage.child(c.path))==c.before){"提交前文件发生变化"}
-                    applied.add(c.path)
-                    VerifiedFileIO.copyAtomic(c.stage,storage.child(c.path))
+                    VerifiedFileIO.copyAtomic(c.stage,storage.child(c.path),
+                        commit = { action -> publish { action(); applied.add(c.path) } }, checkCurrent = checkCurrent)
                     checkpoint("write:${c.path}")
+                    checkCurrent()
                 }
             }
             for((old,new) in moved) {
                 val c=changes.getValue(old)
                 VerifiedFileIO.requireMatches(storage.child(old),requireNotNull(c.after))
-                java.nio.file.Files.move(storage.child(old).toPath(),storage.child(new).toPath())
-                renamed.add(old)
+                publish {
+                    java.nio.file.Files.move(storage.child(old).toPath(),storage.child(new).toPath())
+                    renamed.add(old)
+                }
                 VerifiedFileIO.requireMatches(storage.child(new),requireNotNull(c.after))
                 VerifiedFileIO.requireMissing(storage.child(old));checkpoint("move:$old")
+                checkCurrent()
             }
             if(deleted!=null) {
                 val c=changes.getValue(deleted);check(VerifiedFileIO.digest(source)==c.before){"删除前文件发生变化"}
-                applied.add(deleted);check(source.delete()){"删除失败"};VerifiedFileIO.requireMissing(source)
+                publish { check(storage.child(deleted).delete()){"删除失败"}; applied.add(deleted) }
+                VerifiedFileIO.requireMissing(source)
                 checkpoint("delete:$deleted")
+                checkCurrent()
             }
             writeJournal("files_committed")
             val cover=if(currentCover==deleted)"" else moved[currentCover]?:currentCover
+            checkCurrent()
             metadataAttempted=true;commitBook(cover)
+            checkCurrent()
             for(c in changes.values)if(c.after!=null)VerifiedFileIO.requireMatches(storage.child(moved[c.path]?:c.path),c.after)
             writeJournal("committed")
             return Result(moved[original],changes.keys.toSet(),cover,backup,moved.toMap())
@@ -144,7 +167,9 @@ internal object EpubResourceTransaction {
                 if(at.exists()) {
                     VerifiedFileIO.requireMatches(at,requireNotNull(c.after))
                     check(!beforePath.exists()){"回滚原路径被占用"}
-                    storage.rename(moved.getValue(old),File(old).name)
+                    publish { java.nio.file.Files.move(at.toPath(),beforePath.toPath()) }
+                    VerifiedFileIO.requireMatches(beforePath,requireNotNull(c.after))
+                    VerifiedFileIO.requireMissing(at)
                 } else check(beforePath.exists()){"新旧路径均不存在"}
             }.onFailure { rollbackError=it as? Exception ?: IllegalStateException(it) }
             for(path in (applied+renamed).toList().asReversed())runCatching {
@@ -152,10 +177,11 @@ internal object EpubResourceTransaction {
                 if(file.exists()) {
                     val actual=VerifiedFileIO.digest(file)
                     check(actual==c.before || actual==c.after){"文件被外部改写，不能覆盖回滚：$path"}
+                    if(actual==c.before)return@runCatching
                 } else check(path==deleted){"回滚目标丢失：$path"}
-                VerifiedFileIO.copyAtomic(c.backup,file);VerifiedFileIO.requireMatches(file,c.before)
+                VerifiedFileIO.copyAtomic(c.backup,file,commit,checkCurrent);VerifiedFileIO.requireMatches(file,c.before)
             }.onFailure { rollbackError=it as? Exception ?: IllegalStateException(it) }
-            if(metadataAttempted)runCatching(rollbackBook).onFailure { rollbackError=it as? Exception ?: IllegalStateException(it) }
+            if(metadataAttempted)runCatching { checkCurrent(); rollbackBook() }.onFailure { rollbackError=it as? Exception ?: IllegalStateException(it) }
             writeJournal(if(rollbackError==null)"rolled_back" else "recovery_required")
             if(rollbackError!=null){failure.addSuppressed(rollbackError!!);throw EpubWriteNotConfirmed("联动失败且部分回滚需人工恢复，备份：${backup.path}",failure)}
             throw IllegalStateException("联动失败，已恢复原文件和书架；${failure.message.orEmpty()}",failure)

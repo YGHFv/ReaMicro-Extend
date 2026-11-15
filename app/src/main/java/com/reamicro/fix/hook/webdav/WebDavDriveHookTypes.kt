@@ -44,6 +44,7 @@ internal data class OnlineSearchGroup(
     val query: String,
     val results: List<OnlineBookSearchResult>,
     val error: String,
+    val sequence: Long = -1L,
 )
 
 internal data class OnlineBookSearchResult(
@@ -58,6 +59,7 @@ internal data class OnlineBookSearchResult(
     val wordCount: String = "",
     val updateTime: String = "",
     val platformName: String = "",
+    val parsingState: com.reamicro.fix.online.OnlineParsingState? = null,
 )
 
 internal data class OnlineResultMetadata(
@@ -72,7 +74,10 @@ internal data class OnlineDownloadTarget(
     var source: OnlineSourceEntry,
     val query: String,
     var result: OnlineBookSearchResult,
-)
+) {
+    @Volatile internal var parserBook: com.reamicro.fix.online.EnhancedParserBook? = null
+    @Volatile internal var imageCache: com.reamicro.fix.online.download.OnlineChapterImageCache? = null
+}
 
 internal data class OnlineImportedBookSourceInfo(
     val sourceId: String,
@@ -96,6 +101,8 @@ internal data class OnlineChapterUpdateResult(
     val retried: Int = 0,
     val styled: Boolean = false,
     val skipped: Boolean = false,
+    val paused: Boolean = false,
+    val pending: Int = 0,
 )
 
 internal data class OnlineFailedRetryResult(
@@ -140,6 +147,8 @@ internal data class OnlineChapter(
     val url: String,
     val volumeTitle: String = "",
     val level: Int = 0,
+    val upstreamJson: String = "",
+    val nextChapterUrl: String? = null,
 )
 
 internal data class OnlineFailedChapter(
@@ -189,6 +198,7 @@ internal data class LocalLibraryPath(
 internal data class LocalLibraryListCache(
     val entries: List<LocalLibraryEntry>,
     val createdAtMs: Long,
+    val generation: Long,
 )
 
 internal data class LocalLibrarySearchIndex(
@@ -196,6 +206,7 @@ internal data class LocalLibrarySearchIndex(
     val entries: List<LocalLibraryEntry>,
     val createdAtMs: Long,
     val complete: Boolean,
+    val generation: Long,
 )
 
 internal class WebDavPageColors(context: Context) {

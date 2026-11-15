@@ -1,9 +1,11 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 STATE=/data/adb/reamicro-automation
+[ ! -L "$STATE" ] && [ ! -L "$MODDIR" ] || exit 1
 umask 077
 . "$MODDIR/common.sh"
 . "$MODDIR/lifecycle.sh"
+export ASH_STANDALONE=1
 
 if [ -d "$STATE" ]; then
   chmod 700 "$STATE" || exit 1

@@ -1,34 +1,27 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostReleaseMethod
-import com.reamicro.fix.core.hostReleaseField
-import com.reamicro.fix.core.hostReleaseMethodByArity
 
 import android.app.Activity
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
-import com.reamicro.fix.core.B2NativeUi
-import com.reamicro.fix.core.HostCoroutines
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostAbiMethod
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostMethodsNamed
+import com.reamicro.fix.core.HostHomeBindings
+import com.reamicro.fix.core.HostNativeUi
 import com.reamicro.fix.notification.BookshelfUpdateNotifications
 import com.reamicro.fix.notification.BookshelfUpdateReport
 import com.reamicro.fix.online.download.OnlineChapterUpdateOutcome
+import com.reamicro.fix.reload.TaskCancellation
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.ModuleSettings
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
 
 /** 复用宿主同步动作、Session 和单书更新；不修改书架页或在线更新算法。 */
 internal class BookshelfCompletionHook(
@@ -50,17 +43,26 @@ internal class BookshelfCompletionHook(
     @Volatile private var showingShelf: Boolean? = null
     private val startupClaimed = AtomicBoolean()
     private val running = AtomicBoolean()
-    private val ui = B2NativeUi(loader)
+    private val batchCancellation = AtomicReference<TaskCancellation?>()
+    private val ui = HostNativeUi(loader)
+    private val symbols get() = requireNotNull(HostHomeBindings.bookshelf) { "书架动态契约尚未就绪" }
+    private val preferences get() = requireNotNull(HostHomeBindings.preferences) { "宿主偏好动态契约尚未就绪" }
+    private fun stateValue(state: Any): Any? = symbols.method("stateGet").invoke(state)
+    private fun setState(state: Any, value: Any?) { symbols.method("stateSet").invoke(state, value) }
     private val styleChanging = AtomicBoolean()
     private val dexKitListenerRegistered = AtomicBoolean()
-    @Volatile private var cancelAutomaticForDexKit = false
+    private val dexKitScanGeneration = AtomicInteger()
     private var headerHook: BookshelfHeaderHook? = null
     private val styleState by lazy { ui.mutableState(1) }
     private val settingsState by lazy { ui.mutableState(settingsProvider()) }
     private var observedPreferences: SharedPreferences? = null
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == ModuleSettings.KEY_MODULE_ENABLED || key?.startsWith("shelf_") == true) {
-            main.post { XposedHelpers.callMethod(settingsState, "setValue", settingsProvider()) }
+            main.post {
+                val settings = settingsProvider()
+                if (!settings.moduleEnabled || !settings.shelfBatchUpdate) batchCancellation.get()?.cancel()
+                setState(settingsState, settings)
+            }
         }
     }
 
@@ -77,7 +79,7 @@ internal class BookshelfCompletionHook(
             DexKitUpdateScan.addStateListener {
                 main.post {
                     if (DexKitUpdateScan.isBusy()) {
-                        cancelAutomaticForDexKit = true
+                        dexKitScanGeneration.incrementAndGet()
                         startupClaimed.set(false)
                     } else {
                         scheduleStartup()
@@ -85,11 +87,12 @@ internal class BookshelfCompletionHook(
                 }
             }
         }
-        XposedHelpers.callMethod(settingsState, "setValue", settingsProvider())
+        setState(settingsState, settingsProvider())
         scheduleStartup()
     }
 
     fun closeForReload() {
+        batchCancellation.getAndSet(null)?.cancel()
         headerHook?.closeForReload()
         observedPreferences?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
         observedPreferences = null
@@ -97,21 +100,19 @@ internal class BookshelfCompletionHook(
     }
 
     fun install() {
-        check(HostSymbols.usesReleaseLayout) { "书架动作尚未适配该宿主" }
-        val homeType = loader.hostClass("app.zhendong.reamicro.ui.home.HomeViewModel")
-        XposedBridge.hookAllConstructors(homeType, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+        val homeType = symbols.type("home")
+        preferences
+        HookRuntime.hookAllConstructors(homeType, object : HookCallback() {
+            override fun after(param: Call) {
                 home = WeakReference(param.thisObject)
                 refreshStyle()
                 scheduleStartup()
             }
         })
-        val homeScreen = loader.hostClass("app.zhendong.reamicro.ui.home.HomeScreenKt")
-            .hostMethod("HomeScreen", loader.hostClass("app.zhendong.reamicro.NavGraphScope"),
-                homeType, loader.hostClass("androidx.compose.runtime.Composer"), Int::class.javaPrimitiveType)
-        XposedBridge.hookMethod(homeScreen, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val model = param.args[1] ?: return
+        val homeScreen = symbols.method("screen")
+        HookRuntime.hookMethod(homeScreen, object : HookCallback() {
+            override fun before(param: Call) {
+                val model = param.args[symbols.index("screen.home")] ?: return
                 if (home.get() !== model) {
                     home = WeakReference(model)
                     refreshStyle()
@@ -119,62 +120,41 @@ internal class BookshelfCompletionHook(
                 }
             }
         })
-        val shelf = loader.hostClass("app.zhendong.reamicro.ui.home.BookshelfScreenKt")
-        val shelfPage = shelf.hostMethodsNamed("BookshelfPage-NpZTi58").single { it.parameterCount == 11 }
-        XposedBridge.hookMethod(shelfPage, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val shelfPage = symbols.method("page")
+        HookRuntime.hookMethod(shelfPage, object : HookCallback() {
+            override fun before(param: Call) {
                 bookshelfContent.set(true)
-                bookshelfGroups = (param.args[2] as? List<*>)?.filterIsInstance<String>().orEmpty()
+                bookshelfGroups = (param.args[symbols.index("page.groups")] as? List<*>)?.filterIsInstance<String>().orEmpty()
             }
-            override fun afterHookedMethod(param: MethodHookParam) { bookshelfContent.remove() }
+            override fun after(param: Call) { bookshelfContent.remove() }
         })
-        val pagerFactory = loader.hostClass("ReaMicroShelf233.PagerFactory").hostReleaseMethodByArity("b", 5)
-        XposedBridge.hookMethod(pagerFactory, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+        val pagerFactory = symbols.method("pagerFactory")
+        HookRuntime.hookMethod(pagerFactory, object : HookCallback() {
+            override fun after(param: Call) {
                 if (bookshelfContent.get() == true) bookshelfPager = WeakReference(param.result)
             }
         })
-        XposedBridge.deoptimize(shelfPage)
+        HookRuntime.deoptimize(shelfPage)
         headerHook = BookshelfHeaderHook(
             loader = loader,
             drive = drive,
-            settings = { XposedHelpers.callMethod(settingsState, "getValue") as ModuleSettingsSnapshot },
-            grid = { (XposedHelpers.callMethod(styleState, "getValue") as Number).toInt() == 0 },
+            settings = { stateValue(settingsState) as ModuleSettingsSnapshot },
+            grid = { (stateValue(styleState) as Number).toInt() == 0 },
             onPage = { showingShelf = it },
             update = { startBatch("manual") },
             toggleStyle = ::toggleStyle,
         ).also { it.install() }
     }
 
-    private fun session(): Any? = home.get()?.let {
-        it.javaClass.hostField("repository").get(it)?.let { shelf -> shelf.javaClass.hostField("session").get(shelf) }
-    }
-
-    private fun preferenceKey(): Any =
-        loader.hostClass("ReaMicroHost.PreferenceKey").getConstructor(String::class.java)
-            .newInstance("bookshelf_type")
-
-    private fun firstValue(flow: Any): Any? {
-        val first = loader.hostClass("ReaMicroShelf233.FlowFirst").hostReleaseMethod(
-            "c", loader.hostClass("kotlinx.coroutines.flow.Flow"),
-            loader.hostClass("kotlin.coroutines.Continuation"))
-        return HostCoroutines.invokeTimed(loader, first, null, 15_000L, flow)
-    }
-
-    private fun readStyle(session: Any): Int {
-        val store = session.javaClass.hostReleaseField("a").apply { isAccessible = true }.get(session)
-        val flow = XposedHelpers.callMethod(store, "getData")
-        val prefs = firstValue(requireNotNull(flow)) ?: error("阅读设置未就绪")
-        val key = preferenceKey()
-        return (prefs.javaClass.hostAbiMethod("c", key.javaClass).invoke(prefs, key) as? Number)?.toInt() ?: 0
-    }
-
+    private fun session(): Any? = home.get()?.let(symbols::session)
+    private fun firstValue(flow: Any): Any? = preferences.first(flow)
+    private fun readStyle(session: Any): Int = (preferences.read(session, "bookshelf_type") as? Number)?.toInt() ?: 0
     private fun refreshStyle() {
         val session = session() ?: return
         com.reamicro.fix.reload.ModuleResources.thread({
             runCatching { readStyle(session) }.onSuccess { value ->
-                main.post { XposedHelpers.callMethod(styleState, "setValue", value) }
-            }.onFailure { XposedBridge.logError("ReaMicro shelf style read failed: $it", it) }
+                main.post { setState(styleState, value) }
+            }.onFailure { HookRuntime.logError("ReaMicro shelf style read failed: $it", it) }
         }, "ReaMicroShelfStyleRead").start()
     }
 
@@ -185,14 +165,11 @@ internal class BookshelfCompletionHook(
             runCatching {
                 val current = readStyle(session)
                 val next = if (current == 1) 0 else 1
-                val key = preferenceKey()
-                val update = session.javaClass.hostAbiMethod("h", key.javaClass, Any::class.java,
-                    loader.hostClass("kotlin.coroutines.Continuation"))
-                HostCoroutines.invokeTimed(loader, update, session, 15_000L, key, next)
+                preferences.update(session, "bookshelf_type", next)
                 check(readStyle(session) == next) { "书架样式回读不一致" }
-                main.post { XposedHelpers.callMethod(styleState, "setValue", next) }
-                XposedBridge.logAlways("ReaMicro shelf style changed=$next")
-            }.onFailure { XposedBridge.logError("ReaMicro shelf style failed: $it", it); toast("切换书架样式失败") }
+                main.post { setState(styleState, next) }
+                HookRuntime.logAlways("ReaMicro shelf style changed=$next")
+            }.onFailure { HookRuntime.logError("ReaMicro shelf style failed: $it", it); toast("切换书架样式失败") }
                 .also { styleChanging.set(false) }
         }, "ReaMicroShelfStyle").start()
     }
@@ -213,7 +190,7 @@ internal class BookshelfCompletionHook(
             settingsProvider(),
             System.currentTimeMillis(),
             lastCompletedAt,
-            DexKitUpdateScan.isBusy() || isManualDexKitScanning() || cancelAutomaticForDexKit,
+            DexKitUpdateScan.isBusy() || isManualDexKitScanning(),
         )
     }
 
@@ -222,82 +199,146 @@ internal class BookshelfCompletionHook(
         if (!settings.moduleEnabled || !settings.shelfBatchUpdate) return false
         if (reason == "startup" && !canStartAutomaticUpdate()) return false
         if (!running.compareAndSet(false, true)) return false
-        com.reamicro.fix.reload.ModuleResources.thread({
+        val scanGeneration = dexKitScanGeneration.get()
+        val cancellation = TaskCancellation()
+        val control = com.reamicro.fix.online.download.OnlineDownloadControl(cancellation)
+        val taskKey = "bookshelf-${UUID.randomUUID()}"
+        batchCancellation.set(cancellation)
+        drive.onlineCompletionRunningUpdates[taskKey] = cancellation
+        drive.onlineCompletionUpdateControls[taskKey] = control
+        var interruptRegistration: AutoCloseable? = null
+        try {
+        val thread = com.reamicro.fix.reload.ModuleResources.thread({
             val results = ArrayList<OnlineChapterUpdateOutcome>()
             var total = 0
             var errorMessage: String? = null
             var completed = false
+            var notifier: WebDavDriveHook.OnlineCompletionProgressNotifier? = null
             try {
-                val repository = home.get()?.let { it.javaClass.hostField("repository").get(it) }
+                cancellation.run {
+                val context = drive.currentContext()?.applicationContext ?: error("书架更新缺少 Context")
+                drive.ensureOnlineCompletionCancelReceiver(context)
+                val notificationId = drive.onlineCompletionNotificationIds.incrementAndGet()
+                drive.onlineCompletionUpdateNotificationIds[taskKey] = notificationId
+                notifier = drive.OnlineCompletionProgressNotifier(
+                    context, notificationId, "update:$taskKey",
+                    true, "书架批量更新", null, null,
+                )
+                notifier?.running(0, "正在读取书架", force = true)
+                val repository = home.get()?.let { symbols.field("home.repository").get(it) }
                     ?: drive.awaitBookshelfRepository() ?: error("书架服务未就绪")
-                val uid = drive.currentUserId(repository) ?: error("当前账号未就绪")
+                val uid = symbols.uid(repository) ?: error("当前账号未就绪")
                 val currentGroup = if (settings.shelfCurrentOnly) {
                     val viewModel = home.get() ?: error("当前书架尚未就绪")
                     if (showingShelf == false) {
                         // 首页的当前阅读流跟随用户当前书籍，不能使用上次书架分页位置代替。
-                        val readingFlow = viewModel.javaClass.hostReleaseField("y").apply { isAccessible = true }.get(viewModel)
+                        val readingFlow = symbols.field("home.reading").get(viewModel)
                         val readingBook = firstValue(requireNotNull(readingFlow)) ?: error("当前没有正在阅读的图书")
-                        XposedHelpers.callMethod(readingBook, "getGroup")?.toString().orEmpty().trim().ifBlank { "默认" }
+                        symbols.field("book.group").get(readingBook)?.toString().orEmpty().trim().ifBlank { "默认" }
                     } else {
                     check(showingShelf == true) { "当前主页尚未显示，暂不猜测更新分组" }
                     val groups = bookshelfGroups.ifEmpty {
                         // 自动更新可早于顶部首帧：从同一HomeUiState取分组，再复用宿主的默认分组选择。
-                        val state = XposedHelpers.callMethod(viewModel, "f") ?: error("当前书架状态未就绪")
-                        (state.javaClass.hostField("bookshelfGroups").get(state) as? List<*>)
+                        val state = symbols.method("current").invoke(viewModel) ?: error("当前书架状态未就绪")
+                        (symbols.field("state.groups").get(state) as? List<*>)
                             ?.filterIsInstance<String>().orEmpty()
                     }
                     if (groups.isEmpty()) error("当前书架分组尚未就绪")
                     val pager = bookshelfPager.get() ?: error("当前书架分页尚未就绪")
-                    val index = XposedHelpers.callMethod(pager, "getCurrentPage") as Int
+                    val index = symbols.method("pagerCurrent").invoke(pager) as Int
                     groups.getOrNull(index) ?: error("当前书架分组不可用")
                     }
                 } else null
-                XposedBridge.logAlways("ReaMicro shelf batch scope=${currentGroup ?: "all"} page=${showingShelf} source=$reason")
-                val dao = repository.javaClass.hostField("bookDao").get(repository)
+                HookRuntime.logAlways("ReaMicro shelf batch scope=${currentGroup ?: "all"} page=${showingShelf} source=$reason")
+                val dao = symbols.field("shelf.dao").get(repository)
                     ?: error("无法读取当前书架")
-                val flow = dao.javaClass.hostMethodsNamed("listByUid").single { it.parameterCount == 1 }
-                    .invoke(dao, uid)
+                val flow = symbols.method("books").invoke(dao, uid)
                 val books = (firstValue(requireNotNull(flow)) as? Iterable<*>)
                     ?: error("无法读取当前书架")
                 val uniqueBooks = books
-                    .filterNotNull().filter { number(it, "getUid") == uid }
+                    .filterNotNull().filter { number(it, "uid") == uid }
                     .filter {
-                        val group = XposedHelpers.callMethod(it, "getGroup")?.toString().orEmpty().trim().ifBlank { "默认" }
+                        val group = symbols.field("book.group").get(it)?.toString().orEmpty().trim().ifBlank { "默认" }
                         currentGroup == null || group == currentGroup
                     }
-                    .distinctBy { number(it, "getId") }
+                    .distinctBy { number(it, "id") }
                 val online = uniqueBooks.mapNotNull { book -> drive.onlineImportedBookSourceInfo(book)?.let { book to it } }
                 total = online.size
-                for ((book, info) in online) {
+                for ((index, item) in online.withIndex()) {
+                    if (control.shouldPause || control.isCancelled) break
+                    cancellation.check()
+                    val (book, info) = item
                     // 切换账号或关闭开关后停止下一本，已启动的单书操作沿用原锁与校验。
                     if (!settingsProvider().shelfBatchUpdate || !settingsProvider().moduleEnabled ||
-                        drive.currentUserId(repository) != uid ||
+                        symbols.uid(repository) != uid ||
                         (reason == "startup" && (DexKitUpdateScan.isBusy() ||
-                            isManualDexKitScanning() || cancelAutomaticForDexKit))) break
+                            isManualDexKitScanning() || dexKitScanGeneration.get() != scanGeneration))) break
                     val finished = CountDownLatch(1)
-                    val title = XposedHelpers.callMethod(book, "getTitle")?.toString().orEmpty()
+                    val title = symbols.field("book.title").get(book)?.toString().orEmpty()
                     var outcome = OnlineChapterUpdateOutcome(title, error = "章节更新未完成")
                     runCatching {
                         drive.startOnlineCompletionChapterUpdate(
                             book, info, silent = true, skipCompleted = settings.shelfSkipCompleted,
+                            parentControl = control,
+                            onProgress = { progress, message ->
+                                notifier?.running((index * 100 + progress) / total.coerceAtLeast(1),
+                                    "${index + 1}/$total 本 · $title · $message")
+                            },
                         ) { result ->
                             outcome = result
                             finished.countDown()
                         }
                     }.onFailure {
-                        XposedBridge.logError("ReaMicro shelf batch single book failed", it)
+                        HookRuntime.logError("ReaMicro shelf batch single book failed", it)
                         outcome = OnlineChapterUpdateOutcome(title, error = it.message ?: "章节更新失败")
                         finished.countDown()
                     }
-                    finished.await()
+                    // A child may already have entered its irreversible publication gate.
+                    // Wait for its actual result before completing the batch stop notification.
+                    while (true) {
+                        try {
+                            finished.await()
+                            break
+                        } catch (interrupted: InterruptedException) {
+                            if (!cancellation.isCancelled) throw interrupted
+                        }
+                    }
                     results += outcome
-                    XposedBridge.logAlways("ReaMicro shelf batch book=${number(book, "getId")} success=${outcome.success} added=${outcome.added} source=$reason")
+                    notifier?.running((results.size * 100) / total.coerceAtLeast(1),
+                        "已检查 ${results.size}/$total 本")
+                    HookRuntime.logAlways("ReaMicro shelf batch book=${number(book, "id")} success=${outcome.success} added=${outcome.added} source=$reason")
+                    if (control.shouldPause || control.isCancelled) break
                 }
-                completed = results.size == total
+                completed = results.size == total && !control.shouldPause && !control.isCancelled
+                }
             } catch (error: Throwable) {
-                XposedBridge.logError("ReaMicro shelf batch failed", error)
-                errorMessage = error.message ?: "书架更新失败"
+                if (error is InterruptedException) Thread.currentThread().interrupt()
+                HookRuntime.logError("ReaMicro shelf batch failed", error)
+                errorMessage = when {
+                    control.shouldPause && !control.isCancelled -> null
+                    cancellation.isCancelled -> "书架更新已取消"
+                    else -> error.message ?: "书架更新失败"
+                }
             } finally {
+                interruptRegistration?.close()
+                val report = BookshelfUpdateReport(results, total, reason == "startup", errorMessage)
+                runCatching {
+                    val message = when {
+                        control.shouldPause && !control.isCancelled -> "已暂停后续更新，${report.summary}，可长按更新继续"
+                        cancellation.isCancelled -> "已取消后续更新，已提交结果保留，${report.summary}"
+                        else -> report.summary
+                    }
+                    notifier?.finish(message, null,
+                        success = completed && errorMessage == null && results.all { it.success })
+                }.onFailure { HookRuntime.logError("ReaMicro shelf progress completion failed", it) }
+                drive.onlineCompletionRunningUpdates.remove(taskKey, cancellation)
+                drive.onlineCompletionUpdateControls.remove(taskKey, control)
+                drive.onlineCompletionUpdateNotificationIds.remove(taskKey)?.let {
+                    drive.onlineCompletionProgressNotifiers.remove(it)
+                }
+                batchCancellation.compareAndSet(cancellation, null)
+                control.finish()
+                cancellation.cancel()
                 if (reason == "startup" && completed && errorMessage == null) {
                     drive.currentContext()?.applicationContext
                         ?.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
@@ -306,17 +347,35 @@ internal class BookshelfCompletionHook(
                 runCatching {
                     val context = drive.currentContext()?.applicationContext ?: error("书架更新通知缺少 Context")
                     BookshelfUpdateNotifications.send(
-                        context, BookshelfUpdateReport(results, total, reason == "startup", errorMessage),
+                        context, report,
                         settingsProvider().conciseLogEnabled,
                     )
-                }.onFailure { XposedBridge.logError("ReaMicro shelf report failed: $it", it) }
+                }.onFailure { HookRuntime.logError("ReaMicro shelf report failed: $it", it) }
                 running.set(false)
+                if (reason == "startup" && dexKitScanGeneration.get() != scanGeneration) {
+                    startupClaimed.set(false)
+                    main.post { scheduleStartup() }
+                }
             }
-        }, "ReaMicroShelfBatch").start()
+        }, "ReaMicroShelfBatch")
+        interruptRegistration = cancellation.register(thread::interrupt)
+        thread.start()
+        } catch (error: Throwable) {
+            interruptRegistration?.close()
+            drive.onlineCompletionRunningUpdates.remove(taskKey, cancellation)
+            drive.onlineCompletionUpdateControls.remove(taskKey, control)
+            drive.onlineCompletionUpdateNotificationIds.remove(taskKey)?.let { drive.onlineCompletionProgressNotifiers.remove(it) }
+            batchCancellation.compareAndSet(cancellation, null)
+            control.finish()
+            cancellation.cancel()
+            running.set(false)
+            HookRuntime.logError("ReaMicro shelf batch could not start", error)
+            return false
+        }
         return true
     }
 
-    private fun number(book: Any, name: String): Long = (XposedHelpers.callMethod(book, name) as Number).toLong()
+    private fun number(book: Any, name: String): Long = (symbols.field("book.$name").get(book) as Number).toLong()
     private fun toast(message: String) = main.post {
         activityProvider()?.let { Toast.makeText(it, message, Toast.LENGTH_SHORT).show() }
     }.let { Unit }

@@ -3,7 +3,6 @@ package com.reamicro.fix.hook.settings
 import android.app.Activity
 import android.app.Dialog
 import android.content.pm.ActivityInfo
-import android.os.Handler
 import android.os.Looper
 import android.widget.EditText
 import android.widget.Switch
@@ -220,6 +219,9 @@ internal sealed class InjectedRoute(val title: String) {
     object ReaderHighlightColorPicker : InjectedRoute("\u5bf9\u8bdd\u989c\u8272")
     object ProfileBackgroundSettings : InjectedRoute("\u4e3b\u9875\u8865\u5168")
     object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
+    object AccountCompletionSettings : InjectedRoute("账号补全")
+    object EditCompletionSettings : InjectedRoute("编辑补全")
+    data class BookStructure(val uid: Long, val bookId: Long, val uuid: String, val bookTitle: String, val pageKey: String) : InjectedRoute("图书结构")
     object ApiServerSettings : InjectedRoute("\u0041\u0050\u0049 \u670d\u52a1\u5668\u8bbe\u7f6e")
     object CloudAutomationSettings : InjectedRoute("\u4e91\u7aef\u4efb\u52a1")
     object LocalAutomationSettings : InjectedRoute("\u81ea\u52a8\u4efb\u52a1")
@@ -235,10 +237,11 @@ internal sealed class InjectedRoute(val title: String) {
     object ImageSettings : InjectedRoute(IMAGE_SETTINGS_TITLE)
     object ImageApiPicker : InjectedRoute("\u0041\u0050\u0049 \u914d\u7f6e")
     data class ImagePresetPicker(val target: AiImagePresetTarget) : InjectedRoute(target.title)
-    object FontSettings : InjectedRoute(FONT_SETTINGS_TITLE)
+    object FontSettings : InjectedRoute("字体补全")
     data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
     object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
     object AboutCompletion : InjectedRoute(ABOUT_COMPLETION_TITLE)
+    object ModuleDiagnostics : InjectedRoute("模块自检")
 
     object Discover : InjectedRoute(DISCOVER_TITLE)
 }

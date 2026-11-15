@@ -1,11 +1,7 @@
 package com.reamicro.fix.epub.editor
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.HostSymbols
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Picture
-import android.graphics.RectF
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -28,14 +24,12 @@ internal fun hostSvgPreview(loader: ClassLoader, file: File, maxEdge: Int): Bitm
     require(urls.all { it.groupValues[1].trim().trim('"', '\'').trim().startsWith("#") }) {
         "SVG 安全预览不支持外部资源引用"
     }
-    val bridge = if (HostSymbols.abiProfileId == "2.3.3-b4") B4HostSvgPreview(loader) else null
-    val document = bridge?.parse(text)
-    val type = if (bridge == null) loader.hostClass("com.caverock.androidsvg.SVG") else null
-    val svg = document?.native ?: type!!.getMethod("getFromString", String::class.java).invoke(null, text)
-    val viewBox = document?.viewBox ?: if (type != null)
-        type.getMethod("getDocumentViewBox").invoke(svg) as? RectF else null
-    var width = document?.width ?: (type!!.getMethod("getDocumentWidth").invoke(svg) as Number).toFloat()
-    var height = document?.height ?: (type!!.getMethod("getDocumentHeight").invoke(svg) as Number).toFloat()
+    val bridge = NativeSvgPreview(loader)
+    val document = bridge.parse(text)
+    val svg = document.native
+    val viewBox = document.viewBox
+    var width = document.width
+    var height = document.height
     if (!width.isFinite() || !height.isFinite() || width <= 0f || height <= 0f) {
         width = viewBox?.width()?.takeIf { it.isFinite() && it > 0f } ?: 1f
         height = viewBox?.height()?.takeIf { it.isFinite() && it > 0f } ?: 1f
@@ -43,9 +37,7 @@ internal fun hostSvgPreview(loader: ClassLoader, file: File, maxEdge: Int): Bitm
     val factor = maxEdge / max(width, height)
     val targetWidth = (width * factor).roundToInt().coerceIn(1, maxEdge)
     val targetHeight = (height * factor).roundToInt().coerceIn(1, maxEdge)
-    val picture = bridge?.picture(svg, targetWidth, targetHeight)
-        ?: type!!.getMethod("renderToPicture", Integer.TYPE, Integer.TYPE)
-            .invoke(svg, targetWidth, targetHeight) as Picture
+    val picture = bridge.picture(svg, targetWidth, targetHeight)
     return Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888).also {
         Canvas(it).drawPicture(picture)
     }

@@ -4,11 +4,10 @@ import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import com.reamicro.fix.notification.CloudTaskNotifications
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -16,26 +15,39 @@ import java.util.concurrent.atomic.AtomicBoolean
 object CloudTaskNotificationPoller {
     private val running = AtomicBoolean(false)
     @Volatile private var lastPollAt = 0L
+    @Volatile private var lastRequestIdentity = ""
 
     fun poll(context: Context, source: String = "foreground", force: Boolean = false) {
         val appContext = context.applicationContext
         val store = ApiServerSettingsStore { appContext }
-        if (!store.get().enabled) {
+        val settings = store.get()
+        if (!settings.enabled || settings.baseUrl.isBlank()) {
             return
         }
         val now = System.currentTimeMillis()
-        if ((!force && now - lastPollAt < MIN_POLL_INTERVAL_MS) || !running.compareAndSet(false, true)) return
+        val identity = settings.requestIdentity()
+        if ((!force && identity == lastRequestIdentity && now - lastPollAt in 0 until MIN_POLL_INTERVAL_MS) ||
+            !running.compareAndSet(false, true)) return
         lastPollAt = now
-        com.reamicro.fix.reload.ModuleResources.thread {
-            perform(appContext, store, source)
-        }.start()
+        lastRequestIdentity = identity
+        try {
+            com.reamicro.fix.reload.ModuleResources.thread {
+                perform(appContext, store, source, settings)
+            }.start()
+        } catch (error: Throwable) {
+            running.set(false)
+            lastPollAt = 0L
+            if (error !is java.util.concurrent.RejectedExecutionException) {
+                HookRuntime.logError("ReaMicro API notification poll could not start", error)
+            }
+        }
     }
 
     fun pollBlocking(context: Context, source: String = "foreground-sync") {
         val appContext = context.applicationContext
         val store = ApiServerSettingsStore { appContext }
         val settings = store.get()
-        XposedBridge.log(
+        HookRuntime.log(
             "ReaMicro API wake source=$source enabled=${settings.enabled} " +
                 "baseUrl=${settings.baseUrl.isNotBlank()} auth=${settings.authMode.wireValue} " +
                 "hostAccountId=${settings.hostAccountId.isNotBlank()}",
@@ -44,17 +56,19 @@ object CloudTaskNotificationPoller {
             return
         }
         lastPollAt = System.currentTimeMillis()
-        perform(appContext, store, source)
+        lastRequestIdentity = settings.requestIdentity()
+        perform(appContext, store, source, settings)
     }
 
-    private fun perform(appContext: Context, store: ApiServerSettingsStore, source: String) {
+    private fun perform(appContext: Context, store: ApiServerSettingsStore, source: String, settings: ApiServerSettings) {
         try {
-            val client = ApiServerClient(store)
+            val client = ApiServerClient(store, settings)
             val heartbeat = client.heartbeat(source)
             val data = heartbeat.optJSONObject("data") ?: heartbeat
             val items = data.optJSONArray("notifications") ?: org.json.JSONArray()
             val acknowledged = mutableListOf<String>()
             for (index in 0 until items.length()) {
+                if (store.get().requestIdentity() != settings.requestIdentity()) break
                 val item = items.optJSONObject(index) ?: continue
                 val id = item.optString("id")
                 if (id.isBlank()) continue
@@ -71,7 +85,7 @@ object CloudTaskNotificationPoller {
             if (isTransientNetworkFailure(error)) {
                 logNetworkFailureThrottled(error)
             } else {
-                XposedBridge.log("ReaMicro API task notification poll failed: ${error.message}")
+                HookRuntime.log("ReaMicro API task notification poll failed: ${error.message}")
             }
         } finally {
             running.set(false)
@@ -97,7 +111,7 @@ object CloudTaskNotificationPoller {
         com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
             runCatching { Toast.makeText(context, "$title：$message", Toast.LENGTH_LONG).show() }
         }
-        XposedBridge.log("ReaMicro API task notification unconfirmed (module not reachable) id=$id")
+        HookRuntime.log("ReaMicro API task notification unconfirmed (module not reachable) id=$id")
         return false
     }
 
@@ -127,7 +141,7 @@ object CloudTaskNotificationPoller {
 
             latch.await(MODULE_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS) && confirmed.get()
         }.getOrElse {
-            XposedBridge.log("ReaMicro API task notification broadcast failed id=$id: ${it.message}")
+            HookRuntime.log("ReaMicro API task notification broadcast failed id=$id: ${it.message}")
             false
         }
     }
@@ -148,7 +162,7 @@ object CloudTaskNotificationPoller {
             )
             true
         }.getOrElse {
-            XposedBridge.log("ReaMicro API task notification activity failed id=$id: ${it.message}")
+            HookRuntime.log("ReaMicro API task notification activity failed id=$id: ${it.message}")
             false
         }
 
@@ -173,7 +187,7 @@ object CloudTaskNotificationPoller {
         val now = System.currentTimeMillis()
         if (now - lastNetworkFailureLogAtMs < NETWORK_FAILURE_LOG_INTERVAL_MS) return
         lastNetworkFailureLogAtMs = now
-        XposedBridge.log("ReaMicro API server unreachable (will keep retrying): ${error.message}")
+        HookRuntime.log("ReaMicro API server unreachable (will keep retrying): ${error.message}")
     }
 
     @Volatile private var lastNetworkFailureLogAtMs = 0L

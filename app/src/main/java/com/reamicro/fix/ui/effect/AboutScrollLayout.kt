@@ -31,12 +31,11 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
-import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
+import top.yukonga.miuix.kmp.integration.captureBackdrop
+import com.reamicro.fix.ui.modulePageScroll
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.overScrollVertical
-import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 @Stable
 internal class AboutBrandMotion(
@@ -90,14 +89,14 @@ internal class AboutBrandMotion(
 internal fun AboutScrollLayout(
     playing: Boolean,
     bottomPadding: Dp,
+    listState: LazyListState = rememberLazyListState(),
+    prepareEffect: Boolean = true,
+    motion: AboutBrandMotion = rememberAboutBrandMotion(listState),
+    effectState: BgEffectState = remember { BgEffectState() },
     header: @Composable (AboutBrandMotion) -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    val listState = rememberLazyListState()
     val density = LocalDensity.current
-    val motion = remember(listState, density.density, density.fontScale) {
-        AboutBrandMotion(listState, density.density)
-    }
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
     val contentTop = statusTop + 52.dp
@@ -111,10 +110,12 @@ internal fun AboutScrollLayout(
     BgEffectBackground(
         dynamicBackground = playing && effectVisible,
         effectBackground = supported,
+        prepareEffect = prepareEffect,
+        state = effectState,
         modifier = Modifier.fillMaxSize()
             .background(MiuixTheme.colorScheme.surface)
             .graphicsLayer(),
-        bgModifier = Modifier.layerBackdrop(backdrop),
+        bgModifier = Modifier.captureBackdrop(backdrop) { prepareEffect },
         isFullSize = true,
         alpha = { 1f - motion.progress.backgroundFade },
     ) {
@@ -128,7 +129,7 @@ internal fun AboutScrollLayout(
 
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().scrollEndHaptic().overScrollVertical(),
+                modifier = Modifier.fillMaxSize().modulePageScroll(),
                 contentPadding = PaddingValues(top = contentTop),
                 overscrollEffect = null,
             ) {
@@ -148,5 +149,13 @@ internal fun AboutScrollLayout(
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun rememberAboutBrandMotion(listState: LazyListState): AboutBrandMotion {
+    val density = LocalDensity.current
+    return remember(listState, density.density, density.fontScale) {
+        AboutBrandMotion(listState, density.density)
     }
 }

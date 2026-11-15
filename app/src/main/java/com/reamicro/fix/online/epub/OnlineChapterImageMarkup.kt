@@ -7,6 +7,9 @@ internal object OnlineChapterImageMarkup {
 
     private val IMG_TAG =
         Regex("""(?is)<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>""")
+    // Legado HtmlFormatter emits this exact tag, including AnalyzeUrl's JSON options inside src.
+    // Those options may contain quotes; an ordinary quoted-attribute matcher would truncate them.
+    private val UPSTREAM_IMG_TAG = Regex("""(?is)<img src="(.*?)">""")
     private val MARKER =
         Regex(Regex.escape(MARKER_OPEN) + "(.*?)" + Regex.escape(MARKER_CLOSE))
 
@@ -15,6 +18,12 @@ internal object OnlineChapterImageMarkup {
             val url = normalizeUrl(match.groupValues[1])
             if (url.isBlank()) " " else "\n$MARKER_OPEN$url$MARKER_CLOSE\n"
         }
+
+    fun preserveUpstream(content: String): String =
+        preserve(UPSTREAM_IMG_TAG.replace(content) { match ->
+            val url = normalizeUrl(match.groupValues[1])
+            if (url.isBlank()) " " else "\n$MARKER_OPEN$url$MARKER_CLOSE\n"
+        })
 
     fun imageUrls(content: String): List<String> =
         MARKER.findAll(content)

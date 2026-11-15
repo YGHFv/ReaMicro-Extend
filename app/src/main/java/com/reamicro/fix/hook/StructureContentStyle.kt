@@ -28,7 +28,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import java.io.File
-import kotlinx.coroutines.Dispatchers
+import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.withContext
 
 internal object StructureContentStyle {
@@ -61,7 +61,7 @@ internal fun StructureSectionHeader(
 
 @Composable
 internal fun StructureContentCard(
-    palette: StructureHome130Style.Palette,
+    palette: HostEmbeddedStyle.Palette,
     modifier: Modifier = Modifier,
     source: Boolean = false,
     onClick: (() -> Unit)? = null,
@@ -80,13 +80,13 @@ internal fun StructureContentCard(
 
 @Composable
 internal fun rememberStructureContentTypography(
-    hostFonts: StructureHome130Style.Fonts,
+    hostFonts: HostEmbeddedStyle.Fonts,
     uiFontFileProvider: () -> File?,
 ): Typography {
     val uiFont by produceState<FontFamily?>(null, uiFontFileProvider) {
-        value = withContext(Dispatchers.IO) { runCatching {
+        value = withContext(ModuleUiRuntime.io) { runCatching {
             uiFontFileProvider()?.takeIf { it.isFile }?.let { FontFamily(Typeface.createFromFile(it)) }
         }.getOrNull() }
     }
-    return remember(uiFont, hostFonts) { StructureHome130Style.typography(hostFonts, uiFont) }
+    return remember(uiFont, hostFonts, EmbeddedHostUi.typographyStyles) { HostEmbeddedStyle.typography(hostFonts, uiFont) }
 }

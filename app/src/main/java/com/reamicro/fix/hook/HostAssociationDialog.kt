@@ -43,14 +43,14 @@ internal class HostAssociationDialog(
     )
 
     private val owner = ModuleComposeOwner(activity) { dismiss() }
-    private var dark by mutableStateOf(StructureHome130Style.isDark(activity))
+    private var dark by mutableStateOf(HostEmbeddedStyle.isDark(activity))
     private var compose: ComposeView? = null
     private var closed = false
     private var actionTaken = false
     private var configurationRegistered = false
     private val configuration = object : ComponentCallbacks {
         override fun onConfigurationChanged(newConfig: Configuration) {
-            dark = StructureHome130Style.isDark(activity)
+            dark = HostEmbeddedStyle.isDark(activity)
         }
         override fun onLowMemory() = Unit
     }
@@ -67,6 +67,7 @@ internal class HostAssociationDialog(
                 setViewTreeLifecycleOwner(owner)
                 setViewTreeSavedStateRegistryOwner(owner)
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+                owner.attach(this)
                 setContent { this@HostAssociationDialog.Content() }
             }
             setContentView(view)
@@ -116,7 +117,7 @@ internal class HostAssociationDialog(
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun Content() {
-        val palette = StructureHome130Style.palette(activity, dark)
+        val palette = HostEmbeddedStyle.palette(activity, dark)
         val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
         val typography = remember(scale, LocalConfiguration.current) { BookImageDialogStyle.typography(activity, scale) }
         MaterialTheme(colorScheme = palette.controlsScheme(), typography = typography) {
@@ -166,7 +167,7 @@ internal class HostAssociationDialog(
     }
 
     @Composable
-    private fun ActionRow(action: Action, palette: StructureHome130Style.Palette, scale: Float, onClick: () -> Unit) {
+    private fun ActionRow(action: Action, palette: HostEmbeddedStyle.Palette, scale: Float, onClick: () -> Unit) {
         Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
             .clickable(role = Role.Button, onClickLabel = action.title, onClick = onClick)
             .padding(horizontal = (18 * scale).dp, vertical = (16 * scale).dp)) {

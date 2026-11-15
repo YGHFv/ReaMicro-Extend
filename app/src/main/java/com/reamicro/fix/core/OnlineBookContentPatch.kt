@@ -11,11 +11,11 @@ internal data class OnlineBookContentPatch(
     val fallbackCover: String,
 ) {
     /** 在同一写事务内读取最新封面并保留原生同步标记，不接触 CFI、章节、进度或阅读时长。 */
-    fun apply(sql: CatalogSql) {
+    fun apply(sql: CatalogSql): Boolean {
         require(bookId > 0 && uuid.isNotBlank() && size >= 0)
         val identity = listOf(bookId, uid, uuid)
         val current = sql.query("SELECT cover FROM books WHERE id=? AND uid=? AND uuid=?", identity, emptySet())
-            .singleOrNull() ?: return
+            .singleOrNull() ?: return false
         val oldCover = current.single() as String
         val cover = oldCover.ifBlank { fallbackCover }
         val coverChanged = if (oldCover != cover) 1L else 0L
@@ -36,5 +36,6 @@ internal data class OnlineBookContentPatch(
                 "cover_revision=CASE WHEN excluded.cover_dirty THEN MAX(cover_revision+1,excluded.cover_revision) ELSE cover_revision END",
             listOf(bookId, updated, coverChanged, if (coverChanged == 1L) updated else 0L),
         )
+        return true
     }
 }

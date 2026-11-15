@@ -55,7 +55,7 @@ internal data class StructureEditorModel(
 @Composable
 internal fun StructureEditorOverlay(
     model: StructureEditorModel?,
-    palette: StructureHome130Style.Palette,
+    palette: HostEmbeddedStyle.Palette,
     busy: Boolean,
     error: String?,
     onDismiss: () -> Unit,

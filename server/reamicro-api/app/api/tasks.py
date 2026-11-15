@@ -19,6 +19,7 @@ from app.scheduler import (
     next_task_run,
     normalized_task_schedule,
     public_task,
+    upsert_task_configuration,
 )
 from app.security import task_owner
 from app.state import owner_host_account_id
@@ -28,15 +29,29 @@ from app.state import (
     find_duplicate_task,
     load_credentials,
     load_notifications,
-    load_presence,
     load_tasks,
     merge_duplicate_tasks,
-    save_notifications,
-    save_presence,
     save_tasks,
 )
 
 router = APIRouter()
+
+
+def validated_schedule(task_type: str, value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return normalized_task_schedule(task_type, value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message=str(error))) from error
+
+
+def change_owned_task(task_id: str, owner: str, action: str) -> dict[str, Any]:
+    def change(tasks):
+        task = tasks.get(task_id)
+        if not task or task.get("owner") != owner:
+            raise HTTPException(status_code=404, detail=response(code="TASK_NOT_FOUND", message="任务不存在"))
+        apply_task_action(task, action)
+        return task
+    return runtime.get_state_store().mutate_namespace("tasks", change)
 
 
 @router.post("/v1/tasks")
@@ -71,11 +86,10 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     schedule = payload.get("schedule", {})
     if not isinstance(schedule, dict):
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
-    schedule = normalized_task_schedule(task_type, schedule)
+    schedule = validated_schedule(task_type, schedule)
     task_id = "task_" + secrets.token_hex(10)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     task = {
-        **payload,
         "id": task_id,
         "taskType": task_type,
         "schedule": schedule,
@@ -83,7 +97,7 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "status": "scheduled",
         "enabled": bool(payload.get("enabled", True)),
         "createdAt": now,
-        "nextRunAt": 0 if task_type == "yeshe_draw_card" else int(payload.get("nextRunAt", now)),
+        "nextRunAt": 0 if task_type == "yeshe_draw_card" else bounded_config_int(payload.get("nextRunAt", now), now, 0),
         "runCount": 0,
         "automationStateVersion": 1,
         "maxRetries": min(bounded_config_int(payload.get("maxRetries", 3), 3, 0), 10),
@@ -91,29 +105,15 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "executionMode": execution_mode,
     }
     task["credentialId"] = credential_id
-    task["requestEncrypted"] = encrypt_secret(request_value)
-    task.pop("request", None)
-    tasks = load_tasks()
-    duplicate = find_duplicate_task(tasks, task)
-    if duplicate:
-        task_id = duplicate[0]
-        previous = duplicate[1]
-        task["id"] = task_id
-        task["createdAt"] = previous.get("createdAt", now)
-        task["automationStateVersion"] = previous.get("automationStateVersion", 0)
-        task["updatedAt"] = now
-        for field in ("automationStateVersion", "executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimLoreId", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt", "merchantLastNotifiedTripId", "merchantSettledTripId", "merchantRestartedAfterTripId", "merchantEndTime", "merchantLastCityCode", "merchantLastTransportId", "merchantLastPrincipal"):
-            if field in previous:
-                task[field] = previous[field]
-        for field in ("triggeredByCheckinReward", "waitingForCheckinReward", "lastPawnDate", "pawnUsedToday", "pawnLastCoin"):
-            if field in previous:
-                task[field] = previous[field]
-    tasks[task_id] = task
-    save_tasks(tasks)
+    def create(tasks):
+        task["requestEncrypted"] = encrypt_secret(request_value)
+        stored, _ = upsert_task_configuration(tasks, task, now)
+        return response(public_task(stored))
+    result = runtime.get_state_store().mutate_namespace(
+        "tasks", create, idempotency=(owner, "create_task", idempotency_key) if idempotency_key else None,
+    )
+    task_id = str(result["data"]["id"])
     task_log(task_id, "任务已创建")
-    result = response(public_task(task))
-    if idempotency_key:
-        runtime.get_state_store().save_idempotency(owner, "create_task", idempotency_key, result, now)
     return result
 
 
@@ -143,8 +143,7 @@ async def presence_heartbeat(request: Request, owner: str = Depends(task_owner))
     lease_until = now + 10 * 60_000
 
     touch_user(owner_host_account_id(owner))
-    presence = load_presence()
-    presence[owner] = {
+    heartbeat = {
         "owner": owner,
         "lastSeenAt": now,
         "onlineUntil": lease_until,
@@ -152,7 +151,10 @@ async def presence_heartbeat(request: Request, owner: str = Depends(task_owner))
         "buildTime": str(payload.get("buildTime", ""))[:64],
         "source": str(payload.get("source", "module"))[:32],
     }
-    save_presence(presence)
+    def record_heartbeat(presence):
+        if bounded_config_int(presence.get(owner, {}).get("lastSeenAt", 0), 0, 0) <= now:
+            presence[owner] = heartbeat
+    runtime.get_state_store().mutate_namespace("presence", record_heartbeat)
     all_tasks = load_tasks()
     migrated = False
     for task in all_tasks.values():
@@ -175,20 +177,23 @@ async def presence_heartbeat(request: Request, owner: str = Depends(task_owner))
 
 @router.post("/v1/notifications/ack")
 async def acknowledge_notifications(request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=response(code="NOTIFICATION_INVALID", message="消息 JSON 无效"))
     ids = payload.get("ids", []) if isinstance(payload, dict) else []
     if not isinstance(ids, list) or len(ids) > 100:
         raise HTTPException(status_code=400, detail=response(code="NOTIFICATION_INVALID", message="消息 ID 列表无效"))
-    items = load_notifications()
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    updated = 0
-    for notification_id in {str(item) for item in ids}:
-        item = items.get(notification_id)
-        if item and item.get("owner") == owner and not item.get("deliveredAt"):
-            item["deliveredAt"] = now
-            updated += 1
-    if updated:
-        save_notifications(items)
+    def acknowledge(items):
+        updated = 0
+        for notification_id in {str(item) for item in ids}:
+            item = items.get(notification_id)
+            if item and item.get("owner") == owner and not item.get("deliveredAt"):
+                item["deliveredAt"] = now
+                updated += 1
+        return updated
+    updated = runtime.get_state_store().mutate_namespace("notifications", acknowledge)
     return response({"acknowledged": updated})
 
 
@@ -200,89 +205,94 @@ async def get_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, 
 
 @router.post("/v1/tasks/{task_id}/pause")
 async def pause_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    tasks, task = find_owned_task(task_id, owner)
-    apply_task_action(task, "pause")
-    save_tasks(tasks)
+    task = change_owned_task(task_id, owner, "pause")
     task_log(task_id, "任务已暂停")
     return response(public_task(task))
 
 
 @router.post("/v1/tasks/{task_id}/resume")
 async def resume_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    tasks, task = find_owned_task(task_id, owner)
-    apply_task_action(task, "resume")
-    save_tasks(tasks)
+    task = change_owned_task(task_id, owner, "resume")
     task_log(task_id, "任务已恢复")
     return response(public_task(task))
 
 
 @router.post("/v1/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    tasks, task = find_owned_task(task_id, owner)
-    apply_task_action(task, "cancel")
-    save_tasks(tasks)
+    task = change_owned_task(task_id, owner, "cancel")
     task_log(task_id, "任务已取消")
     return response(public_task(task))
 
 
 @router.post("/v1/tasks/{task_id}/run")
 async def run_task_now(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    tasks, task = find_owned_task(task_id, owner)
-    apply_task_action(task, "run")
-    save_tasks(tasks)
+    task = change_owned_task(task_id, owner, "run")
     task_log(task_id, "任务已安排立即执行")
     return response(public_task(task))
 
 
 @router.post("/v1/tasks/{task_id}/configure")
 async def configure_task(task_id: str, request: Request, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 JSON 无效"))
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务配置无效"))
-    tasks, task = find_owned_task(task_id, owner)
+    _, existing = find_owned_task(task_id, owner)
+    changes = {}
     if "schedule" in payload:
         schedule = payload.get("schedule")
         if not isinstance(schedule, dict):
             raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
-        task["schedule"] = normalized_task_schedule(str(task.get("taskType", "")), schedule)
+        changes["schedule"] = validated_schedule(str(existing.get("taskType", "")), schedule)
     if "request" in payload:
         request_value = payload.get("request") or {}
         if not isinstance(request_value, dict):
             raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 request 必须是对象"))
         credential_id = str(request_value.get("credentialId", "")).strip()
-        if task.get("taskType") != "http":
+        if existing.get("taskType") != "http":
             credential = load_credentials().get(credential_id)
             if not credential or credential.get("owner") != owner:
                 raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_NOT_FOUND", message="阅微凭据不存在或不属于当前账号"))
-        task["credentialId"] = credential_id
-        task["requestEncrypted"] = encrypt_secret(request_value)
-    if "enabled" in payload:
-        task["enabled"] = bool(payload.get("enabled"))
-        task["status"] = "scheduled" if task["enabled"] else "paused"
-        task["nextRunAt"] = next_task_run(task) if task["enabled"] else 0
-    if "executionMode" in payload:
-
-        task["executionMode"] = "server"
-        task.pop("deviceLeaseToken", None)
-        task.pop("deviceLeaseUntil", None)
-    task["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-    duplicate = find_duplicate_task(tasks, task, exclude_id=task_id)
-    if duplicate:
-        tasks.pop(duplicate[0], None)
-        audit_event("task_merged", f"owner:{owner}", metadata={"keptTaskId": task_id, "removedTaskId": duplicate[0], "reason": "unique_task_key"})
-    save_tasks(tasks)
+        changes["credentialId"] = credential_id
+    def configure(tasks):
+        task = tasks.get(task_id)
+        if task is None or task.get("owner") != owner:
+            raise HTTPException(status_code=404, detail=response(code="TASK_NOT_FOUND", message="任务不存在"))
+        task.update(changes)
+        if "request" in payload:
+            task["requestEncrypted"] = encrypt_secret(request_value)
+        if "enabled" in payload:
+            task["enabled"] = bool(payload.get("enabled"))
+            task["status"] = "scheduled" if task["enabled"] else "paused"
+            task["nextRunAt"] = next_task_run(task) if task["enabled"] else 0
+        if "executionMode" in payload:
+            task["executionMode"] = "server"
+            task.pop("deviceLeaseToken", None)
+            task.pop("deviceLeaseUntil", None)
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        task["updatedAt"] = max(now, bounded_config_int(task.get("updatedAt", 0), 0, 0) + 1)
+        duplicate = find_duplicate_task(tasks, task, exclude_id=task_id)
+        if duplicate:
+            tasks.pop(duplicate[0], None)
+        return task, duplicate[0] if duplicate else ""
+    task, removed_id = runtime.get_state_store().mutate_namespace("tasks", configure)
+    if removed_id:
+        audit_event("task_merged", f"owner:{owner}", metadata={"keptTaskId": task_id, "removedTaskId": removed_id, "reason": "unique_task_key"})
     task_log(task_id, "任务配置已更新")
     return response(public_task(task))
 
 
 @router.delete("/v1/tasks/{task_id}")
 async def delete_task(task_id: str, owner: str = Depends(task_owner)) -> dict[str, Any]:
-    tasks, _ = find_owned_task(task_id, owner)
-    tasks.pop(task_id, None)
-    save_tasks(tasks)
-
-
-    purge_orphan_task_logs(set(tasks))
+    def delete(tasks):
+        task = tasks.get(task_id)
+        if task is None or task.get("owner") != owner:
+            raise HTTPException(status_code=404, detail=response(code="TASK_NOT_FOUND", message="任务不存在"))
+        tasks.pop(task_id)
+    runtime.get_state_store().mutate_namespace("tasks", delete)
+    purge_orphan_task_logs(set(load_tasks()))
     return response({"deleted": True})
 
 

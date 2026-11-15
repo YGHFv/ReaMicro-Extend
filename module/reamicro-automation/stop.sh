@@ -1,6 +1,7 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 STATE=/data/adb/reamicro-automation
+[ ! -L "$STATE" ] && [ ! -L "$MODDIR" ] || exit 1
 umask 077
 mkdir -p "$STATE" || exit 1
 chmod 700 "$STATE" || exit 1

@@ -1,8 +1,39 @@
 import json
 import os
+import fcntl
+import tempfile
+from contextlib import contextmanager
+from copy import deepcopy
 from typing import Any
 
 from app import runtime
+from app.storage import merge_document_changes
+
+
+class ConfigSnapshot(dict[str, Any]):
+    def __init__(self, values: dict[str, Any]):
+        super().__init__(values)
+        self.baseline = deepcopy(values)
+
+
+@contextmanager
+def config_file_lock(exclusive: bool = False):
+    runtime.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+    with (runtime.CONFIG_ROOT / ".server-config.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def read_stored_config() -> dict[str, Any]:
+    if not runtime.CONFIG_PATH.is_file():
+        return {}
+    stored = json.loads(runtime.CONFIG_PATH.read_text(encoding="utf-8"))
+    if not isinstance(stored, dict):
+        raise ValueError("服务器配置必须是对象")
+    return stored
 
 
 def bounded_config_int(value: Any, default: int, minimum: int) -> int:
@@ -57,17 +88,12 @@ def default_config() -> dict[str, Any]:
 
 
 def load_config() -> dict[str, Any]:
-    with runtime.config_lock:
+    with runtime.config_lock, config_file_lock():
         config = default_config()
         auth_mode_explicit = False
-        try:
-            if runtime.CONFIG_PATH.is_file():
-                stored = json.loads(runtime.CONFIG_PATH.read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    config.update(stored)
-                    auth_mode_explicit = str(stored.get("authMode", "")).strip() in {"public", "api_key", "account", "host_account_allowlist"}
-        except (OSError, ValueError):
-            pass
+        stored = read_stored_config()
+        config.update(stored)
+        auth_mode_explicit = str(stored.get("authMode", "")).strip() in {"public", "api_key", "account", "host_account_allowlist"}
         config["features"] = normalized_config_list(config.get("features", []))
         config["releaseSyncSeconds"] = bounded_config_int(config.get("releaseSyncSeconds", 1800), 1800, 300)
         config["serverSnapshotSeconds"] = bounded_config_int(config.get("serverSnapshotSeconds", 86400), 86400, 3600)
@@ -88,14 +114,29 @@ def load_config() -> dict[str, Any]:
         if config.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
             config["authMode"] = infer_auth_mode(config)
         config["_authModeExplicit"] = auth_mode_explicit
-        return config
+        return ConfigSnapshot(config)
 
 
 def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
-    with runtime.config_lock:
+    with runtime.config_lock, config_file_lock(exclusive=True):
         runtime.CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
-        safe = default_config()
-        safe.update(next_config)
+        current = default_config()
+        current.update(read_stored_config())
+        if isinstance(next_config, ConfigSnapshot):
+            safe = merge_document_changes(next_config.baseline, next_config, current)
+        else:
+            safe = {**current, **next_config}
+        # Retain keys needed by in-flight writers and older ciphertext while a rotation
+        # re-encrypts documents. Publishing a new key can never make the old data unreadable.
+        previous_key = str(current.get("secretKey", "")) or runtime.SECRET_KEY or runtime.ADMIN_PASSWORD
+        history = [
+            key for values in (current.get("secretKeyHistory", []), safe.get("secretKeyHistory", []))
+            if isinstance(values, list) for key in values if isinstance(key, str) and key
+        ]
+        if previous_key and previous_key != str(safe.get("secretKey", "")):
+            history.append(previous_key)
+        if history:
+            safe["secretKeyHistory"] = list(dict.fromkeys(history))
         safe["features"] = normalized_config_list(safe.get("features", []))
         safe["releaseSyncSeconds"] = bounded_config_int(safe.get("releaseSyncSeconds", 1800), 1800, 300)
         safe["serverSnapshotSeconds"] = bounded_config_int(safe.get("serverSnapshotSeconds", 86400), 86400, 3600)
@@ -116,10 +157,19 @@ def save_config(next_config: dict[str, Any]) -> dict[str, Any]:
         if safe.get("authMode") not in {"public", "api_key", "account", "host_account_allowlist"}:
             safe["authMode"] = infer_auth_mode(safe)
         safe.pop("_authModeExplicit", None)
-        temp = runtime.CONFIG_PATH.with_suffix(".tmp")
-        temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(runtime.CONFIG_PATH)
-        return safe
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=runtime.CONFIG_ROOT,
+                                             prefix=".server-", delete=False) as output:
+                temporary = runtime.CONFIG_ROOT / os.path.basename(output.name)
+                json.dump(safe, output, ensure_ascii=False, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.replace(runtime.CONFIG_PATH)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return ConfigSnapshot(safe)
 
 
 def api_key_auth_configured(config: dict[str, Any]) -> bool:

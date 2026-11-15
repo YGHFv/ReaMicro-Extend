@@ -21,12 +21,22 @@ internal object DiscoverRepository {
     private const val MAX_BOOKS = 60
 
     fun parseKinds(source: OnlineSourceEntry): List<DiscoverKind> =
-        parseExploreKinds(source.exploreUrl)
+        if (com.reamicro.fix.online.OnlineParserMode.isEnhanced)
+            com.reamicro.fix.online.EnhancedOnlineParser.kinds(source)
+        else parseExploreKinds(source.exploreUrl)
 
     fun parseFilter(source: OnlineSourceEntry): DiscoverFilter? =
-        parseExploreFilter(source.exploreUrl)
+        if (com.reamicro.fix.online.OnlineParserMode.isEnhanced) null else parseExploreFilter(source.exploreUrl)
 
     fun loadBooks(source: OnlineSourceEntry, kind: DiscoverKind, page: Int = 1): DiscoverLoadState {
+        val parsing = com.reamicro.fix.online.OnlineParserMode.capture()
+        com.reamicro.fix.online.OnlineSourceStore.requireCurrent(source)
+        if (!kind.isBookList) return DiscoverLoadState.Loaded(emptyList())
+        if (parsing.enhanced) {
+            return DiscoverLoadState.Loaded(
+                com.reamicro.fix.online.EnhancedOnlineParser.explore(source, kind, page),
+            )
+        }
         val hook = WebDavDriveHook.activeInstance
             ?: return DiscoverLoadState.Failed("在线书源模块未就绪")
         val base = sourceBaseUrl(source)
@@ -39,16 +49,21 @@ internal object DiscoverRepository {
             val response = runCatching {
                 hook.requestOnlineSearch(source, resolved)
             }.onFailure {
+                com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
                 lastError = it.message.orEmpty().ifBlank { it.javaClass.simpleName }
             }.getOrNull() ?: return@forEach
 
             val books = runCatching {
                 parseBooks(source, response.url.ifBlank { resolved }, response.body, rule)
             }.onFailure {
+                com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
                 lastError = it.message.orEmpty().ifBlank { it.javaClass.simpleName }
             }.getOrDefault(emptyList())
-            if (books.isNotEmpty()) return DiscoverLoadState.Loaded(books)
+            com.reamicro.fix.online.OnlineSourceStore.requireCurrent(source)
+            com.reamicro.fix.online.OnlineParserMode.requireCurrent(parsing.generation)
+            if (books.isNotEmpty()) return DiscoverLoadState.Loaded(books.map { it.copy(parsingState = parsing) })
         }
+        com.reamicro.fix.online.OnlineParserMode.requireCurrent(parsing.generation)
         return if (lastError.isBlank()) {
             DiscoverLoadState.Loaded(emptyList())
         } else {
@@ -74,7 +89,7 @@ internal object DiscoverRepository {
                     page = page,
                     source = source,
                 )
-            }.getOrDefault(text)
+            }.onFailure(com.reamicro.fix.reload.TaskCancellation::rethrowIfCancelled).getOrDefault(text)
         } else {
             text
         }

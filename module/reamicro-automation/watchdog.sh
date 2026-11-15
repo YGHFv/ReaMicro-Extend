@@ -1,11 +1,13 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 STATE=/data/adb/reamicro-automation
+[ ! -L "$STATE" ] && [ ! -L "$MODDIR" ] || exit 1
 umask 077
 if [ -e "$MODDIR/disable" ] || [ -e "$MODDIR/remove" ] || [ -e "$STATE/stop" ]; then exit 0; fi
 [ -f "$STATE/state.json" ] || exit 0
 chmod 700 "$STATE" || exit 1
 . "$MODDIR/common.sh"
+reamicro_safe_mode && exit 0
 BUSYBOX=$(find_busybox) || exit 1
 export ASH_STANDALONE=1
 
@@ -65,6 +67,11 @@ wake_pause() {
   wake_result=$?
   CHILD_PID=
   rm -f "$STATE/wake.pid" "$STATE/wake-at"
+  current_mode=$(cat "$STATE/wake-mode" 2>/dev/null)
+  if [ "$current_mode" = unavailable ] && [ "$previous_mode" != unavailable ]; then
+    printf '%s wake_unavailable event_wait=1\n' "$(date +%s)" >>"$STATE/daemon.log"
+    cat "$STATE/wake-error" >>"$STATE/daemon.log"
+  fi
   if [ "$wake_result" -ne 0 ]; then
     printf 'unavailable\n' >"$STATE/wake-mode"
     if [ "$previous_mode" != unavailable ]; then

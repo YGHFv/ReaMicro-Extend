@@ -1,5 +1,6 @@
 package com.reamicro.fix.ui
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -20,11 +22,14 @@ import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.glass.glassPress
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
 @Composable
 internal fun GroupTitle(text: String) = SmallTitle(text = text)
@@ -39,15 +44,28 @@ internal fun CardDivider() = HorizontalDivider(
 @Composable
 internal fun SectionCard(
     title: String,
+    modifier: Modifier = Modifier,
+    bodyModifier: Modifier = Modifier,
     titleColor: Color = MiuixTheme.colorScheme.onSurface,
     subtitle: String? = null,
     description: String? = null,
     trailing: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
+    containerColor: Color = MiuixTheme.colorScheme.surfaceContainer,
+    pressFeedbackType: PressFeedbackType = PressFeedbackType.None,
     showActionDivider: Boolean = false,
     actions: (@Composable RowScope.() -> Unit)? = null,
 ) {
-    Card(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp), insideMargin = PaddingValues(0.dp)) {
+    Card(
+        modifier = modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).then(bodyModifier),
+        insideMargin = PaddingValues(0.dp),
+        colors = CardDefaults.defaultColors(color = containerColor),
+        pressFeedbackType = pressFeedbackType,
+        onClick = onClick,
+        onLongPress = onLongPress,
+        showIndication = onClick != null || onLongPress != null,
+    ) {
         BasicComponent(
             title = title,
             titleColor = BasicComponentDefaults.titleColor(color = titleColor),
@@ -57,7 +75,6 @@ internal fun SectionCard(
                 start = 16.dp, top = 16.dp, end = 16.dp,
                 bottom = if (showActionDivider && actions != null) 0.dp else 16.dp,
             ),
-            onClick = onClick,
         )
         if (actions != null) {
             if (showActionDivider) CardDivider()
@@ -72,7 +89,11 @@ internal fun SectionCard(
 
 @Composable
 internal fun CapsuleButton(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Button(onClick = onClick, minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
+    val interactionSource = remember { MutableInteractionSource() }
+    Button(onClick = onClick,
+        modifier = Modifier.glassPress(interactionSource, enabled = useModuleGlass()),
+        interactionSource = interactionSource,
+        minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
         colors = ButtonDefaults.buttonColors(
             color = MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f),
         ),
@@ -85,7 +106,11 @@ internal fun CapsuleButton(icon: ImageVector, label: String, onClick: () -> Unit
 }
 @Composable
 internal fun CapsuleTextButton(label: String, onClick: () -> Unit) {
-    Button(onClick = onClick, minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
+    val interactionSource = remember { MutableInteractionSource() }
+    Button(onClick = onClick,
+        modifier = Modifier.glassPress(interactionSource, enabled = useModuleGlass()),
+        interactionSource = interactionSource,
+        minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
         colors = ButtonDefaults.buttonColors(
             color = MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f),
         ),

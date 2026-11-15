@@ -5,7 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.reamicro.fix.R
 import com.reamicro.fix.reader.HighlightImageLimits
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.io.InputStream
 import java.util.zip.ZipFile
@@ -144,6 +144,6 @@ internal object ReaderHighlightImageAssets {
             if (!loggedFailures.add(key)) return
             while (loggedFailures.size > 128) loggedFailures.iterator().run { next(); remove() }
         }
-        XposedBridge.log(message)
+        HookRuntime.log(message)
     }
 }

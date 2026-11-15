@@ -8,6 +8,7 @@ internal class RootModuleLifecycle(
 ) {
     fun prepare(requiredVersion: Int, activate: Boolean): RootModuleInstallDecision {
         var state = checked()
+        check(!state.safeMode) { "Android 处于安全模式，请正常重启后再安装或启用 Root 模块" }
         var provider: RootModuleManager? = null
         fun provider(): RootModuleManager = provider ?: manager().also { provider = it }
         check(maxOf(state.installedVersion, state.stagedVersion) <= requiredVersion ||
@@ -49,7 +50,10 @@ internal class RootModuleLifecycle(
 
     fun remove(): Boolean {
         val before = checked()
-        if (!before.installed && !before.stagedPresent && before.stagedVersion == 0) return false
+        if (!before.installed && !before.stagedPresent && before.stagedVersion == 0) {
+            command(RootProcessCleanup.removeState())
+            return false
+        }
         val provider = manager()
 
         command(provider.cancelStaging())
@@ -57,6 +61,10 @@ internal class RootModuleLifecycle(
         val after = checked()
         check(!after.stagedPresent && after.stagedVersion == 0 &&
             (!after.installed || after.pendingRemoval)) { "卸载未确认：仍有暂存模块或缺少待移除标记" }
+        // A first install has only module.prop/update in the live directory.
+        // Cancelling its staging removes the only uninstall.sh, so no manager
+        // can clean private credentials on reboot. Finish that cleanup now.
+        command(RootProcessCleanup.removeState())
         return after.installed
     }
 

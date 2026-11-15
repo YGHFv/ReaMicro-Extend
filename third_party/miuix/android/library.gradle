@@ -1,0 +1,89 @@
+// Copyright 2026, ReaMicro Extend contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// Keep upstream source files byte-for-byte intact. Only the Android build is adapted.
+def upstreamModule = rootProject.file("third_party/miuix/upstream/${project.name}")
+def namespaces = [icons: 'icon', 'glass-icons': 'icon.glass']
+def moduleName = project.name.substring('miuix-'.length())
+def commonSources = files(fileTree(new File(upstreamModule, 'src/commonMain/kotlin')) { include '**/*.kt' })
+def androidSources = fileTree(new File(upstreamModule, 'src/androidMain/kotlin')) { include '**/*.kt' }
+def adapterSources = fileTree(new File(project.projectDir, 'src/main/kotlin')) { include '**/*.kt' }
+ext.miuixCommonSources = commonSources
+
+android {
+    namespace "top.yukonga.miuix.kmp.${namespaces.get(moduleName, moduleName)}"
+    compileSdk 37
+    defaultConfig { minSdk = moduleName in ['blur', 'glass'] ? 33 : 24 }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { compose true }
+    sourceSets {
+        main {
+            java.srcDirs = [
+                new File(upstreamModule, 'src/commonMain/kotlin'),
+                new File(upstreamModule, 'src/androidMain/kotlin'),
+                new File(project.projectDir, 'src/main/kotlin'),
+            ]
+            baselineProfiles.srcDir(new File(upstreamModule, 'src/androidMain/baselineProfiles'))
+        }
+    }
+}
+
+// Applied scripts do not inherit plugin type imports. Configure the AGP Kotlin tasks directly.
+tasks.configureEach {
+    if (name.startsWith('compile') && name.endsWith('Kotlin') && !name.contains('Test')) {
+        incremental = false
+        source(commonSources, androidSources, adapterSources)
+        compilerOptions.freeCompilerArgs.addAll('-Xmulti-platform', '-Xexpect-actual-classes')
+        compilerOptions.freeCompilerArgs.add(provider {
+            '-Xcommon-sources=' + commonSources.files.sort { it.path }.collect { it.absolutePath }.join(',')
+        })
+    }
+}
+
+dependencies {
+    if (moduleName in ['ui', 'preference']) {
+        api 'org.jetbrains.compose.foundation:foundation-android:1.12.2'
+    } else {
+        implementation 'org.jetbrains.compose.foundation:foundation-android:1.12.2'
+    }
+
+    switch (moduleName) {
+        case 'squircle':
+        case 'blur':
+            api project(':miuix-material')
+            break
+        case 'ui':
+            api project(':miuix-core')
+            api project(':miuix-squircle')
+            implementation 'androidx.navigationevent:navigationevent-compose:1.2.0'
+            implementation 'org.jetbrains.compose.material3:material3-window-size-class-android:1.12.0-alpha03'
+            implementation 'com.materialkolor:material-color-utilities-android:6.0.0'
+            break
+        case 'preference':
+            api project(':miuix-ui')
+            break
+        case 'icons':
+        case 'glass-icons':
+            api project(':miuix-core')
+            break
+        case 'glass':
+            api project(':miuix-blur')
+            api project(':miuix-material')
+            api project(':miuix-ui')
+            implementation 'androidx.navigationevent:navigationevent-compose:1.2.0'
+            break
+        case 'nav':
+            implementation project(':miuix-squircle')
+            implementation 'androidx.navigationevent:navigationevent-compose:1.2.0'
+            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-runtime-android:2.11.0'
+            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose-android:2.11.0'
+            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-android:2.11.0'
+            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose-android:2.11.0'
+            implementation 'org.jetbrains.kotlinx:kotlinx-collections-immutable:0.5.2'
+            implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0'
+            break
+    }
+}

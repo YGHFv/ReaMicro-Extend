@@ -8,6 +8,7 @@ internal data class RootModuleStatus(
     val checkedAt: Long = 0L,
     val access: RootAccessReport = RootAccessReport(if (rootAvailable) RootAccessState.GRANTED else RootAccessState.ERROR),
     val inspectionComplete: Boolean = true,
+    val safeMode: Boolean = false,
     val stopRequested: Boolean = false,
     val taskRunning: Boolean = false,
     val installed: Boolean = false,
@@ -47,7 +48,7 @@ internal data class RootModuleStatus(
         pendingRemoval || stagedRemoval -> R.string.execution_module_removing
         pendingUpdate || stagedPresent || stagedVersion > 0 -> R.string.execution_module_pending
         !installed -> R.string.execution_module_missing
-        disabled -> R.string.execution_module_disabled
+        disabled || safeMode -> R.string.execution_module_disabled
         !ready -> R.string.execution_module_incomplete
         else -> R.string.root_module_ready
     }
@@ -58,23 +59,27 @@ internal data class RootModuleStatus(
         pendingRemoval || stagedRemoval -> R.string.execution_module_removing
         pendingUpdate || stagedPresent || stagedVersion > 0 -> R.string.execution_module_pending
         !installed -> R.string.execution_module_missing
-        disabled -> R.string.execution_module_disabled
+        disabled || safeMode -> R.string.execution_module_disabled
         !ready -> R.string.execution_module_incomplete
         !rootSelected -> R.string.execution_module_idle
         stopRequested -> R.string.execution_daemon_stopped
         taskRunning && heartbeatAt > 0L && now - heartbeatAt in 0L..120_000L -> R.string.execution_task_running
         !daemonRunning -> R.string.execution_daemon_stopped
         wakeScheduled(now) -> R.string.root_wake_scheduled
+        wakeMode == "unavailable" && waitStatusCurrent(now) -> R.string.execution_status_running
         heartbeatAt > 0L && now - heartbeatAt in 0L..120_000L -> R.string.execution_status_running
         else -> R.string.execution_status_no_heartbeat
     }
 
     /** 等待 alarm 时不会持续写心跳，必须同时确认定时器进程和有效的截止时间。 */
     fun wakeScheduled(now: Long): Boolean =
+        (wakeMode == "realtime_alarm" || wakeMode == "boottime_alarm") && waitStatusCurrent(now)
+
+    private fun waitStatusCurrent(now: Long): Boolean =
         rootAvailable && inspectionComplete && installed && ready && installedVersion >= 10 &&
-            !disabled && !pendingRemoval && !stagedRemoval && !pendingUpdate && !stagedPresent &&
+            !disabled && !safeMode && !pendingRemoval && !stagedRemoval && !pendingUpdate && !stagedPresent &&
             stagedVersion == 0 && !stopRequested && !taskRunning && daemonRunning && wakeHelperRunning &&
-            (wakeMode == "realtime_alarm" || wakeMode == "boottime_alarm") && heartbeatAt > 0L &&
+            heartbeatAt > 0L &&
             now >= heartbeatAt && wakeAt >= heartbeatAt && wakeAt > 0L &&
             wakeAt - now <= 900_000L &&
             (wakeAt >= now || now - wakeAt <= 30_000L)

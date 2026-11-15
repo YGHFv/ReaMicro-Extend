@@ -61,7 +61,7 @@ internal fun ReaderHook.searchFullTextStreaming(
         if (indexBudget.retain(document.searchMemoryWeight())) documents.add(document) else documents.clear()
         if (results.size >= MAX_SEARCH_RESULTS) { complete = false; false } else true
     }
-    com.reamicro.fix.xposed.XposedBridge.logAlways(
+    com.reamicro.fix.xposed.HookRuntime.logAlways(
         "ReaMicro search index documents=$documentCount characters=$characterCount results=${results.size}",
     )
     if (complete && indexBudget.cacheable && current() && bookKey(context) == key) {
@@ -139,20 +139,21 @@ internal fun ReaderHook.forEachSearchDocument(
     val root = currentEpubRoot() ?: error("当前书籍解包目录不可用")
     val epubTitlePaths = epubCatalogTitlePaths(root)
     val indexedCatalog = indexedCatalogChapters(context.catalog, root, epubTitlePaths)
+    val host = requireNotNull(com.reamicro.fix.core.HostEpubRuntimeBindings.current)
     val chaptersByHref = indexedCatalog
         .mapIndexedNotNull { _, chapter ->
-            val href = normalizeCatalogHref(callString(chapter.chapter, "getHref"))
+            val href = normalizeCatalogHref(host.text("chapter.href", chapter.chapter))
             if (href.isBlank()) null else href to IndexedChapter(chapter.index, chapter)
         }
         .groupBy({ it.first }, { it.second })
     val chaptersByFile = indexedCatalog
         .mapIndexedNotNull { _, chapter ->
-            val file = searchFileForHref(root, callString(chapter.chapter, "getHref")) ?: return@mapIndexedNotNull null
+            val file = searchFileForHref(root, host.text("chapter.href", chapter.chapter)) ?: return@mapIndexedNotNull null
             file.absolutePath to IndexedChapter(chapter.index, chapter)
         }
         .groupBy({ it.first }, { it.second })
-    val itemRefs = (epub?.let { callNoArg(it, "getItemRefs") } as? Iterable<*>)?.filterNotNull().orEmpty()
-    val spineCfiIndex = (epub?.let { callNoArg(it, "getSpineCfiIndex") } as? Int) ?: -1
+    val itemRefs = host.list("epub.itemRefs", epub)
+    val spineCfiIndex = host.int("epub.spineCfiIndex", epub) ?: -1
     val catalogFiles = catalogTextFiles(root, context.catalog, itemRefs)
     val files = explicitFiles
         ?.map { it.canonicalFileSafe() ?: it }

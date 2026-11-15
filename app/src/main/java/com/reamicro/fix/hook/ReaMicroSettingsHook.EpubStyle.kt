@@ -1,10 +1,8 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
-
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
-import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -29,7 +27,7 @@ import com.reamicro.fix.settings.OnlineEpubStyleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.online.epub.OnlineEpubStylePreview
 import com.reamicro.fix.online.epub.OnlineHeaderImageComposer
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -40,10 +38,10 @@ import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
 internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubStyle) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val nameInput = settingsDialogInput(activity, "样式名称", singleLine = true, colors = colors).apply {
                 setText(style.name)
@@ -297,7 +295,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, 0.92f)
         }.onFailure {
             showToast("打开样式配置失败")
-            XposedBridge.log("$LOG_PREFIX open online epub style dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX open online epub style dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -371,7 +369,7 @@ internal fun ReaMicroSettingsHook.onlineEpubHeaderPreviewUrl(draft: OnlineEpubSt
             OnlineHeaderImageComposer.composePlaceholder(mask, draft.sampleWidth, draft.sampleHeight)
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX header preview compose failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX header preview compose failed: ${it.stackTraceToString()}")
     }.getOrNull().also { mask?.recycle() } ?: return ""
     return runCatching {
         val target = File(activity.cacheDir, "rm_header_preview_${cacheKey.hashCode()}.png")
@@ -424,7 +422,7 @@ internal fun ReaMicroSettingsHook.exportOnlineEpubStyle(style: OnlineEpubStyle) 
         showToast("已导出到下载目录：$fileName")
     }.onFailure {
         showToast("导出样式失败")
-        XposedBridge.log("$LOG_PREFIX export online epub style failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX export online epub style failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -439,7 +437,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleImagePicker(activity: Activ
         activity.startActivityForResult(intent, ONLINE_EPUB_STYLE_IMAGE_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         showToast("打开图片选择失败")
-        XposedBridge.log("$LOG_PREFIX open online epub style image picker failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX open online epub style image picker failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -455,7 +453,7 @@ internal fun ReaMicroSettingsHook.importOnlineEpubStyleImageFromUri(activity: Ac
         showToast("已选择图片：${target.name}")
     }.onFailure {
         showToast(it.message ?: "选择图片失败")
-        XposedBridge.log("$LOG_PREFIX import online epub style image failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX import online epub style image failed: ${it.stackTraceToString()}")
     }
     pendingOnlineEpubStyleImagePick = null
 }
@@ -482,7 +480,7 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleImportPicker() {
         activity.startActivityForResult(intent, ONLINE_EPUB_STYLE_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         showToast("打开样式导入失败")
-        XposedBridge.log("$LOG_PREFIX open online epub style import failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX open online epub style import failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -499,7 +497,7 @@ internal fun ReaMicroSettingsHook.importOnlineEpubStyleFromUri(activity: Activit
         showToast("已导入样式：${style.name}")
     }.onFailure {
         showToast(it.message ?: "导入样式失败")
-        XposedBridge.log("$LOG_PREFIX import online epub style failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX import online epub style failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -514,9 +512,7 @@ internal fun ReaMicroSettingsHook.onlineEpubStyleVersionValue(): Int =
 internal fun ReaMicroSettingsHook.bumpOnlineEpubStyleVersion() {
     val state = onlineEpubStyleVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    setStateValue(state, value + 1)
 }
 
 internal fun ReaMicroSettingsHook.renderOnlineEpubStyleListContent(

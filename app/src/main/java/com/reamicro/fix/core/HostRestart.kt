@@ -11,7 +11,7 @@ import android.os.Process
 import android.os.ResultReceiver
 import android.widget.Toast
 import com.reamicro.fix.BuildConfig
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 internal object HostRestart {
     private val main = Handler(Looper.getMainLooper())
@@ -59,7 +59,7 @@ internal object HostRestart {
         }.getOrElse {
             pending = null
             processToken = null
-            XposedBridge.logError("ReaMicro restart handoff failed; preserving the host process", it)
+            HookRuntime.logError("ReaMicro restart handoff failed; preserving the host process", it)
             Toast.makeText(activity, "无法启动重启接力页，请手动重新打开阅微", Toast.LENGTH_LONG).show()
             false
         }

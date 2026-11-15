@@ -1,9 +1,7 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-
-import android.app.Dialog
 import android.text.InputType
 import android.widget.TextView
 import com.reamicro.fix.cloud.api.ApiServerClient
@@ -14,7 +12,7 @@ import com.reamicro.fix.cloud.api.ReaMicroCredential
 import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.hook.settings.*
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -140,9 +138,13 @@ private fun ReaMicroSettingsHook.reloadCloudAutomationState() {
 
 private fun ReaMicroSettingsHook.ensureCloudAutomationLoaded() {
     val activity = activityProvider() ?: return
+    val identity = AccountHostRuntime.snapshot(activity)
     val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
+        ?.takeIf { it.accountId == identity?.accountId?.toString() && it.token == identity?.token }
     val accountId = currentCredential?.accountId.orEmpty()
-    if (cloudAutomationAccountId != accountId) {
+    if (cloudAutomationAccountId != accountId || cloudAutomationIdentity?.generation != identity?.generation ||
+        cloudAutomationIdentity?.session !== identity?.session) {
+        cloudAutomationIdentity = identity
         cloudAutomationAccountId = accountId
         cloudAutomationLoaded = false
         cloudAutomationLoading = false
@@ -165,19 +167,22 @@ private fun ReaMicroSettingsHook.ensureCloudAutomationLoaded() {
         return
     }
     if (serverSettings.hostAccountId != accountId) {
-        serverSettings.copy(hostAccountId = accountId).also {
-            store.save(it)
-            it.mirrorToModule(activity.applicationContext)
-        }
+        store.bindHostAccount(accountId)
+        serverSettings.copy(hostAccountId = accountId).mirrorToModule(activity.applicationContext)
     }
     cloudAutomationLoading = true
     com.reamicro.fix.reload.ModuleResources.thread {
         val result = runCatching {
-            val manager = CloudTaskManager(ApiServerClient(store))
-            manager.credentials() to manager.list()
+            val ticket = requireNotNull(identity)
+            check(AccountHostRuntime.isCurrent(ticket, activity)) { "账号已切换，请重新读取任务" }
+            val manager = CloudTaskManager(ApiServerClient(store, serverSettings.copy(hostAccountId = accountId)))
+            val credentials = manager.credentials()
+            check(AccountHostRuntime.isCurrent(ticket, activity)) { "账号已切换，请重新读取任务" }
+            credentials to manager.list()
         }
-        activity.runOnUiThread {
-            if (cloudAutomationAccountId != accountId) return@runOnUiThread
+        activity.runOnModuleUiThread {
+            if (cloudAutomationAccountId != accountId || cloudAutomationIdentity?.generation != identity?.generation ||
+                identity == null || !AccountHostRuntime.isCurrent(identity, activity)) return@runOnModuleUiThread
             result.onSuccess { (credentials, tasks) ->
                 cloudAutomationCredentials = credentials
                 cloudAutomationTasks = tasks
@@ -186,7 +191,7 @@ private fun ReaMicroSettingsHook.ensureCloudAutomationLoaded() {
             }.onFailure { error ->
                 cloudAutomationError = error.message?.takeIf(String::isNotBlank) ?: "读取云端任务失败"
                 cloudAutomationLoaded = true
-                XposedBridge.log("$CLOUD_AUTOMATION_LOG_PREFIX load failed: ${error.stackTraceToString()}")
+                HookRuntime.log("$CLOUD_AUTOMATION_LOG_PREFIX load failed: ${error.stackTraceToString()}")
             }
             cloudAutomationLoading = false
             bumpCloudAutomationVersion()
@@ -266,8 +271,7 @@ private fun ReaMicroSettingsHook.renderCloudAutomationTaskSwitch(
     val targetChecked = task?.enabled == true
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
+        setStateValue(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
     val checked = if (rememberedChecked != targetChecked && spec.taskType !in cloudAutomationUpdatingTaskTypes) {
@@ -282,7 +286,7 @@ private fun ReaMicroSettingsHook.renderCloudAutomationTaskSwitch(
         updateChecked(applied)
         targetUnit()
     }
-    renderAbiSwitch(checked, onCheckedChange, composer)
+    nativeUi.settingsSwitch(checked, onCheckedChange, composer)
 }
 
 private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
@@ -300,11 +304,22 @@ private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
         return false
     }
     val activity = activityProvider() ?: return task.enabled
+    val identity = AccountHostRuntime.snapshot(activity)
     val accountId = cloudAutomationAccountId
+    val current = runCatching { accountController.currentCloudCredential() }.getOrNull()
+    if (identity == null || identity.accountId.toString() != accountId || current == null ||
+        cloudAutomationServerCredential(current)?.id != task.credentialId) {
+        reloadCloudAutomationState()
+        showToast("账号已切换，请重新选择任务")
+        return task.enabled
+    }
+    val store = ApiServerSettingsStore { activity.applicationContext }
+    val requestSettings = store.get().copy(hostAccountId = accountId)
     cloudAutomationUpdatingTaskTypes = cloudAutomationUpdatingTaskTypes + spec.taskType
     com.reamicro.fix.reload.ModuleResources.thread {
         val result = runCatching {
-            val manager = CloudTaskManager(ApiServerClient(ApiServerSettingsStore { activity.applicationContext }))
+            check(AccountHostRuntime.isCurrent(identity, activity)) { "账号已切换，请重新选择任务" }
+            val manager = CloudTaskManager(ApiServerClient(store, requestSettings))
             val updated = if (enabled) manager.resume(task.id) else manager.pause(task.id)
             updated.copy(
                 timeOfDay = updated.timeOfDay.ifBlank { task.timeOfDay },
@@ -312,9 +327,10 @@ private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
                 books = task.books,
             )
         }
-        activity.runOnUiThread {
+        activity.runOnModuleUiThread {
+            if (cloudAutomationAccountId != accountId || cloudAutomationIdentity?.generation != identity.generation ||
+                !AccountHostRuntime.isCurrent(identity, activity)) return@runOnModuleUiThread
             cloudAutomationUpdatingTaskTypes = cloudAutomationUpdatingTaskTypes - spec.taskType
-            if (cloudAutomationAccountId != accountId) return@runOnUiThread
             result.onSuccess { updated ->
                 cloudAutomationTasks = cloudAutomationTasks.map { current ->
                     if (current.id == updated.id) updated else current
@@ -326,7 +342,7 @@ private fun ReaMicroSettingsHook.setCloudAutomationTaskEnabled(
             }.onFailure { error ->
                 updateChecked(task.enabled)
                 showToast(error.message ?: "更新${spec.title}失败")
-                XposedBridge.log("$CLOUD_AUTOMATION_LOG_PREFIX toggle failed: ${error.stackTraceToString()}")
+                HookRuntime.log("$CLOUD_AUTOMATION_LOG_PREFIX toggle failed: ${error.stackTraceToString()}")
             }
             bumpCloudAutomationVersion()
         }
@@ -344,9 +360,16 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
     enableAfterSave: Boolean? = null,
 ) {
     val activity = activityProvider() ?: return
+    val identity = AccountHostRuntime.snapshot(activity)
     val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
-    if (currentCredential == null) {
+    if (currentCredential == null || identity == null || currentCredential.accountId != identity.accountId.toString() ||
+        currentCredential.token != identity.token) {
         showToast("请先在阅微登录账号")
+        return
+    }
+    if (task != null && cloudAutomationServerCredential(currentCredential)?.id != task.credentialId) {
+        reloadCloudAutomationState()
+        showToast("账号已切换，请重新选择任务")
         return
     }
     val store = ApiServerSettingsStore { activity.applicationContext }
@@ -355,9 +378,10 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
         showToast("请先启用并配置 API 服务器")
         return
     }
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
+        if (!AccountHostRuntime.isCurrent(identity, activity)) return@runOnModuleUiThread
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, spec.title, colors))
         val account = TextView(activity).apply {
@@ -478,38 +502,40 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
             } else {
                 JSONArray()
             }
-            if (currentCredential.token.isBlank() || currentCredential.accountId.isBlank()) {
-                status.text = "当前阅微登录密钥不完整，请重新登录后重试"
+            if (!AccountHostRuntime.isCurrent(identity, activity)) {
+                status.text = "账号已切换，请关闭后重新打开任务配置"
                 return@setOnClickListener
             }
+            val request = JSONObject()
+            if (spec.rewardTriggered) request.put("dailyLimit", dailyDrawLimit)
+            if (spec.autoRead) {
+                request.put("durationMinutes", durationMinutes)
+                if (selectedBooks.length() > 0) {
+                    request.put("books", selectedBooks)
+                    request.put("bookLimit", selectedBooks.length())
+                }
+            }
+            request.put("blessingType", blessingChoice)
+            if (spec.merchant) {
+                request.put("merchantAutoComplete", merchantAutoComplete.isChecked)
+                merchantCity.text.toString().trim().takeIf(String::isNotBlank)?.let { request.put("merchantCityCode", it) }
+                merchantPrincipal.text.toString().trim().toLongOrNull()?.takeIf { it > 0L }?.let { request.put("merchantPrincipal", it) }
+                merchantTransport.text.toString().trim().toLongOrNull()?.takeIf { it > 0L }?.let { request.put("merchantTransportId", it) }
+            }
+            val requestSettings = serverSettings.copy(hostAccountId = currentCredential.accountId)
             saveButton.isEnabled = false
             status.text = "正在验证账号并保存任务……"
             com.reamicro.fix.reload.ModuleResources.thread {
                 val result = runCatching {
-                    val manager = CloudTaskManager(ApiServerClient(store))
+                    check(AccountHostRuntime.isCurrent(identity, activity)) { "账号已切换，任务未保存" }
+                    check(store.get().copy(hostAccountId = currentCredential.accountId) == requestSettings) { "API 服务器设置已变更，请重新打开任务配置" }
+                    val manager = CloudTaskManager(ApiServerClient(store, requestSettings))
                     val credentialId = manager.uploadCredential(
                         currentCredential.token,
                         currentCredential.label.ifBlank { "阅微账号" },
                         currentCredential.accountId,
                     ).id
-                    val request = JSONObject()
-                    if (spec.rewardTriggered) {
-                        request.put("dailyLimit", dailyDrawLimit)
-                    }
-                    if (spec.autoRead) {
-                        request.put("durationMinutes", durationMinutes)
-                        if (selectedBooks.length() > 0) {
-                            request.put("books", selectedBooks)
-                            request.put("bookLimit", selectedBooks.length())
-                        }
-                    }
-                    request.put("blessingType", blessingChoice)
-                    if (spec.merchant) {
-                        request.put("merchantAutoComplete", merchantAutoComplete.isChecked)
-                        merchantCity.text.toString().trim().takeIf(String::isNotBlank)?.let { request.put("merchantCityCode", it) }
-                        merchantPrincipal.text.toString().trim().toLongOrNull()?.takeIf { it > 0L }?.let { request.put("merchantPrincipal", it) }
-                        merchantTransport.text.toString().trim().toLongOrNull()?.takeIf { it > 0L }?.let { request.put("merchantTransportId", it) }
-                    }
+                    check(AccountHostRuntime.isCurrent(identity, activity)) { "账号已切换，任务未保存" }
                     val savedTask = manager.saveAutomation(
                         taskType = spec.taskType,
                         enabled = enableAfterSave ?: task?.enabled ?: false,
@@ -518,12 +544,17 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                         request = request,
                     )
 
-                    if (savedTask.enabled) {
+                    if (savedTask.enabled && AccountHostRuntime.isCurrent(identity, activity)) {
                         disableLocalAutomationTask(currentCredential.accountId, spec.taskType)
                     }
                     savedTask
                 }
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
+                    if (!AccountHostRuntime.isCurrent(identity, activity)) {
+                        saveButton.isEnabled = true
+                        status.text = "账号已切换，请关闭后重新打开任务配置"
+                        return@runOnModuleUiThread
+                    }
                     result.onSuccess {
                         dialog.dismiss()
                         showToast(if (enableAfterSave == true) "已配置并启用${spec.title}" else "${spec.title}配置已保存")
@@ -531,7 +562,7 @@ private fun ReaMicroSettingsHook.openCloudAutomationTaskDialog(
                     }.onFailure { error ->
                         saveButton.isEnabled = true
                         status.text = error.message?.takeIf(String::isNotBlank) ?: "云端任务配置失败"
-                        XposedBridge.log("$CLOUD_AUTOMATION_LOG_PREFIX save failed: ${error.stackTraceToString()}")
+                        HookRuntime.log("$CLOUD_AUTOMATION_LOG_PREFIX save failed: ${error.stackTraceToString()}")
                     }
                 }
             }.apply {
@@ -593,7 +624,5 @@ private fun ReaMicroSettingsHook.cloudAutomationVersionValue(): Int =
 private fun ReaMicroSettingsHook.bumpCloudAutomationVersion() {
     val state = cloudAutomationVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    setStateValue(state, value + 1)
 }

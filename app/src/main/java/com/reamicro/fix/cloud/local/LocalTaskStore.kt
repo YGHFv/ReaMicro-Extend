@@ -85,24 +85,16 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
                     "任务配置已更新，请重新打开配置后保存"
                 }
             }
+            val now = System.currentTimeMillis()
             val merged = writeTaskConfig(task)
-            merged.put(KEY_CONFIG_UPDATED_AT, maxOf(System.currentTimeMillis(), (existing?.optLong(KEY_CONFIG_UPDATED_AT) ?: 0L) + 1L))
+            merged.put(KEY_CONFIG_UPDATED_AT, maxOf(now, (existing?.optLong(KEY_CONFIG_UPDATED_AT) ?: 0L) + 1L))
 
             if (existing != null) {
                 for (stateKey in RUNTIME_STATE_KEYS) {
                     if (existing.has(stateKey)) merged.put(stateKey, existing.get(stateKey))
                 }
             }
-            if (task.enabled) {
-
-                val now = System.currentTimeMillis()
-                val next = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
-                    AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, now)
-                } else now
-                merged.put(KEY_NEXT_RUN_AT, next)
-            } else {
-                merged.put(KEY_NEXT_RUN_AT, 0L)
-            }
+            LocalTaskRuntimeMerge.schedule(merged, task.taskType, now)
             tasks.put(task.taskType, merged)
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
@@ -113,17 +105,10 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         if (accountId.isBlank()) return
         editAccount(accountId) { root, tasks ->
             val obj = tasks.optJSONObject(taskType) ?: JSONObject().put(KEY_TASK_TYPE, taskType)
-            obj.put(KEY_CONFIG_UPDATED_AT, maxOf(System.currentTimeMillis(), obj.optLong(KEY_CONFIG_UPDATED_AT) + 1L))
-            obj.put(KEY_ENABLED, enabled)
             val now = System.currentTimeMillis()
-            val next = when {
-                !enabled -> 0L
-                taskType == AutoReadTimeLock.TASK_TYPE -> AutoReadTimeLock.nextDailyAt(
-                    obj.optString(KEY_TIME_OF_DAY, "00:05"), obj.optInt(KEY_DURATION_MINUTES, 30), now,
-                )
-                else -> now
-            }
-            obj.put(KEY_NEXT_RUN_AT, next)
+            obj.put(KEY_CONFIG_UPDATED_AT, maxOf(now, obj.optLong(KEY_CONFIG_UPDATED_AT) + 1L))
+            obj.put(KEY_ENABLED, enabled)
+            LocalTaskRuntimeMerge.schedule(obj, taskType, now)
             tasks.put(taskType, obj)
             if (enabled && token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
@@ -134,7 +119,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         if (accountId.isBlank()) return
         editAccount(accountId) { _, tasks ->
             val obj = tasks.optJSONObject(taskType) ?: return@editAccount
-            state.keys().forEach { key -> obj.put(key, state.get(key)) }
+            LocalTaskRuntimeMerge.patch(obj, state)
             tasks.put(taskType, obj)
         }
     }
@@ -164,15 +149,18 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             for (task in list(accountId)) {
                 if (!task.enabled) continue
                 val state = recoveredAutomationState(task.taskType, runtimeState(accountId, task.taskType), now) ?: continue
-                recordState(accountId, task.taskType, state)
+                recordState(accountId, task.taskType, state
+                    .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt))
             }
         }
     }
 
     override fun accountIds(): List<String> = storedAccountIds()
+    override fun executionEnabled(): Boolean = contextProvider()?.let(ModuleTaskActivation::isEnabled) ?: true
 
     fun rescheduleEnabledTasks(now: Long = System.currentTimeMillis()): Int {
         val context = contextProvider()
+        if (context != null && !ModuleTaskActivation.isEnabled(context)) return 0
         if (context != null && com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(context)) {
             return com.reamicro.fix.cloud.root.RootTaskBridge.reschedule(context)
         }
@@ -216,14 +204,25 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         val array = readAccount(accountId)?.optJSONArray(KEY_RECORDS) ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
             val item = array.optJSONObject(index) ?: return@mapNotNull null
-            LocalTaskRecord(
-                at = item.optLong("at", 0L),
-                taskType = item.optString("taskType"),
-                result = item.optString("result"),
-                message = item.optString("message"),
-                detail = item.optString("detail"),
-            )
+            localTaskRecordFromJson(item)
         }.sortedByDescending { it.at }
+    }
+
+    fun deleteRecords(accountId: String, selected: List<LocalTaskRecord>): Int {
+        if (accountId.isBlank() || selected.isEmpty()) return 0
+        val deleted = synchronized(WRITE_LOCK) {
+            val preferences = prefs() ?: error("本地任务状态不可用")
+            val root = readAccount(accountId) ?: return@synchronized 0
+            val deleted = deleteSelectedLocalTaskRecords(root, selected)
+            if (deleted > 0) {
+                check(preferences.edit().putString(accountKey(accountId), root.toString()).commit()) {
+                    "本地任务记录删除失败"
+                }
+            }
+            deleted
+        }
+        if (deleted > 0) syncRootConfiguration()
+        return deleted
     }
 
     fun clearRecords(accountId: String) {
@@ -329,9 +328,53 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         val accounts = JSONObject()
         for (accountId in accountIds()) {
             val root = readAccount(accountId) ?: continue
-            accounts.put(accountId, root.apply { remove("notifications"); put(KEY_TOKEN, token(accountId)) })
+            accounts.put(accountId, root.apply {
+                remove("notifications")
+                put(KEY_TOKEN, decrypt(optString(KEY_TOKEN)))
+            })
         }
         return JSONObject().put(KEY_ACCOUNTS, accounts)
+    }
+
+
+    internal class PreparedAccountBundle(
+        internal val accountId: String,
+        internal val account: JSONObject,
+        internal val encryptedToken: String,
+    ) {
+        override fun toString(): String = "LocalTaskAccountRestore(accountId=$accountId)"
+    }
+
+    internal fun exportAccountBundle(accountId: String): JSONObject = synchronized(WRITE_LOCK) {
+        val preferences = prefs() ?: error("本地任务状态不可用")
+        val raw = preferences.getString(accountKey(accountId), null)
+        val account = raw?.let { JSONObject(it) }
+        LocalTaskAccountBundle.export(accountId, account)
+    }
+
+    internal fun prepareAccountBundle(accountId: String, token: String, payload: JSONObject): PreparedAccountBundle {
+        val account = LocalTaskAccountBundle.read(payload, accountId)
+        require(token.isNotBlank()) { "本地任务账号凭证不完整" }
+        // Encryption is completed before any imported database, files or preferences are written.
+        return PreparedAccountBundle(accountId, account, encrypt(token))
+    }
+
+    internal fun restoreAccountBundle(prepared: PreparedAccountBundle, canRestore: () -> Boolean) {
+        synchronized(WRITE_LOCK) {
+            check(canRestore()) { "阅微账号已经变化，请重新导入" }
+            val preferences = prefs() ?: error("本地任务状态不可用")
+            val key = accountKey(prepared.accountId)
+            val previous = preferences.getString(key, null)
+            val account = previous?.let { JSONObject(it) }
+            val replacement = LocalTaskAccountBundle.restore(account, prepared.account, System.currentTimeMillis())
+                .put(KEY_TOKEN, prepared.encryptedToken).toString()
+            check(canRestore()) { "阅微账号已经变化，请重新导入" }
+            commitLocalTaskAccountRestore(previous, replacement, { preferences.getString(key, null) }) { value ->
+                val editor = preferences.edit()
+                if (value == null) editor.remove(key) else editor.putString(key, value)
+                editor.commit()
+            }
+        }
     }
 
     private fun syncRootConfiguration() {
@@ -364,11 +407,16 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
     private inline fun editAccount(accountId: String, block: (root: JSONObject, tasks: JSONObject) -> Unit) {
         synchronized(WRITE_LOCK) {
             val prefs = prefs() ?: return
-            val root = readAccount(accountId) ?: JSONObject()
+            val stored = prefs.getString(accountKey(accountId), null)
+            val root = stored?.let(::JSONObject) ?: JSONObject()
             val tasks = root.optJSONObject(KEY_TASKS) ?: JSONObject().also { root.put(KEY_TASKS, it) }
+            val before = root.toString()
             block(root, tasks)
             root.put(KEY_TASKS, tasks)
-            check(prefs.edit().putString(accountKey(accountId), root.toString()).commit()) { "本地任务状态保存失败" }
+            val after = root.toString()
+            if (after != before) {
+                check(prefs.edit().putString(accountKey(accountId), after).commit()) { "本地任务状态保存失败" }
+            }
         }
     }
 
@@ -442,6 +490,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
         internal val RUNTIME_STATE_KEYS = setOf(
             KEY_NEXT_RUN_AT, KEY_LAST_MESSAGE, KEY_LAST_RUN_AT,
+            LocalTaskRuntimeMerge.UPDATED_AT,
             "dailyCounterDate", "dailyCounter", "lastDrawItems", "lastDrawResult", "lastDrawAt",
             "drawPending", "drawRewardLoreId",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
@@ -450,6 +499,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
             "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimCompletedDate", "claimLoreId", "automationStateVersion",
             CloudTaskLocalRunner.KEY_MERCHANT_NOTIFIED_TRIP, "merchantPausedUntil", "merchantStartAfterSettle",
+            CloudTaskLocalRunner.KEY_MERCHANT_DEPARTURE,
 
             KEY_MERCHANT_SETTLED_TRIP, KEY_MERCHANT_RESTART_AFTER, KEY_MERCHANT_BLESSED_TRIP, KEY_MERCHANT_END_TIME,
 
@@ -467,7 +517,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
         internal const val KEY_MERCHANT_BLESSED_TRIP = "merchantBlessedTripId"
 
-        private val CONFIG_KEYS = setOf(
+        internal val CONFIG_KEYS = setOf(
             KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_BOOKS,
             KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
             KEY_FORBIDDEN_PAWN_PROP_IDS,
@@ -485,15 +535,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             }
             merged.put(KEY_CONFIG_UPDATED_AT, incoming.optLong(KEY_CONFIG_UPDATED_AT))
             if (changed || !merged.has(KEY_NEXT_RUN_AT)) {
-
-                val next = when {
-                    !merged.optBoolean(KEY_ENABLED) -> 0L
-                    taskType == AutoReadTimeLock.TASK_TYPE -> AutoReadTimeLock.nextDailyAt(
-                        merged.optString(KEY_TIME_OF_DAY, "00:05"), merged.optInt(KEY_DURATION_MINUTES, 30), now,
-                    )
-                    else -> now
-                }
-                merged.put(KEY_NEXT_RUN_AT, next)
+                LocalTaskRuntimeMerge.schedule(merged, taskType, now)
             }
             return merged
         }

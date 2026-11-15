@@ -9,5 +9,5 @@ internal object HostRestartContract {
     const val FAILED = 2
 
     fun isSupportedPackage(packageName: String?): Boolean =
-        packageName in setOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix")
+        HostPackages.contains(packageName)
 }

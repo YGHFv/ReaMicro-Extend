@@ -1,15 +1,5 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostAbiField
-import com.reamicro.fix.core.hostAbiMethod
-import com.reamicro.fix.core.hostAbiMethodByArity
-
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
-
-
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Context
@@ -20,9 +10,13 @@ import android.database.sqlite.SQLiteStatement
 import android.util.Base64
 import android.util.JsonReader
 import android.util.JsonToken
+import com.reamicro.fix.core.HostAccountBindings
 import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.cloud.local.LocalTaskAccountBundle
+import com.reamicro.fix.cloud.local.LocalTaskMirror
+import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.reader.ReaderTypographyPolicy
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -30,14 +24,11 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
-import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -51,26 +42,13 @@ private const val STORE_KEY_ACCOUNTS = "accounts"
 private const val PORTABLE_PREFIX = "REAMICRO_ACCOUNT_1:"
 private const val PORTABLE_FORMAT = 1
 private const val HOST_DB_NAME = "app.db"
-private const val HOST_USER_CLASS = HostClasses.Host.HOST_USER
-private const val HOST_USER_DAO_CLASS = HostClasses.Host.HOST_USER_DAO
-private const val CACHED_CLASS = HostClasses.Host.CACHED
-private const val SESSION_CLASS = HostClasses.Host.SESSION
-private const val USER_REPOSITORY_CLASS = HostClasses.Host.USER_REPOSITORY
 private const val PREF_KEYS_CLASS = HostClasses.Host.PREF_KEYS
 private const val THIRD_PARTY_KEYS_CLASS = HostClasses.Host.THIRD_PARTY_KEYS
-private const val FLOW_KT_CLASS = "kotlinx.coroutines.flow.FlowKt"
-private const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
-private const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
-private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
-private const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
-private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
-private const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
-private const val ANDROID_KOIN_SCOPE_EXT_CLASS = "org.koin.android.ext.android.AndroidKoinScopeExtKt"
-private const val KOTLIN_REFLECTION_CLASS = HostClasses.Kotlin.KOTLIN_REFLECTION
 private const val WEBDAV_PREFS = "reamicro_fix_webdav"
 private const val LOCAL_LIBRARY_PREFS = "reamicro_fix_local_library"
 private const val MODULE_SETTINGS_PREFS = "reamicro_fix_module_settings"
 private const val READER_AUTO_PAGE_PREFS = "reamicro_reader_auto_page"
+private const val READER_PAGE_SPEED_PREFS = "reamicro_reader_page_speed"
 private const val AI_API_CONFIG_FILE = "reamicro_ai_apis.json"
 private const val AI_DICTIONARY_SETTINGS_FILE = "reamicro_dictionary_settings.json"
 private const val AI_IMAGE_SETTINGS_FILE = "reamicro_image_settings.json"
@@ -82,6 +60,8 @@ private const val WEBDAV_KEY_PASSWORD = "password"
 private const val WEBDAV_KEY_AUTHORIZED = "authorized"
 private const val SUSPEND_WAIT_TIMEOUT_MS = 15_000L
 private const val DATABASE_EXPORT_ID_CHUNK_SIZE = 400
+private const val MAX_BUNDLE_METADATA_BYTES = 32 * 1024 * 1024
+private const val LOCAL_TASK_BUNDLE_ENTRY = "account/local_tasks.json"
 
 private val PORTABLE_WEBDAV_KEYS = setOf(
     WEBDAV_KEY_URL,
@@ -93,6 +73,7 @@ private val PORTABLE_WEBDAV_KEYS = setOf(
 private val MODULE_BACKUP_PREFS = setOf(
     MODULE_SETTINGS_PREFS,
     READER_AUTO_PAGE_PREFS,
+    READER_PAGE_SPEED_PREFS,
 )
 
 private val MODULE_BACKUP_FILES = setOf(
@@ -110,29 +91,57 @@ class AccountCompletionController(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
 ) {
+    private val host get() = requireNotNull(HostAccountBindings.identity) { "账户动态查询不可用" }
+    private val preferences get() = requireNotNull(HostAccountBindings.preferences) { "账户偏好动态查询不可用" }
     private val advancedSettings = AccountAdvancedSettings(
         classLoader,
-        currentTarget = {
-            activityProvider()?.let(::currentAccountPreview)?.let {
-                AccountAdvancedRestoreState.Target(it.accountId, it.token)
-            }
-        },
+        currentTarget = ::currentAccountTarget,
         memberAtCapture = {
             val current = activityProvider()?.let(::currentCachedUser)
-            current != null && classLoader.hostClass("ReaMicroHost.SettingsListViewModel")
-                .hostAbiMethodByArity("m", 1).invoke(null, current) == true
+            current != null && requireNotNull(HostAccountBindings.advanced).method("member").invoke(null, current) == true
         },
-        dataStore = { activityProvider()?.let(::currentSession)?.let { method0(it, "getDataStore") } },
+        dataStore = { activityProvider()?.let(::currentSession)?.let { preferences.field("store").get(it) } },
         preferenceKey = { key(PREF_KEYS_CLASS, it) },
+        savedPreferences = { accountId ->
+            activityProvider()?.let { activity ->
+                loadStoredAccounts(activity).firstOrNull { it.accountId == accountId }?.advancedPreferences
+            }
+        },
+        checkCurrentMember = {
+            val expected = currentAccountTarget() ?: error("阅微账号正在更新，请稍后重试")
+            val activity = activityProvider() ?: error("当前没有可用页面")
+            val current = currentCachedUser(activity) ?: error("当前未登录阅微账号")
+            val repository = AccountHostRuntime.repository(activity) ?: error("无法获取阅微账号仓库")
+            check(host.field("user.id").getLong(current) == expected.accountId &&
+                host.field("user.token").get(current) == expected.token) { "阅微账号已经变化，请重试切换" }
+            val info = requireNotNull(host.method("info").invoke(current))
+            invokeSuspendMethod(requireNotNull(HostAccountBindings.advanced).method("check.repository"), repository, info)
+        },
     )
 
     internal fun installAdvancedSettingsRestore(isEnabled: () -> Boolean) {
-        runCatching { advancedSettings.install(isEnabled) }
-            .onFailure { XposedBridge.logError("$LOG_PREFIX advanced account preference hook failed", it) }
+        advancedSettings.install(isEnabled)
     }
 
-    internal fun hostSigningOut() {
-        try { persistCurrentAccountSnapshot() } finally { advancedSettings.nativeIdentityChange() }
+    internal fun installNativeSignOut(isEnabled: () -> Boolean) {
+        AccountNativeSignOut(
+            classLoader,
+            started = {
+                synchronized(advancedSettings.operationLock) {
+                    runCatching { if (isEnabled()) persistCurrentAccountSnapshot() }.onFailure {
+                        HookRuntime.logError("$LOG_PREFIX failed to persist account before sign out", it)
+                    }
+                    advancedSettings.nativeSignOutStarted()
+                    AccountHostRuntime.beginIdentityMutation()
+                }
+            },
+            finished = {
+                synchronized(advancedSettings.operationLock) {
+                    AccountHostRuntime.endIdentityMutation()
+                    advancedSettings.nativeSignOutFinished()
+                }
+            },
+        ).install()
     }
 
     fun displayAccounts(): List<AccountDisplayItem> {
@@ -161,22 +170,24 @@ class AccountCompletionController(
     }
 
     fun exportCurrentCredential(): ExportedCredential {
-        val activity = activityProvider() ?: error("当前没有可用页面")
-        val account = captureCurrentAccount(activity) ?: error("当前未登录阅微账号")
-        val accounts = loadStoredAccounts(activity)
-            .associateByTo(linkedMapOf()) { it.accountId }
-        val normalized = account.copy(lastUsedAt = System.currentTimeMillis())
-        accounts[normalized.accountId] = normalized
-        saveStoredAccounts(activity, accounts.values.toList())
-        return ExportedCredential(
-            account = AccountDisplayItem(
-                accountId = normalized.accountId,
-                nickname = normalized.nickname,
-                identity = displayIdentity(normalized.email, normalized.thirdBinds),
-                isCurrent = true,
-            ),
-            credential = encodePortableCredential(normalized.toPortableCredential()),
-        )
+        return synchronized(advancedSettings.operationLock) {
+            val activity = activityProvider() ?: error("当前没有可用页面")
+            val account = captureCurrentAccount(activity) ?: error("当前未登录阅微账号")
+            val accounts = loadStoredAccounts(activity)
+                .associateByTo(linkedMapOf()) { it.accountId }
+            val normalized = account.copy(lastUsedAt = System.currentTimeMillis())
+            accounts[normalized.accountId] = normalized
+            saveStoredAccounts(activity, accounts.values.toList())
+            return@synchronized ExportedCredential(
+                account = AccountDisplayItem(
+                    accountId = normalized.accountId,
+                    nickname = normalized.nickname,
+                    identity = displayIdentity(normalized.email, normalized.thirdBinds),
+                    isCurrent = true,
+                ),
+                credential = encodePortableCredential(normalized.toPortableCredential()),
+            )
+        }
     }
 
     fun currentCloudCredential(): CurrentCloudCredential {
@@ -191,85 +202,92 @@ class AccountCompletionController(
     }
 
     fun exportAllCredentialsBundle(): ExportedCredentialBundle {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
-        val accounts = loadStoredAccounts(activity)
-            .associateByTo(linkedMapOf()) { it.accountId }
-        captureCurrentAccount(activity)?.copy(lastUsedAt = System.currentTimeMillis())?.let { snapshot ->
-            accounts[snapshot.accountId] = snapshot
-        }
-        if (accounts.isEmpty()) error("褰撳墠娌℃湁鍙鍑虹殑璐﹀彿")
-        val sortedAccounts = accounts.values.sortedByDescending { it.lastUsedAt }
-        saveStoredAccounts(activity, sortedAccounts)
-        val accountArray = JSONArray()
-        sortedAccounts.forEach { account ->
-            accountArray.put(
-                JSONObject().apply {
-                    put("accountId", account.accountId)
-                    put("nickname", account.nickname)
-                    put("identity", displayIdentity(account.email, account.thirdBinds))
-                    put("credential", encodePortableCredential(account.toPortableCredential()))
-                },
+        return synchronized(advancedSettings.operationLock) {
+            val activity = activityProvider() ?: error("当前没有可用页面")
+            val accounts = loadStoredAccounts(activity)
+                .associateByTo(linkedMapOf()) { it.accountId }
+            captureCurrentAccount(activity)?.copy(lastUsedAt = System.currentTimeMillis())?.let { snapshot ->
+                accounts[snapshot.accountId] = snapshot
+            }
+            if (accounts.isEmpty()) error("当前没有可导出的账号")
+            val sortedAccounts = accounts.values.sortedByDescending { it.lastUsedAt }
+            saveStoredAccounts(activity, sortedAccounts)
+            val accountArray = JSONArray()
+            sortedAccounts.forEach { account ->
+                accountArray.put(
+                    JSONObject().apply {
+                        put("accountId", account.accountId)
+                        put("nickname", account.nickname)
+                        put("identity", displayIdentity(account.email, account.thirdBinds))
+                        put("credential", encodePortableCredential(account.toPortableCredential()))
+                    },
+                )
+            }
+            val payload = JSONObject().apply {
+                put("format", PORTABLE_FORMAT)
+                put("type", "credential_bundle")
+                put("exportedAt", System.currentTimeMillis())
+                put("count", sortedAccounts.size)
+                put("accounts", accountArray)
+            }
+            return@synchronized ExportedCredentialBundle(
+                count = sortedAccounts.size,
+                content = payload.toString(2),
             )
         }
-        val payload = JSONObject().apply {
-            put("format", PORTABLE_FORMAT)
-            put("type", "credential_bundle")
-            put("exportedAt", System.currentTimeMillis())
-            put("count", sortedAccounts.size)
-            put("accounts", accountArray)
-        }
-        return ExportedCredentialBundle(
-            count = sortedAccounts.size,
-            content = payload.toString(2),
-        )
     }
 
     fun importCredential(raw: String): AccountDisplayItem {
-        val activity = activityProvider() ?: error("当前没有可用页面")
-        val imported = decodePortableCredential(raw).copy(lastUsedAt = System.currentTimeMillis())
-        val accounts = loadStoredAccounts(activity)
-            .associateByTo(linkedMapOf()) { it.accountId }
-        val existing = accounts[imported.accountId]
-        accounts[imported.accountId] = existing?.mergeWith(imported) ?: imported
-        saveStoredAccounts(activity, accounts.values.toList())
-        val currentId = currentAccountPreview(activity)?.accountId
-        return AccountDisplayItem(
-            accountId = imported.accountId,
-            nickname = imported.nickname,
-            identity = displayIdentity(imported.email, imported.thirdBinds),
-            isCurrent = imported.accountId == currentId,
-        )
+        return synchronized(advancedSettings.operationLock) {
+            val activity = activityProvider() ?: error("当前没有可用页面")
+            val imported = decodePortableCredential(raw).copy(lastUsedAt = System.currentTimeMillis())
+            val accounts = loadStoredAccounts(activity)
+                .associateByTo(linkedMapOf()) { it.accountId }
+            val existing = accounts[imported.accountId]
+            accounts[imported.accountId] = existing?.mergeWith(imported) ?: imported
+            saveStoredAccounts(activity, accounts.values.toList())
+            val currentId = currentAccountPreview(activity)?.accountId
+            return@synchronized AccountDisplayItem(
+                accountId = imported.accountId,
+                nickname = imported.nickname,
+                identity = displayIdentity(imported.email, imported.thirdBinds),
+                isCurrent = imported.accountId == currentId,
+            )
+        }
     }
 
     fun importCredentials(raw: String): ImportResult {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
-        val importedAccounts = decodePortableCredentials(raw)
-        if (importedAccounts.isEmpty()) error("鏈鍙栧埌鍙鍏ョ殑璐﹀彿鍑瘉")
-        val accounts = loadStoredAccounts(activity)
-            .associateByTo(linkedMapOf()) { it.accountId }
-        val normalizedAccounts = importedAccounts.mapIndexed { index, account ->
-            account.copy(lastUsedAt = System.currentTimeMillis() + index)
+        return synchronized(advancedSettings.operationLock) {
+            val activity = activityProvider() ?: error("当前没有可用页面")
+            val importedAccounts = decodePortableCredentials(raw)
+            if (importedAccounts.isEmpty()) error("未读取到可导入的账号凭证")
+            val accounts = loadStoredAccounts(activity)
+                .associateByTo(linkedMapOf()) { it.accountId }
+            val normalizedAccounts = importedAccounts.mapIndexed { index, account ->
+                account.copy(lastUsedAt = System.currentTimeMillis() + index)
+            }
+            normalizedAccounts.forEach { imported ->
+                val existing = accounts[imported.accountId]
+                accounts[imported.accountId] = existing?.mergeWith(imported) ?: imported
+            }
+            saveStoredAccounts(activity, accounts.values.toList())
+            val currentId = currentAccountPreview(activity)?.accountId
+            return@synchronized ImportResult(
+                count = normalizedAccounts.size,
+                accounts = normalizedAccounts.map { imported ->
+                    AccountDisplayItem(
+                        accountId = imported.accountId,
+                        nickname = imported.nickname,
+                        identity = displayIdentity(imported.email, imported.thirdBinds),
+                        isCurrent = imported.accountId == currentId,
+                    )
+                },
+            )
         }
-        normalizedAccounts.forEach { imported ->
-            val existing = accounts[imported.accountId]
-            accounts[imported.accountId] = existing?.mergeWith(imported) ?: imported
-        }
-        saveStoredAccounts(activity, accounts.values.toList())
-        val currentId = currentAccountPreview(activity)?.accountId
-        return ImportResult(
-            count = normalizedAccounts.size,
-            accounts = normalizedAccounts.map { imported ->
-                AccountDisplayItem(
-                    accountId = imported.accountId,
-                    nickname = imported.nickname,
-                    identity = displayIdentity(imported.email, imported.thirdBinds),
-                    isCurrent = imported.accountId == currentId,
-                )
-            },
-        )
     }
 
     fun switchToAccount(accountId: Long): AccountDisplayItem = synchronized(advancedSettings.operationLock) {
+        advancedSettings.requireIdentityMutation()
         val activity = activityProvider() ?: error("当前没有可用页面")
         val current = currentAccountPreview(activity)
         if (current?.accountId == accountId) {
@@ -313,7 +331,7 @@ class AccountCompletionController(
     }
 
     fun exportAccountDataBundle(accountId: Long): ExportedAccountDataBundle {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
+        val activity = activityProvider() ?: error("当前没有可用页面")
         val account = resolveAccountForDataExport(activity, accountId)
         val fileName = buildAccountDataExportFileName(account.accountId)
         val bytes = ByteArrayOutputStream().use { output ->
@@ -334,13 +352,13 @@ class AccountCompletionController(
 
     fun exportAllAccountDataBundles(): List<ExportedAccountDataBundle> {
         val accountIds = displayAccounts().map { it.accountId }.distinct()
-        if (accountIds.isEmpty()) error("鏆傛棤鍙鍑鸿处鍙?")
+        if (accountIds.isEmpty()) error("暂无可导出的账号")
         persistCurrentAccountSnapshot()
         return accountIds.map(::exportAccountDataBundle)
     }
 
     fun exportAccountDataBundleFile(accountId: Long): ExportedAccountDataFileBundle {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
+        val activity = activityProvider() ?: error("当前没有可用页面")
         val account = resolveAccountForDataExport(activity, accountId)
         val outputFile = File(activity.cacheDir, "reamicro_data_${account.accountId}_${System.currentTimeMillis()}.zip")
         runCatching {
@@ -365,16 +383,16 @@ class AccountCompletionController(
 
     fun exportAllAccountDataBundleFiles(): List<ExportedAccountDataFileBundle> {
         val accountIds = displayAccounts().map { it.accountId }.distinct()
-        if (accountIds.isEmpty()) error("鏆傛棤鍙鍑鸿处鍙?")
+        if (accountIds.isEmpty()) error("暂无可导出的账号")
         persistCurrentAccountSnapshot()
         return accountIds.map(::exportAccountDataBundleFile)
     }
 
     fun exportAccountBooksBundle(accountId: Long): ExportedAccountBooksBundle {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
+        val activity = activityProvider() ?: error("当前没有可用页面")
         val account = resolveAccountForDataExport(activity, accountId)
         val root = File(activity.filesDir, "${account.accountId}/books")
-        if (!root.exists() || !root.isDirectory) error("璇ヨ处鍙锋殏鏃犲浘涔?")
+        if (!root.exists() || !root.isDirectory) error("该账号暂无图书")
         val bookFiles = root.walkTopDown().filter { it.isFile }.toList()
         val bookDirs = root.listFiles()
             ?.filter { it.isDirectory && it.walkTopDown().any(File::isFile) }
@@ -402,7 +420,7 @@ class AccountCompletionController(
             )
             BookExportPlan(uuid = uuid, title = title, directory = bookDir, entryName = entryName)
         }
-        if (bookFiles.isEmpty()) error("璇ヨ处鍙锋殏鏃犲浘涔?")
+        if (bookFiles.isEmpty()) error("该账号暂无图书")
         val bytes = ByteArrayOutputStream().use { output ->
             ZipOutputStream(output.buffered()).use { zip ->
                 writeJsonEntry(
@@ -439,16 +457,16 @@ class AccountCompletionController(
     }
 
     fun exportAccountBooksBundleFile(accountId: Long): ExportedAccountBooksFileBundle {
-        val activity = activityProvider() ?: error("褰撳墠娌℃湁鍙敤椤甸潰")
+        val activity = activityProvider() ?: error("当前没有可用页面")
         val account = resolveAccountForDataExport(activity, accountId)
         val root = File(activity.filesDir, "${account.accountId}/books")
-        if (!root.exists() || !root.isDirectory) error("璇ヨ处鍙锋殏鏃犲浘涔?")
+        if (!root.exists() || !root.isDirectory) error("该账号暂无图书")
         val bookFiles = root.walkTopDown().filter { it.isFile }.toList()
         val bookDirs = root.listFiles()
             ?.filter { it.isDirectory && it.walkTopDown().any(File::isFile) }
             ?.sortedBy { it.name }
             .orEmpty()
-        if (bookFiles.isEmpty() || bookDirs.isEmpty()) error("璇ヨ处鍙锋殏鏃犲浘涔?")
+        if (bookFiles.isEmpty() || bookDirs.isEmpty()) error("该账号暂无图书")
         val bookRowsByUuid = loadAccountBookRows(activity, account.accountId)
             .associateBy { it.optString("uuid").trim() }
         val exportedBooks = JSONArray()
@@ -494,38 +512,39 @@ class AccountCompletionController(
     }
 
     private fun captureCurrentAccount(activity: Activity): StoredAccount? {
-        val current = currentAccountPreview(activity) ?: return null
-        val session = currentSession(activity) ?: return null
+        val identity = AccountHostRuntime.snapshot(activity) ?: return null
+        val current = currentAccountPreview(activity, identity) ?: return null
         val restoring = advancedSettings.preserved(current.accountId)
-        val snapshot = captureSessionSnapshot(session)
+        val snapshot = captureSessionSnapshot(identity.session)
+        if (snapshot.token != identity.token || !AccountHostRuntime.isCurrent(identity, activity)) return null
         val previous = loadStoredAccounts(activity).firstOrNull { it.accountId == current.accountId }?.advancedPreferences
-        return current.toStoredAccount(
+        val account = current.toStoredAccount(
             session = snapshot,
             webDavPrefs = captureSharedPrefsSnapshot(activity, WEBDAV_PREFS),
             localLibraryPrefs = captureSharedPrefsSnapshot(activity, LOCAL_LIBRARY_PREFS),
             hasFullState = true,
         ).copy(advancedPreferences = restoring ?: advancedSettings.capture(current.accountId, snapshot.advanced(), previous))
+        return account.takeIf { AccountHostRuntime.isCurrent(identity, activity) }
     }
 
-    private fun currentAccountPreview(activity: Activity): CurrentAccountPreview? {
-        val currentUser = currentCachedUser(activity) ?: return null
-        val accountId = currentUser.longValue("getId")
+    private fun currentAccountPreview(
+        activity: Activity, identity: AccountHostRuntime.Identity? = AccountHostRuntime.snapshot(activity),
+    ): CurrentAccountPreview? {
+        identity ?: return null
+        val currentUser = identity.user ?: return null
+        val accountId = identity.accountId
         val userData = currentUser.stringValue("getData")
-        val userToken = currentUser.stringValue("getToken")
-        if (accountId <= 0L || (userToken.isBlank() && userData.isBlank())) return null
-        val info = runCatching { method0(currentUser, "info") }.getOrNull()
+        val info = host.method("info").invoke(currentUser)
         val nickname = info?.let { it.stringValue("getNickName") }.orEmpty()
         val email = info?.let { it.stringValue("getEmail") }.orEmpty()
-        val thirdBinds = (info?.let { method0(it, "getThirdBinds") } as? List<*>)
+        val thirdBinds = (info?.let { host.field("info.thirdBinds").get(it) } as? List<*>)
             ?.mapNotNull { it?.toString()?.trim() }
             ?.filter { it.isNotBlank() }
             .orEmpty()
-        val sessionToken = currentSession(activity)
-            ?.let { runCatching { method0(it, "getToken") as? String }.getOrNull() }
-            .orEmpty()
+        if (!AccountHostRuntime.isCurrent(identity, activity)) return null
         return CurrentAccountPreview(
             accountId = accountId,
-            token = sessionToken.ifBlank { userToken },
+            token = identity.token,
             userData = userData,
             nickname = nickname,
             email = email,
@@ -535,76 +554,170 @@ class AccountCompletionController(
 
     private fun restoreAccount(activity: Activity, account: StoredAccount, restoreDevicePreferences: Boolean = false) =
         synchronized(advancedSettings.operationLock) {
+            advancedSettings.requireIdentityMutation()
+            require(account.accountId > 0L && account.token.isNotBlank() && account.userData.isNotBlank()) {
+                "账号凭证内容不完整"
+            }
+            val repository = AccountHostRuntime.repository(activity) ?: error("无法获取阅微账号仓库")
+            val session = requireNotNull(host.field("repository.session").get(repository)) { "无法获取阅微会话" }
+            val dao = requireNotNull(host.field("repository.dao").get(repository)) { "无法获取阅微账号数据" }
+            val store = requireNotNull(preferences.field("store").get(session)) { "无法获取阅微设置" }
+            val before = captureSessionSnapshot(session)
+            val previousUser = host.field("cachedUser").get(null)
+            val previousToken = (preferences.field("token").get(session) as? String).orEmpty()
+            check(before.token == previousToken &&
+                (previousUser == null || host.field("user.token").get(previousUser) == previousToken)) {
+                "阅微账号正在更新，请稍后重试"
+            }
+            val previousWebDav = captureSharedPrefsSnapshot(activity, WEBDAV_PREFS)
+            val previousLibrary = captureSharedPrefsSnapshot(activity, LOCAL_LIBRARY_PREFS)
+            val guarded = guardUserDataAgainstHost(activity, account)
+            val targetUser = createHostUser(guarded)
+            val targetInfo = requireNotNull(host.method("info").invoke(targetUser)) { "账号资料内容无效" }
+            check(host.field("info.id").getLong(targetInfo) == account.accountId) { "账号资料与凭证不一致" }
+            val targetSync = AccountSyncPreferences.restoreValues(account.session.syncPreferences,
+                requireNotNull(before.syncPreferences))
             val ticket = advancedSettings.begin(
                 AccountAdvancedRestoreState.Target(account.accountId, account.token), account.advancedPreferences,
             )
+            AccountHostRuntime.beginIdentityMutation()
+            var mutationOpen = true
+            fun finishIdentityMutation() {
+                if (mutationOpen) {
+                    AccountHostRuntime.endIdentityMutation()
+                    mutationOpen = false
+                }
+            }
+            var preferencesAttempted = false
+            var accountSettingsAttempted = false
+            var sessionTokenWritten = false
+            var identityPublished = false
+            val tokenApplied = AtomicBoolean(false)
+            val rollbackTokenApplied = AtomicBoolean(false)
+            var stage = "identity-preferences"
+            fun nativeIdentityOwned(): Boolean {
+                val token = preferences.field("token").get(session)
+                val tokenOwned = if (sessionTokenWritten) {
+                    token == account.token || rollbackTokenApplied.get() && token == previousToken
+                } else {
+                    token == previousToken || tokenApplied.get() && token == account.token
+                }
+                return tokenOwned && host.field("cachedUser").get(null) === previousUser &&
+                    AccountHostRuntime.session(activity) === session && preferences.field("store").get(session) === store
+            }
             try {
-                restoreAccountIdentity(activity, account, restoreDevicePreferences)
+                preferencesAttempted = true
+                advancedSettings.updatePreferences(
+                    store, before.token, identityPreferences(account.token, account.session, targetSync), ::nativeIdentityOwned,
+                    onApplied = { tokenApplied.set(true) },
+                )
+                check(nativeIdentityOwned()) { "阅微账号已经变化，请重试切换" }
+                stage = "local-settings"
+                accountSettingsAttempted = true
+                restoreSharedPrefs(activity, WEBDAV_PREFS, account.webDavPrefs)
+                restoreSharedPrefs(activity, LOCAL_LIBRARY_PREFS,
+                    if (account.hasFullState) account.localLibraryPrefs else SharedPrefsSnapshot.EMPTY)
+                if (account.hasFullState && restoreDevicePreferences)
+                    restoreFullSessionPreferences(session, account.session, account.token, ::nativeIdentityOwned)
+                check(nativeIdentityOwned()) { "阅微账号已经变化，请重试切换" }
+                stage = "session-token"
+                preferences.field("token").set(session, account.token)
+                sessionTokenWritten = true
+                stage = "user-upsert"
+                invokeSuspendMethod(host.method("upsert"), dao, targetUser)
+                check(nativeIdentityOwned()) { "阅微账号已经变化，请重试切换" }
+                stage = "cache-publication"
+                publishCachedUser(targetUser)
+                identityPublished = true
+                finishIdentityMutation()
+                stage = "advanced-settings"
                 advancedSettings.ready(ticket)
             } catch (error: Throwable) {
+                runCatching { HookRuntime.logAlways("$LOG_PREFIX account switch failed stage=$stage type=${error.javaClass.simpleName}") }
+                if (preferencesAttempted && !identityPublished) {
+                    runCatching {
+                        val restored = try {
+                            advancedSettings.reconcilePreferences(
+                                store, before.token, account.token, identityPreferences(before.token, before), ::nativeIdentityOwned,
+                                onApplied = { rollbackTokenApplied.set(true) },
+                            )
+                        } catch (rollbackError: Throwable) {
+                            error.addSuppressed(rollbackError)
+                            // 回滚也可能提交后才返回失败；读取实际值，确认恢复后再修复会话和本地设置。
+                            val actual = captureSessionSnapshot(session)
+                            samePreferenceValues(identityPreferences(actual.token, actual), identityPreferences(before.token, before))
+                        }
+                        if (restored && nativeIdentityOwned()) {
+                            // A native Flow may have written the target even before our direct session write.
+                            preferences.field("token").set(session, previousToken)
+                            sessionTokenWritten = false
+                            if (accountSettingsAttempted) {
+                                if (account.hasFullState && restoreDevicePreferences)
+                                    restoreFullSessionPreferences(session, before, before.token, ::nativeIdentityOwned)
+                                restoreSharedPrefs(activity, WEBDAV_PREFS, previousWebDav)
+                                restoreSharedPrefs(activity, LOCAL_LIBRARY_PREFS, previousLibrary)
+                            }
+                            tokenApplied.set(false)
+                            rollbackTokenApplied.set(false)
+                        }
+                    }.onFailure(error::addSuppressed)
+                }
+                finishIdentityMutation()
                 advancedSettings.cancel(ticket)
                 throw error
+            } finally {
+                finishIdentityMutation()
             }
         }
 
-    private fun restoreAccountIdentity(activity: Activity, account: StoredAccount, restoreDevicePreferences: Boolean) {
-        // 写回前先以宿主当前行为准做字段合并，避免旧快照覆盖掉实时资料（如第三方绑定）。
-        val guarded = guardUserDataAgainstHost(activity, account)
-        upsertUserRow(activity, guarded)
-        // 会话与令牌仍取原始快照，资料写入一律走合并后的 guarded。
-        val restoreToken = account.token
-        val session = currentSession(activity) ?: error("无法获取阅微会话")
-        method1(session, "setToken", restoreToken)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getTOKEN"), account.session.token)
-        updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getBAIDU_AUTH"), account.session.baiduAuth)
-        updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH"), account.session.aliyunAuth)
-        updatePreference(session, key(THIRD_PARTY_KEYS_CLASS, "getYUN115_AUTH"), account.session.yun115Auth)
-        if (account.hasFullState) {
-            // 普通切号只切身份和账号云盘；阅读排版、默认首页等本机偏好不能被旧快照覆盖。
-            if (restoreDevicePreferences) restoreFullSessionPreferences(session, account.session)
-            restoreSharedPrefs(activity, WEBDAV_PREFS, account.webDavPrefs)
-            restoreSharedPrefs(activity, LOCAL_LIBRARY_PREFS, account.localLibraryPrefs)
-        } else {
-            restoreSharedPrefs(activity, WEBDAV_PREFS, account.webDavPrefs)
-            restoreSharedPrefs(activity, LOCAL_LIBRARY_PREFS, SharedPrefsSnapshot.EMPTY)
-        }
-        updateCachedUser(guarded)
-        method1(session, "setToken", restoreToken)
-    }
+    private fun identityPreferences(
+        token: String, session: SessionSnapshot, syncValues: Map<String, Any?> = session.syncPreferences?.values().orEmpty(),
+    ): Map<Any, Any?> = linkedMapOf<Any, Any?>(
+        key(PREF_KEYS_CLASS, "getTOKEN") to token,
+        key(THIRD_PARTY_KEYS_CLASS, "getBAIDU_AUTH") to session.baiduAuth,
+        key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH") to session.aliyunAuth,
+        key(THIRD_PARTY_KEYS_CLASS, "getYUN115_AUTH") to session.yun115Auth,
+    ).apply { syncValues.forEach { (name, value) -> put(preferences.key(name), value) } }
 
-    private fun restoreFullSessionPreferences(session: Any, snapshot: SessionSnapshot) {
-        if (HostSymbols.profileId != "2.3.4-b1") {
-            // 旧宿主保留原来的完整导入行为；本版五项统一由原生权限判断后恢复。
-            updatePreference(session, key(PREF_KEYS_CLASS, "getDYNAMIC_COLOR"), snapshot.dynamicColor)
-            updatePreference(session, key(PREF_KEYS_CLASS, "getSMART_RECOGNITION"), snapshot.smartRecognition)
-            updatePreference(session, key(PREF_KEYS_CLASS, "getILLUSTRATION_OPTIMIZATION"), snapshot.illustrationOptimization)
-            updatePreference(session, key(PREF_KEYS_CLASS, "getRELATE_DOWNLOAD_COVER"), snapshot.relateDownloadCover)
-            updatePreference(session, key(PREF_KEYS_CLASS, "getCALLING_CARD_COLOR"), snapshot.callingCardColor)
+    private fun samePreferenceValues(left: Map<Any, Any?>, right: Map<Any, Any?>): Boolean =
+        left.keys == right.keys && left.all { (key, value) ->
+            val other = right[key]
+            if (value is ByteArray && other is ByteArray) value.contentEquals(other) else value == other
         }
-        updatePreference(session, key(PREF_KEYS_CLASS, "getDARK_MODE"), snapshot.darkMode)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getBACKUP_TYPE"), snapshot.backupType)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getBOOKSHELF_TYPE"), snapshot.bookshelfType)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getTHEME"), snapshot.theme)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getMIPMAP"), snapshot.mipmap)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getBACKGROUND"), snapshot.background)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getTEXT_SIZE"), ReaderTypographyPolicy.textSize(snapshot.textSize))
-        updatePreference(session, key(PREF_KEYS_CLASS, "getLINE_HEIGHT"), ReaderTypographyPolicy.lineHeight(snapshot.lineHeight))
-        updatePreference(session, key(PREF_KEYS_CLASS, "getFAMILY"), snapshot.family)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getEMBEDDED_FONTS"), snapshot.embeddedFonts)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getBUILD_IN_FONTS"), snapshot.builtInFonts)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getPADDING"), snapshot.padding)
-        restoreReaderMargins(session, snapshot.readerMargins ?: ReaderMarginsSnapshot.fromJson(null, snapshot.padding))
-        updatePreference(session, key(PREF_KEYS_CLASS, "getONLY_NEXT_PAGE"), snapshot.onlyNextPage)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getVOLUME_KEY"), snapshot.volumeKey)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getTIME_BATTERY"), snapshot.timeBattery)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getSCREEN_ALWAYS_ON"), snapshot.screenAlwaysOn)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getSYSTEM_BARS"), snapshot.systemBars)
-        updatePreference(session, key(PREF_KEYS_CLASS, "getAGREEMENT"), snapshot.agreement)
+
+    private fun restoreFullSessionPreferences(
+        session: Any, snapshot: SessionSnapshot, expectedToken: String, canWrite: () -> Boolean,
+    ) {
+        // Device layout is restored in one account-bound edit; native membership still controls the five advanced values.
+        val values = linkedMapOf<Any, Any?>()
+        fun put(getter: String, value: Any) { values[key(PREF_KEYS_CLASS, getter)] = value }
+        put("getDARK_MODE", snapshot.darkMode)
+        put("getBACKUP_TYPE", snapshot.backupType)
+        put("getBOOKSHELF_TYPE", snapshot.bookshelfType)
+        put("getTHEME", snapshot.theme)
+        put("getMIPMAP", snapshot.mipmap)
+        put("getBACKGROUND", snapshot.background)
+        put("getTEXT_SIZE", ReaderTypographyPolicy.textSize(snapshot.textSize))
+        put("getLINE_HEIGHT", ReaderTypographyPolicy.lineHeight(snapshot.lineHeight))
+        put("getFAMILY", snapshot.family)
+        put("getEMBEDDED_FONTS", snapshot.embeddedFonts)
+        put("getBUILD_IN_FONTS", snapshot.builtInFonts)
+        put("getPADDING", snapshot.padding)
+        val margins = snapshot.readerMargins ?: ReaderMarginsSnapshot.fromJson(null, snapshot.padding)
+        listOf("padding_top", "padding_bottom", "padding_left", "padding_right", "padding_top_outer", "padding_bottom_outer")
+            .zip(margins.arguments().toList()).forEach { (name, value) -> values[preferences.key(name)] = value }
+        put("getONLY_NEXT_PAGE", snapshot.onlyNextPage)
+        put("getVOLUME_KEY", snapshot.volumeKey)
+        put("getTIME_BATTERY", snapshot.timeBattery)
+        put("getSCREEN_ALWAYS_ON", snapshot.screenAlwaysOn)
+        put("getSYSTEM_BARS", snapshot.systemBars)
+        put("getAGREEMENT", snapshot.agreement)
+        advancedSettings.updatePreferences(requireNotNull(preferences.field("store").get(session)), expectedToken, values, canWrite)
     }
 
     private fun captureSessionSnapshot(session: Any): SessionSnapshot {
-        val dataStore = method0(session, "getDataStore")
-        val dataFlow = method0(dataStore, "getData")
+        val dataStore = preferences.field("store").get(session)
+        val dataFlow = requireNotNull(preferences.method("data").invoke(dataStore))
         val prefs = firstFlowValue(dataFlow) ?: error("读取阅微设置失败")
         return SessionSnapshot(
             token = readPreference(prefs, key(PREF_KEYS_CLASS, "getTOKEN")) as? String ?: session.stringValue("getToken"),
@@ -635,52 +748,17 @@ class AccountCompletionController(
             baiduAuth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getBAIDU_AUTH")) as? String ?: "",
             aliyunAuth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getALIYUN_AUTH")) as? String ?: "",
             yun115Auth = readPreference(prefs, key(THIRD_PARTY_KEYS_CLASS, "getYUN115_AUTH")) as? String ?: "",
+            syncPreferences = AccountSyncPreferences.capture { readPreference(prefs, preferences.key(it)) },
         )
     }
 
-    private fun captureReaderMargins(preferences: Any): ReaderMarginsSnapshot? {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val padding = (readPreference(preferences, key(PREF_KEYS_CLASS, "getPADDING")) as? Number)?.toInt() ?: 0
-            fun edge(name: String, fallback: Int): Int =
-                (readPreference(preferences, key(PREF_KEYS_CLASS, name)) as? Number)?.toInt() ?: fallback
-            return ReaderMarginsSnapshot(
-                edge("getPADDING_TOP", padding), edge("getPADDING_BOTTOM", padding),
-                edge("getPADDING_LEFT", padding), edge("getPADDING_RIGHT", padding),
-                edge("getPADDING_TOP_OUTER", 0), edge("getPADDING_BOTTOM_OUTER", 0),
-            )
-        }
-        val sessionKt = try {
-            Class.forName("${SESSION_CLASS}Kt", false, classLoader)
-        } catch (_: ClassNotFoundException) {
-            return null
-        }
-        val getter = sessionKt.declaredMethods.firstOrNull {
-            it.hostNameMatches("getReaderMargins") && it.parameterTypes.size == 1
-        } ?: return null
-        val margins = getter.apply { isAccessible = true }.invoke(null, preferences) ?: return null
-        return ReaderMarginsSnapshot.fromHost(margins)
+    private fun captureReaderMargins(prefs: Any): ReaderMarginsSnapshot {
+        val padding = (readPreference(prefs, key(PREF_KEYS_CLASS, "getPADDING")) as? Number)?.toInt() ?: 0
+        fun edge(name: String, fallback: Int) = (readPreference(prefs, preferences.key(name)) as? Number)?.toInt() ?: fallback
+        return ReaderMarginsSnapshot(edge("padding_top", padding), edge("padding_bottom", padding),
+            edge("padding_left", padding), edge("padding_right", padding),
+            edge("padding_top_outer", 0), edge("padding_bottom_outer", 0))
     }
-
-    private fun restoreReaderMargins(session: Any, snapshot: ReaderMarginsSnapshot) {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val value = classLoader.hostClass("ReaMicroHost.ReaderMargins")
-                .getDeclaredConstructor(*Array(6) { Integer.TYPE }).newInstance(*snapshot.arguments())
-            val update = session.javaClass.hostAbiMethod(
-                "k", value.javaClass, classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
-            )
-            invokeSuspendMethod(update, session, value)
-            return
-        }
-        val update = allMethods(session.javaClass).firstOrNull {
-            it.hostNameMatches("updateReaderMargins") && it.parameterTypes.size == 2
-        } ?: return
-        val marginsClass = update.parameterTypes[0]
-        val constructor = marginsClass.getDeclaredConstructor(*Array(6) { Integer.TYPE })
-        val margins = constructor.apply { isAccessible = true }.newInstance(*snapshot.arguments())
-        // 使用宿主原子更新，避免旧快照恢复时继续沿用另一账号的独立边距。
-        invokeSuspendMethod(update, session, margins)
-    }
-
     private fun captureSharedPrefsSnapshot(activity: Activity, prefsName: String): SharedPrefsSnapshot =
         SharedPrefsSnapshot.fromPreferences(
             activity.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE),
@@ -690,80 +768,33 @@ class AccountCompletionController(
         val prefs = activity.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val editor = prefs.edit().clear()
         snapshot.applyTo(editor)
-        editor.commit()
+        check(editor.commit()) { "保存账号设置失败" }
     }
 
-    private fun currentSession(activity: Activity): Any? =
-        b4Session() ?:
-        runCatching {
-            sessionFromActivity(activity)
-                ?: sessionFromKoin(activity)
-        }.getOrNull()
-
-    private fun currentCachedUser(activity: Activity): Any? =
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            classLoader.hostClass(CACHED_CLASS).hostAbiField("a").get(null)
-        } else
-        runCatching {
-            val cached = staticObject(CACHED_CLASS, "INSTANCE")
-            val cachedUser = cached?.let { method0(it, "getCurrentUser") }
-            cachedUser ?: currentUserFromKoin(activity)
-        }.getOrNull()
-
-    private fun sessionFromActivity(activity: Activity): Any? =
-        runCatching {
-            val repository = method0(activity, "getUserRepository")
-            method0(repository, "getSession")
-        }.getOrNull()
-
-    private fun sessionFromKoin(activity: Activity): Any? =
-        koinGet(activity, SESSION_CLASS)
-            ?: koinGet(activity, USER_REPOSITORY_CLASS)?.let { repository ->
-                runCatching { method0(repository, "getSession") }.getOrNull()
-            }
-
-    private fun currentUserFromKoin(activity: Activity): Any? =
-        koinGet(activity, USER_REPOSITORY_CLASS)?.let { repository ->
-            runCatching {
-                val flow = method0(repository, "getCurrentUserFlow")
-                firstFlowValue(flow)
-            }.getOrNull()
-        }
-
-    private fun koinGet(activity: Activity, className: String): Any? =
-        runCatching {
-            val scopeProvider = Class.forName(ANDROID_KOIN_SCOPE_EXT_CLASS, false, classLoader)
-            val getScope = scopeProvider.methods.firstOrNull {
-                it.hostNameMatches("getKoinScope") && it.parameterTypes.size == 1
-            } ?: return@runCatching null
-            val scope = getScope.invoke(null, activity) ?: return@runCatching null
-            val reflection = Class.forName(KOTLIN_REFLECTION_CLASS, false, classLoader)
-            val getKClass = reflection.methods.firstOrNull {
-                it.hostNameMatches("getOrCreateKotlinClass") && it.parameterTypes.size == 1
-            } ?: return@runCatching null
-            val targetClass = Class.forName(className, false, classLoader)
-            val kClass = getKClass.invoke(null, targetClass)
-            scope.javaClass.methods.firstOrNull {
-                it.hostNameMatches("get") && it.parameterTypes.size == 3
-            }?.invoke(scope, kClass, null, null)
-        }.getOrNull()
+    private fun currentSession(activity: Activity): Any? = AccountHostRuntime.session(activity)
+    private fun currentAccountTarget(): AccountAdvancedRestoreState.Target? =
+        AccountHostRuntime.snapshot(activityProvider())?.let { AccountAdvancedRestoreState.Target(it.accountId, it.token) }
+    @Suppress("UNUSED_PARAMETER")
+    private fun currentCachedUser(activity: Activity): Any? = AccountHostRuntime.user()
 
     private fun resolveAccountForDataExport(activity: Activity, accountId: Long): StoredAccount {
-        val stored = loadStoredAccounts(activity)
-            .associateByTo(linkedMapOf()) { it.accountId }
-        val currentId = currentAccountPreview(activity)?.accountId
-        if (currentId == accountId) {
-            val currentSnapshot = captureCurrentAccount(activity)
-            if (currentSnapshot != null) {
-                val normalized = currentSnapshot.copy(lastUsedAt = System.currentTimeMillis())
-                val existing = stored[normalized.accountId]
-                val merged = existing?.mergeWith(normalized) ?: normalized
-                stored[normalized.accountId] = merged
-                saveStoredAccounts(activity, stored.values.toList())
-                return merged
+        return synchronized(advancedSettings.operationLock) {
+            val stored = loadStoredAccounts(activity)
+                .associateByTo(linkedMapOf()) { it.accountId }
+            val currentId = currentAccountPreview(activity)?.accountId
+            if (currentId == accountId) {
+                val currentSnapshot = captureCurrentAccount(activity)
+                if (currentSnapshot != null) {
+                    val normalized = currentSnapshot.copy(lastUsedAt = System.currentTimeMillis())
+                    val existing = stored[normalized.accountId]
+                    val merged = existing?.mergeWith(normalized) ?: normalized
+                    stored[normalized.accountId] = merged
+                    saveStoredAccounts(activity, stored.values.toList())
+                    return@synchronized merged
+                }
             }
+            return@synchronized stored[accountId] ?: error("未找到账号凭证")
         }
-        return stored[accountId] ?: error("鏈壘鍒拌处鍙峰嚟璇?")
     }
 
     private fun buildAccountExportManifest(activity: Activity, account: StoredAccount): JSONObject =
@@ -781,6 +812,7 @@ class AccountCompletionController(
                 put("account/session.json")
                 put("account/webdav_prefs.json")
                 put("account/local_library_prefs.json")
+                put(LOCAL_TASK_BUNDLE_ENTRY)
                 put("database/users.json")
                 put("database/books.json")
                 put("database/book_item_ref.json")
@@ -795,7 +827,7 @@ class AccountCompletionController(
     private fun readBundleManifest(zip: ZipFile): JSONObject {
         val bytes = readBundleEntryBytes(zip, "manifest.json") ?: error("\u7f3a\u5c11\u6570\u636e\u5305\u6e05\u5355")
         val manifest = JSONObject(String(bytes, Charsets.UTF_8))
-        if (manifest.optString("type") != "account_data_export") {
+        if (manifest.optString("type") != "account_data_export" || manifest.optInt("format", -1) != 1) {
             error("\u4e0d\u652f\u6301\u7684\u6570\u636e\u5305\u683c\u5f0f")
         }
         return manifest
@@ -805,18 +837,46 @@ class AccountCompletionController(
         val bytes = readBundleEntryBytes(zip, "account/stored_account.json")
             ?: error("\u7f3a\u5c11\u8d26\u53f7\u6570\u636e")
         val account = StoredAccount.fromJson(JSONObject(String(bytes, Charsets.UTF_8)))
-        if (account.accountId <= 0L) error("\u8d26\u53f7\u6570\u636e\u65e0\u6548")
+        validateStoredAccount(account)
         return account
     }
 
-    private fun readBundleEntryBytes(zip: ZipFile, name: String): ByteArray? =
-        zip.getEntry(name)?.let { entry -> zip.getInputStream(entry).use { it.readBytes() } }
+    private fun readBundleEntryBytes(zip: ZipFile, name: String): ByteArray? {
+        val entry = zip.getEntry(name) ?: return null
+        require(!entry.isDirectory && entry.size <= MAX_BUNDLE_METADATA_BYTES) { "数据包账号信息过大或无效" }
+        return zip.getInputStream(entry).use { input ->
+            ByteArrayOutputStream().use { output ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    check(output.size().toLong() + count <= MAX_BUNDLE_METADATA_BYTES) { "数据包账号信息过大" }
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
+        }
+    }
+
+    private fun validateBundleAccount(manifest: JSONObject, account: StoredAccount) {
+        require(manifest.optLong("accountId", 0L) == account.accountId) { "数据包清单与账号不一致" }
+    }
+
+    private fun validateStoredAccount(account: StoredAccount) {
+        require(account.accountId > 0L && account.token.isNotBlank() && account.userData.isNotBlank()) { "账号凭证内容不完整" }
+        require(account.session.token.isBlank() || account.session.token == account.token) { "账号会话与凭证不一致" }
+        val info = requireNotNull(host.method("info").invoke(createHostUser(account))) { "账号资料内容无效" }
+        require(host.field("info.id").getLong(info) == account.accountId) { "账号资料与凭证不一致" }
+    }
 
     // 只做清单校验与文件统计，不把整包解压到内存，供导入确认弹窗使用。
     fun previewAccountDataBundleFile(file: File, displayName: String = ""): AccountDataBundlePreview {
         ZipFile(file).use { zip ->
             val manifest = readBundleManifest(zip)
             val account = readBundleAccount(zip)
+            validateBundleAccount(manifest, account)
+            val localTasks = readBundleEntryBytes(zip, LOCAL_TASK_BUNDLE_ENTRY)
+            localTasks?.let { LocalTaskAccountBundle.read(JSONObject(String(it, Charsets.UTF_8)), account.accountId.toString()) }
             val filePrefix = "files/${account.accountId}/"
             var fileCount = 0
             var uncompressedBytes = 0L
@@ -837,42 +897,73 @@ class AccountCompletionController(
                 uncompressedBytes = uncompressedBytes,
                 compressedBytes = compressedBytes,
                 archiveBytes = file.length(),
+                hasLocalTasks = localTasks != null,
             )
         }
     }
 
     // 流式导入：数据库逐行写入，图书与模块文件逐条复制，避免整包常驻内存。
-    fun importAccountDataBundle(file: File, onProgress: (String) -> Unit = {}): ImportedAccountDataBundle {
-        val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
-        ZipFile(file).use { zip ->
-            readBundleManifest(zip)
-            val account = readBundleAccount(zip)
-            persistCurrentAccountSnapshot()
-            onProgress("\u6b63\u5728\u6062\u590d\u4e66\u5e93\u6570\u636e")
-            restoreHostDatabaseEntriesStreaming(zip, account.accountId)
-            onProgress("\u6b63\u5728\u6062\u590d\u56fe\u4e66\u6587\u4ef6")
-            restoreUserFilesStreaming(zip, account.accountId, onProgress)
-            onProgress("\u6b63\u5728\u6062\u590d\u6a21\u5757\u8bbe\u7f6e")
-            restoreModuleGlobalEntriesStreaming(zip)
-            val normalized = account.copy(lastUsedAt = System.currentTimeMillis())
-            restoreAccount(activity, normalized, restoreDevicePreferences = true)
-            val stored = loadStoredAccounts(activity)
-                .associateByTo(linkedMapOf()) { it.accountId }
-            val existing = stored[normalized.accountId]
-            stored[normalized.accountId] = existing?.mergeWith(normalized) ?: normalized
-            saveStoredAccounts(activity, stored.values.toList())
-            return ImportedAccountDataBundle(
-                account = AccountDisplayItem(
-                    accountId = normalized.accountId,
-                    nickname = normalized.nickname,
-                    identity = displayIdentity(normalized.email, normalized.thirdBinds),
-                    isCurrent = true,
-                ),
-            )
+    fun importAccountDataBundle(file: File, onProgress: (String) -> Unit = {}): ImportedAccountDataBundle =
+        synchronized(advancedSettings.operationLock) {
+            advancedSettings.requireIdentityMutation()
+            val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
+            ZipFile(file).use { zip ->
+                val manifest = readBundleManifest(zip)
+                val imported = readBundleAccount(zip)
+                validateBundleAccount(manifest, imported)
+                val account = guardUserDataAgainstHost(activity, imported)
+                validateStoredAccount(account)
+                val taskStore = LocalTaskStore { activity.applicationContext }
+                val taskRestore = readBundleEntryBytes(zip, LOCAL_TASK_BUNDLE_ENTRY)?.let { bytes ->
+                    taskStore.prepareAccountBundle(account.accountId.toString(), account.token,
+                        JSONObject(String(bytes, Charsets.UTF_8)))
+                }
+                persistCurrentAccountSnapshot()
+                onProgress("正在暂存图书文件")
+                stageUserFilesStreaming(zip, account.accountId, onProgress).use { files ->
+                    onProgress("正在恢复书库数据")
+                    restoreHostDatabaseEntriesStreaming(zip, account) { files.install() }
+                    files.complete()
+                }
+                onProgress("\u6b63\u5728\u6062\u590d\u6a21\u5757\u8bbe\u7f6e")
+                restoreModuleGlobalEntriesStreaming(zip)
+                val normalized = account.copy(lastUsedAt = System.currentTimeMillis())
+                restoreAccount(activity, normalized, restoreDevicePreferences = true)
+                val stored = loadStoredAccounts(activity)
+                    .associateByTo(linkedMapOf()) { it.accountId }
+                val existing = stored[normalized.accountId]
+                stored[normalized.accountId] = existing?.mergeWith(normalized) ?: normalized
+                saveStoredAccounts(activity, stored.values.toList())
+                if (taskRestore != null) {
+                    val identity = AccountHostRuntime.snapshot(activity)
+                    check(identity != null && identity.accountId == normalized.accountId && identity.token == normalized.token) {
+                        "阅微账号已经变化，请重新导入"
+                    }
+                    onProgress("正在恢复本地任务配置与记录")
+                    // This is the final durable restore step: earlier import failures retain the old tasks.
+                    taskStore.restoreAccountBundle(taskRestore) { AccountHostRuntime.isCurrent(identity, activity) }
+                    // The backup's enabled flags are retained; delivery acknowledgement is handled by the task bridge.
+                    runCatching { LocalTaskMirror.push(activity.applicationContext) }.onFailure {
+                        HookRuntime.logError("ReaMicro account local task mirror dispatch failed")
+                    }
+                }
+                ImportedAccountDataBundle(
+                    account = AccountDisplayItem(
+                        accountId = normalized.accountId,
+                        nickname = normalized.nickname,
+                        identity = displayIdentity(normalized.email, normalized.thirdBinds),
+                        isCurrent = true,
+                    ),
+                )
+            }
         }
-    }
 
-    private fun restoreHostDatabaseEntriesStreaming(zip: ZipFile, accountId: Long) {
+    private fun restoreHostDatabaseEntriesStreaming(zip: ZipFile, account: StoredAccount, installUserFiles: () -> Unit) {
+        val accountId = account.accountId
+        // A missing table payload is an incomplete backup, not an instruction to erase the account.
+        listOf("books", "book_item_ref", "book_chapter", "book_reading").forEach { table ->
+            require(zip.getEntry("database/$table.json")?.isDirectory == false) { "数据包书库数据不完整" }
+        }
         val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
         val databasePath = activity.applicationContext.getDatabasePath(HOST_DB_NAME)
         if (!databasePath.exists()) error("\u672a\u627e\u5230\u9605\u5fae\u6570\u636e\u5e93")
@@ -888,15 +979,18 @@ class AccountCompletionController(
             deleteRowsForIds(database, "book_item_ref", "book_id", oldBookIds)
             deleteRowsForIds(database, "book_chapter", "book_id", oldBookIds)
             database.delete("books", "uid = ?", arrayOf(accountId.toString()))
-            database.delete("users", "id = ?", arrayOf(accountId.toString()))
-            forEachBundleRow(zip, "database/users.json") { row ->
-                insertOrReplace(database, "users", jsonToContentValues(row))
-            }
+            // The native User record has exactly these four fields in both hosts. Bundle rows must never overwrite other users
+            // or replace current native account information before guardUserDataAgainstHost can preserve it.
+            insertOrReplace(database, "users", ContentValues().apply {
+                put("id", accountId); put("token", account.token); put("data", account.userData)
+                put("updated", System.currentTimeMillis())
+            })
             val bookIdMap = linkedMapOf<Long, Long>()
             forEachBundleRow(zip, "database/books.json") { row ->
                 val oldId = (row.opt("id") as? Number)?.toLong() ?: 0L
-                val newId = insertImportedBooks(database, accountId, row)
-                if (oldId > 0L && newId != null) bookIdMap[oldId] = newId
+                require(oldId > 0L && !bookIdMap.containsKey(oldId)) { "数据包图书编号无效或重复" }
+                val newId = requireNotNull(insertImportedBooks(database, accountId, row)) { "恢复图书数据失败" }
+                bookIdMap[oldId] = newId
             }
             forEachBundleRow(zip, "database/book_item_ref.json") { row ->
                 insertImportedChildRow(database, "book_item_ref", row, bookIdMap)
@@ -907,10 +1001,10 @@ class AccountCompletionController(
             forEachBundleRow(zip, "database/book_reading.json") { row ->
                 insertImportedReadingRow(database, accountId, row, bookIdMap)
             }
+            installUserFiles()
             database.setTransactionSuccessful()
         } finally {
-            database.endTransaction()
-            database.close()
+            try { database.endTransaction() } finally { database.close() }
         }
     }
 
@@ -968,35 +1062,48 @@ class AccountCompletionController(
         return array
     }
 
-    private fun restoreUserFilesStreaming(zip: ZipFile, accountId: Long, onProgress: (String) -> Unit) {
-        val activity = activityProvider() ?: error("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u9875\u9762")
-        val root = File(activity.filesDir, accountId.toString())
-        if (root.exists()) {
-            root.deleteRecursively()
-        }
-        val prefix = "files/$accountId/"
-        val entries = zip.entries().asSequence()
-            .filter { !it.isDirectory && it.name.startsWith(prefix) }
-            .toList()
-        if (entries.isEmpty()) return
-        root.mkdirs()
-        val rootPath = root.canonicalFile
-        var written = 0
-        entries.forEach { entry ->
-            val relativePath = entry.name.removePrefix(prefix)
-            if (!isSafeArchivePath(relativePath)) return@forEach
-            val target = File(root, relativePath).canonicalFile
-            if (!target.path.startsWith(rootPath.path + File.separator)) return@forEach
-            target.parentFile?.mkdirs()
-            zip.getInputStream(entry).use { input ->
-                FileOutputStream(target).buffered().use { output -> input.copyTo(output) }
+    private fun stageUserFilesStreaming(zip: ZipFile, accountId: Long, onProgress: (String) -> Unit): AccountUserFilesRestore {
+        val activity = activityProvider() ?: error("当前没有可用页面")
+        val restore = AccountUserFilesRestore(File(activity.filesDir, accountId.toString()))
+        try {
+            val prefix = "files/$accountId/"
+            val entries = zip.entries().asSequence().filter { !it.isDirectory && it.name.startsWith(prefix) }.toList()
+            val rootPath = restore.staged.canonicalFile
+            var written = 0
+            entries.forEach { entry ->
+                val relativePath = entry.name.removePrefix(prefix)
+                require(isSafeArchivePath(relativePath)) { "数据包图书路径无效" }
+                val target = File(rootPath, relativePath).canonicalFile
+                require(target.path.startsWith(rootPath.path + File.separator) && !target.exists()) { "数据包图书路径无效或重复" }
+                val parent = requireNotNull(target.parentFile)
+                check(parent.isDirectory || parent.mkdirs()) { "无法暂存图书目录" }
+                copyBundleFile(zip, entry, target)
+                written++
+                if (written % 500 == 0) onProgress("正在暂存图书文件 $written/${entries.size}")
             }
-            written++
-            if (written % 500 == 0) {
-                onProgress("\u6b63\u5728\u6062\u590d\u56fe\u4e66\u6587\u4ef6 $written/${entries.size}")
+            return restore
+        } catch (error: Throwable) {
+            runCatching { restore.close() }.onFailure(error::addSuppressed)
+            throw error
+        }
+    }
+
+    private fun copyBundleFile(zip: ZipFile, entry: ZipEntry, target: File) {
+        val checksum = CRC32()
+        var written = 0L
+        zip.getInputStream(entry).use { input ->
+            FileOutputStream(target).buffered().use { output ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                    checksum.update(buffer, 0, count)
+                    written += count
+                }
             }
         }
-        if (written == 0) error("\u6570\u636e\u5305\u4e2d\u6ca1\u6709\u53ef\u6062\u590d\u7684\u56fe\u4e66\u6587\u4ef6")
+        check((entry.size < 0L || written == entry.size) && (entry.crc < 0L || checksum.value == entry.crc)) { "数据包图书文件损坏" }
     }
 
     private fun restoreModuleGlobalEntriesStreaming(zip: ZipFile) {
@@ -1042,15 +1149,8 @@ class AccountCompletionController(
     }
 
     private fun isSafeArchivePath(path: String): Boolean {
-        val normalized = path.replace('\\', '/').trim('/')
-        if (normalized.isBlank()) return false
-        return normalized.split('/').none { it.isBlank() || it == "." || it == ".." }
-    }
-
-    private fun insertRows(database: SQLiteDatabase, table: String, rows: List<JSONObject>) {
-        rows.forEach { row ->
-            insertOrReplace(database, table, jsonToContentValues(row))
-        }
+        if (path.isBlank() || path.startsWith('/') || '\\' in path) return false
+        return path.split('/').none { it.isBlank() || it == "." || it == ".." }
     }
 
     // 宿主用 androidx.sqlite 捆绑驱动以 WAL 打开 app.db。
@@ -1344,6 +1444,8 @@ class AccountCompletionController(
             writeJsonEntry(zip, "account/session.json", account.session.toJson())
             writeJsonEntry(zip, "account/webdav_prefs.json", account.webDavPrefs.toJson())
             writeJsonEntry(zip, "account/local_library_prefs.json", account.localLibraryPrefs.toJson())
+            writeJsonEntry(zip, LOCAL_TASK_BUNDLE_ENTRY,
+                LocalTaskStore { activity.applicationContext }.exportAccountBundle(account.accountId.toString()))
             writeHostDatabaseEntries(zip, activity, account)
             writeUserFiles(zip, activity, account.accountId)
             writeModuleGlobalEntries(zip, activity)
@@ -1593,7 +1695,7 @@ class AccountCompletionController(
                 }
             }
         }.getOrElse {
-            XposedBridge.log("$LOG_PREFIX failed to parse stored accounts: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to parse stored accounts: ${it.stackTraceToString()}")
             emptyList()
         }
     }
@@ -1604,7 +1706,7 @@ class AccountCompletionController(
             .filter { it.accountId > 0L }
             .sortedByDescending { it.lastUsedAt }
             .forEach { array.put(it.toJson()) }
-        storePrefs(activity).edit().putString(STORE_KEY_ACCOUNTS, array.toString()).commit()
+        check(storePrefs(activity).edit().putString(STORE_KEY_ACCOUNTS, array.toString()).commit()) { "保存账号快照失败" }
     }
 
     private fun storePrefs(activity: Activity): SharedPreferences =
@@ -1640,10 +1742,11 @@ class AccountCompletionController(
         return when {
             json.has("session") || json.has("localLibraryPrefs") -> StoredAccount.fromJson(json)
             else -> PortableCredential.fromJson(json).toStoredAccount()
-        }
+        }.also(::validateStoredAccount)
     }
 
-    private fun decodePortableCredentials(raw: String): List<StoredAccount> {
+    private fun decodePortableCredentials(raw: String, depth: Int = 0): List<StoredAccount> {
+        require(depth < 16) { "账号凭证嵌套过深" }
         val trimmed = raw.trim()
         if (trimmed.isBlank()) error("credential is empty")
         val jsonString = runCatching {
@@ -1668,7 +1771,7 @@ class AccountCompletionController(
                         val item = array.optJSONObject(index) ?: continue
                         val credential = item.optString("credential").trim()
                         when {
-                            credential.isNotBlank() -> addAll(decodePortableCredentials(credential))
+                            credential.isNotBlank() -> addAll(decodePortableCredentials(credential, depth + 1))
                             item.has("session") || item.has("localLibraryPrefs") -> add(StoredAccount.fromJson(item))
                             item.has("token") && item.has("userData") -> add(PortableCredential.fromJson(item).toStoredAccount())
                         }
@@ -1677,109 +1780,17 @@ class AccountCompletionController(
             }
             json.has("session") || json.has("localLibraryPrefs") -> listOf(StoredAccount.fromJson(json))
             else -> listOf(PortableCredential.fromJson(json).toStoredAccount())
-        }
+        }.also { accounts -> accounts.forEach(::validateStoredAccount) }
     }
 
-    private fun updatePreference(session: Any, prefKey: Any, value: Any) {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val update = session.javaClass.hostAbiMethod(
-                "h", classLoader.hostClass("ReaMicroHost.PreferenceKey"), Any::class.java,
-                classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
-            )
-            invokeSuspendMethod(update, session, prefKey, value)
-            return
-        }
-        val method = allMethods(session.javaClass).firstOrNull {
-            it.hostNameMatches("update") && it.parameterTypes.size == 3
-        } ?: error("Session.update not found")
-        invokeSuspendMethod(method, session, prefKey, value)
-    }
-
-    private fun firstFlowValue(flow: Any): Any? {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val first = classLoader.hostClass("ReaMicroHost.FlowFirst").hostAbiMethod(
-                "e", classLoader.hostClass("kotlinx.coroutines.flow.Flow"),
-                classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
-            )
-            return invokeSuspendMethod(first, null, flow)
-        }
-        val flowKt = Class.forName(FLOW_KT_CLASS, false, flow.javaClass.classLoader ?: classLoader)
-        val method = flowKt.methods.firstOrNull {
-            (it.hostNameMatches("firstOrNull") || it.hostNameMatches("first")) && it.parameterTypes.size == 2
-        } ?: error("FlowKt.first not found")
-        return invokeSuspendMethod(method, null, flow)
-    }
+    private fun firstFlowValue(flow: Any): Any? = preferences.first(flow)
 
     private fun invokeSuspendMethod(method: Method, target: Any?, vararg args: Any?): Any? =
         com.reamicro.fix.core.HostCoroutines.invokeTimed(classLoader, method, target, SUSPEND_WAIT_TIMEOUT_MS, *args)
 
-    private fun upsertUserRow(activity: Activity, account: StoredAccount) {
-        runCatching {
-            upsertUserRowViaHostDao(activity, account)
-            return
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX host user dao upsert failed, fallback to sqlite: ${it.stackTraceToString()}")
-        }
-        val databasePath = activity.applicationContext.getDatabasePath(HOST_DB_NAME)
-        if (!databasePath.exists()) error("未找到阅微数据库")
-        val database = openHostDatabaseReadWrite(databasePath.absolutePath)
-        try {
-            val values = ContentValues().apply {
-                put("id", account.accountId)
-                put("token", account.token)
-                put("data", account.userData)
-                put("updated", System.currentTimeMillis())
-            }
-            insertOrReplace(database, "users", values)
-        } finally {
-            database.close()
-        }
-    }
-
-    private fun upsertUserRowViaHostDao(activity: Activity, account: StoredAccount) {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val repository = b4UserRepository() ?: error("B4 user repository unavailable")
-            val dao = repository.javaClass.hostAbiField("g").get(repository)
-            val upsert = dao.javaClass.hostAbiMethod(
-                "b", classLoader.hostClass(HOST_USER_CLASS),
-                classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
-            )
-            invokeSuspendMethod(upsert, dao, createHostUser(account))
-            return
-        }
-        val repository = userRepository(activity) ?: error("UserRepository not found")
-        val userDaoClass = Class.forName(HOST_USER_DAO_CLASS, false, classLoader)
-        val userDao = repository.javaClass.declaredFields
-            .firstOrNull { userDaoClass.isAssignableFrom(it.type) }
-            ?.apply { isAccessible = true }
-            ?.get(repository)
-            ?: error("UserDao not found")
-        val upsertMethod = allMethods(userDao.javaClass).firstOrNull {
-            it.hostNameMatches("upsert") && it.parameterTypes.size == 2
-        } ?: error("UserDao.upsert not found")
-        invokeSuspendMethod(upsertMethod, userDao, createHostUser(account))
-    }
-
-    private fun updateCachedUser(account: StoredAccount) {
-        runCatching {
-            val user = createHostUser(account)
-            if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                val value = classLoader.hostClass("ReaMicroHost.CachedUserData")
-                    .getDeclaredConstructor(classLoader.hostClass(HOST_USER_CLASS)).newInstance(user)
-                classLoader.hostClass(CACHED_CLASS).hostAbiMethod(
-                    "b", value.javaClass.superclass,
-                ).invoke(null, value)
-                return@runCatching
-            }
-            val cached = staticObject(CACHED_CLASS, "INSTANCE") ?: return@runCatching
-            val userDataClass = Class.forName("$CACHED_CLASS\$DataType\$UserData", false, classLoader)
-            val userData = userDataClass.constructors.first { it.parameterTypes.size == 1 }.newInstance(user)
-            cached.javaClass.methods.firstOrNull {
-                it.hostNameMatches("save") && it.parameterTypes.size == 1
-            }?.invoke(cached, userData)
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to update cached user: ${it.stackTraceToString()}")
-        }
+    private fun publishCachedUser(user: Any) {
+        host.method("saveCache").invoke(null, host.constructor("cachedData").newInstance(user))
+        check(host.field("cachedUser").get(null) == user) { "账户缓存写后回读不一致" }
     }
 
     // 宿主 users.data 是服务端账号资料的本地镜像，阅微冷启动会自行重新同步。
@@ -1790,7 +1801,7 @@ class AccountCompletionController(
         val hostData = hostRow?.optString("data").orEmpty()
         if (hostData.isBlank() || hostData == account.userData) return account
         val merged = mergeUserDataJson(hostData, account.userData) ?: return account
-        XposedBridge.log("$LOG_PREFIX host user data kept live for account ${account.accountId}")
+        HookRuntime.log("$LOG_PREFIX host user data kept live for account ${account.accountId}")
         val liveBinds = userDataThirdBinds(merged)
         return account.copy(
             userData = merged,
@@ -1844,116 +1855,29 @@ class AccountCompletionController(
         jsonArrayToStringList(JSONObject(userData).optJSONArray("thirdBinds"))
     }.getOrDefault(emptyList())
 
-    private fun createHostUser(account: StoredAccount): Any {
-        val userClass = classLoader.hostClass(HOST_USER_CLASS)
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            return userClass.getDeclaredConstructor(
-                Long::class.javaPrimitiveType, Long::class.javaPrimitiveType,
-                String::class.java, String::class.java,
-            ).newInstance(account.accountId, System.currentTimeMillis(), account.token, account.userData)
+    private fun createHostUser(account: StoredAccount): Any = host.record("user", mapOf(
+        "id" to account.accountId, "token" to account.token, "data" to account.userData,
+        "updated" to System.currentTimeMillis(),
+    ))
+    private fun readPreference(prefs: Any, key: Any): Any? = preferences.method("read").invoke(prefs, key)
+    @Suppress("UNUSED_PARAMETER")
+    private fun key(className: String, getterName: String): Any =
+        preferences.key(if (getterName == "getBUILD_IN_FONTS") "built_in_fonts" else getterName.removePrefix("get").lowercase(Locale.ROOT))
+    private fun accountProperty(target: Any, name: String): Any? {
+        val property = when (name) {
+            "getId" -> "id"; "getData" -> "data"; "getToken" -> "token"; "getUpdated" -> "updated"
+            "getNickName" -> "nickName"; "getEmail" -> "email"
+            else -> error("Unknown account property: $name")
         }
-        return userClass.getConstructor(
-            Long::class.javaPrimitiveType,
-            String::class.java,
-            String::class.java,
-            Long::class.javaPrimitiveType,
-        ).newInstance(
-            account.accountId,
-            account.token,
-            account.userData,
-            System.currentTimeMillis(),
-        )
-    }
-
-    private fun userRepository(activity: Activity): Any? =
-        runCatching { method0(activity, "getUserRepository") }.getOrNull()
-            ?: koinGet(activity, USER_REPOSITORY_CLASS)
-
-    private fun readPreference(preferences: Any, key: Any): Any? =
-        if (HostSymbols.abiProfileId == "2.3.3-b4") preferences.javaClass
-            .hostAbiMethod("c", classLoader.hostClass("ReaMicroHost.PreferenceKey")).invoke(preferences, key)
-        else
-        allMethods(preferences.javaClass).firstOrNull {
-            it.hostNameMatches("get") && it.parameterTypes.size == 1
-        }?.invoke(preferences, key)
-
-    private fun key(className: String, getterName: String): Any {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val name = when (getterName) {
-                "getBUILD_IN_FONTS" -> "built_in_fonts"
-                "getBAIDU_AUTH" -> "baidu_auth"
-                "getALIYUN_AUTH" -> "aliyun_auth"
-                "getYUN115_AUTH" -> "yun115_auth"
-                else -> getterName.removePrefix("get").lowercase(Locale.ROOT)
-            }
-            return classLoader.hostClass("ReaMicroHost.PreferenceKey").getDeclaredConstructor(String::class.java)
-                .newInstance(name)
+        return when {
+            host.type("user").isInstance(target) -> host.field("user.$property").get(target)
+            host.type("info").isInstance(target) -> host.field("info.$property").get(target)
+            preferences.type("session").isInstance(target) && property == "token" -> preferences.field("token").get(target)
+            else -> error("Unexpected account record type: ${target.javaClass.name}")
         }
-        val companion = staticObject(className, "INSTANCE")
-            ?: error("Missing key companion $className")
-        return method0(companion, getterName)
     }
-
-    private fun staticObject(className: String, fieldName: String): Any? =
-        runCatching {
-            val field = Class.forName(className, false, classLoader).getDeclaredField(fieldName)
-            field.isAccessible = true
-            field.get(null)
-        }.getOrNull()
-
-    private fun method0(target: Any, name: String): Any =
-        b4Property(target, name) ?: allMethods(target.javaClass).first {
-            it.parameterTypes.isEmpty() && (it.hostNameMatches(name) || it.name.startsWith("$name-"))
-        }.apply { isAccessible = true }.invoke(target)
-
-    private fun method1(target: Any, name: String, value: Any?) {
-        if (HostSymbols.abiProfileId == "2.3.3-b4" && name == "setToken") {
-            val session = classLoader.hostClass(SESSION_CLASS)
-            check(session.isInstance(target))
-            session.hostAbiField("b").set(target, value)
-            return
-        }
-        allMethods(target.javaClass).firstOrNull {
-            it.hostNameMatches(name) && it.parameterTypes.size == 1
-        }?.apply { isAccessible = true }?.invoke(target, value)
-    }
-
-    private fun Any.longValue(name: String): Long =
-        (method0(this, name) as? Number)?.toLong() ?: 0L
-
-    private fun Any.stringValue(name: String): String =
-        method0(this, name)?.toString().orEmpty()
-
-    private fun b4UserRepository(): Any? {
-        if (HostSymbols.abiProfileId != "2.3.3-b4") return null
-        val bookshelf = ReaMicroBookMetadataSync.currentBookshelfRepository() ?: return null
-        val userStorage = bookshelf.javaClass.hostAbiField("l").get(bookshelf) ?: return null
-        return userStorage.javaClass.hostAbiField("a").get(userStorage)
-    }
-
-    private fun b4Session(): Any? =
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            ReaMicroBookMetadataSync.currentBookshelfRepository()?.let {
-                it.javaClass.hostAbiField("k").get(it)
-            }
-        } else null
-
-    private fun b4Property(target: Any, name: String): Any? {
-        if (HostSymbols.abiProfileId != "2.3.3-b4") return null
-        val field = when (target.javaClass) {
-            classLoader.hostClass(HOST_USER_CLASS) -> when (name) {
-                "getId" -> "a"; "getToken" -> "b"; "getData" -> "c"; "getUpdated" -> "d"; else -> null
-            }
-            classLoader.hostClass(SESSION_CLASS) -> when (name) {
-                "getToken" -> "b"; "getDataStore" -> "a"; else -> null
-            }
-            classLoader.hostClass("ReaMicroHost.AccountSecurityUser") -> when (name) {
-                "getNickName" -> "c"; "getEmail" -> "j"; "getThirdBinds" -> "k"; else -> null
-            }
-            else -> null
-        } ?: return null
-        return target.javaClass.hostAbiField(field).get(target)
-    }
+    private fun Any.longValue(name: String): Long = (accountProperty(this, name) as? Number)?.toLong() ?: 0L
+    private fun Any.stringValue(name: String): String = accountProperty(this, name)?.toString().orEmpty()
 
     private fun displayIdentity(email: String, thirdBinds: List<String>): String {
         if (email.isNotBlank()) return email
@@ -2038,6 +1962,7 @@ class AccountCompletionController(
         val uncompressedBytes: Long,
         val compressedBytes: Long,
         val archiveBytes: Long,
+    val hasLocalTasks: Boolean = false,
     )
 
     private data class CurrentAccountPreview(
@@ -2143,9 +2068,9 @@ class AccountCompletionController(
                 nickname = other.nickname.ifBlank { nickname },
                 email = other.email.ifBlank { email },
                 thirdBinds = if (other.thirdBinds.isNotEmpty()) other.thirdBinds else thirdBinds,
-                session = if (hasFullState) session.mergeCredentialsFrom(other.session) else other.session,
-                webDavPrefs = if (hasFullState) webDavPrefs.mergeKeysFrom(other.webDavPrefs, PORTABLE_WEBDAV_KEYS) else other.webDavPrefs,
-                localLibraryPrefs = if (hasFullState) localLibraryPrefs else other.localLibraryPrefs,
+                session = if (other.hasFullState || !hasFullState) other.session else session.mergeCredentialsFrom(other.session),
+                webDavPrefs = if (other.hasFullState || !hasFullState) other.webDavPrefs else webDavPrefs.mergeKeysFrom(other.webDavPrefs, PORTABLE_WEBDAV_KEYS),
+                localLibraryPrefs = if (other.hasFullState || !hasFullState) other.localLibraryPrefs else localLibraryPrefs,
                 lastUsedAt = maxOf(lastUsedAt, other.lastUsedAt),
                 hasFullState = hasFullState || other.hasFullState,
                 advancedPreferences = other.advancedPreferences ?: advancedPreferences,
@@ -2265,6 +2190,7 @@ class AccountCompletionController(
         val baiduAuth: String,
         val aliyunAuth: String,
         val yun115Auth: String,
+        val syncPreferences: AccountSyncPreferences? = null,
     ) {
         fun advanced(): AccountAdvancedPreferences = AccountAdvancedPreferences(
             dynamicColor, smartRecognition, illustrationOptimization, relateDownloadCover, callingCardColor,
@@ -2300,6 +2226,7 @@ class AccountCompletionController(
                 put("baiduAuth", baiduAuth)
                 put("aliyunAuth", aliyunAuth)
                 put("yun115Auth", yun115Auth)
+                syncPreferences?.let { put("syncPreferences", it.toJson()) }
             }
 
         fun mergeCredentialsFrom(other: SessionSnapshot): SessionSnapshot =
@@ -2387,6 +2314,7 @@ class AccountCompletionController(
                     baiduAuth = source.optString("baiduAuth"),
                     aliyunAuth = source.optString("aliyunAuth"),
                     yun115Auth = source.optString("yun115Auth"),
+                    syncPreferences = AccountSyncPreferences.fromJson(source.optJSONObject("syncPreferences")),
                 )
             }
         }
@@ -2510,37 +2438,6 @@ class AccountCompletionController(
         }
     }
 
-    private fun emptyCoroutineContext(): Any =
-        Class.forName(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, false, classLoader)
-            .hostField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null)
-
-    private fun targetUnit(): Any =
-        Class.forName(KOTLIN_UNIT_CLASS, false, classLoader)
-            .hostField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null)
-
-    private fun coroutineSuspendedMarker(): Any =
-        runCatching {
-            Class.forName(KOTLIN_INTRINSICS_CLASS, false, classLoader)
-                .methods.first {
-                    it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
-                }.apply { isAccessible = true }
-                .invoke(null)
-        }.getOrElse {
-            (Class.forName(KOTLIN_COROUTINE_SINGLETONS_CLASS, false, classLoader).enumConstants ?: emptyArray())
-                .first { value -> value.toString() == "COROUTINE_SUSPENDED" }
-        }
-
-    private fun allMethods(type: Class<*>): Sequence<Method> = sequence {
-        var current: Class<*>? = type
-        while (current != null) {
-            yieldAll(current.declaredMethods.asSequence())
-            current = current.superclass
-        }
-    }
 }
 
 private fun jsonArrayToStringList(array: JSONArray?): List<String> {

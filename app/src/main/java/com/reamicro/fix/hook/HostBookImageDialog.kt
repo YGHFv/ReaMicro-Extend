@@ -42,7 +42,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.R
 import com.reamicro.fix.core.InjectedModuleContext
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
+import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -55,41 +55,42 @@ internal class HostBookImageDialog(
     private val fetch: (String, String) -> ByteArray,
     private val applyImage: (ByteArray) -> (() -> Unit),
     private val saveImage: ((ByteArray) -> Unit)? = null,
+    private val checkCurrent: () -> Unit = {},
 ) : Dialog(InjectedModuleContext.create(activity), R.style.EpubFullScreenDialog) {
     private val owner = ModuleComposeOwner(activity) { dismiss() }
-    private var dark by mutableStateOf(StructureHome130Style.isDark(activity))
+    private var dark by mutableStateOf(HostEmbeddedStyle.isDark(activity))
     private var busy by mutableStateOf(false)
     private var committing by mutableStateOf(false)
     private var view: ComposeView? = null
-    private var closed = false
+    @Volatile private var closed = false
+    private var configurationRegistered = false
     private val callback = object : ComponentCallbacks {
-        override fun onConfigurationChanged(newConfig: Configuration) { dark = StructureHome130Style.isDark(activity) }
+        override fun onConfigurationChanged(newConfig: Configuration) { dark = HostEmbeddedStyle.isDark(activity) }
         override fun onLowMemory() = Unit
     }
     override fun cancel() { if (!committing) super.cancel() }
     override fun show() {
-        if (isShowing || closed || activity.isFinishing || activity.isDestroyed) return
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-        owner.start()
-        val compose = ComposeView(context).apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            setContent { this@HostBookImageDialog.ImageContent() }
-        }
-        view = compose
-        setContentView(compose)
-        window?.decorView?.apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-        }
-        setOnDismissListener {
-            closed = true
-            view?.disposeComposition(); view = null; owner.close()
-            activity.unregisterComponentCallbacks(callback)
-        }
-        activity.registerComponentCallbacks(callback)
+        if (isShowing || runCatching(::requireDialogCurrent).isFailure) return
         try {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setOnDismissListener { release() }
+            owner.start()
+            val compose = ComposeView(context)
+            view = compose
+            compose.apply {
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+                owner.attach(this)
+                setContent { this@HostBookImageDialog.ImageContent() }
+            }
+            setContentView(compose)
+            window?.decorView?.apply {
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+            }
+            activity.registerComponentCallbacks(callback)
+            configurationRegistered = true
             window?.let {
                 WindowCompat.setDecorFitsSystemWindows(it, false)
                 it.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
@@ -97,10 +98,34 @@ internal class HostBookImageDialog(
             super.show()
             window?.setBackgroundDrawableResource(android.R.color.transparent)
             window?.setDimAmount(0f)
-        } catch (e: Exception) {
-            compose.disposeComposition(); owner.close(); closed = true
-            activity.unregisterComponentCallbacks(callback)
+        } catch (e: Throwable) {
+            if (isShowing) runCatching { dismiss() }.onFailure(e::addSuppressed)
+            runCatching { release() }.onFailure(e::addSuppressed)
             throw e
+        }
+    }
+
+    private fun requireDialogCurrent() {
+        check(!closed && !activity.isFinishing && !activity.isDestroyed) { "图片页面已经关闭" }
+        checkCurrent()
+    }
+
+    private fun release() {
+        if (closed) return
+        closed = true
+        val compose = view
+        view = null
+        try {
+            compose?.disposeComposition()
+        } finally {
+            try {
+                owner.close()
+            } finally {
+                if (configurationRegistered) {
+                    configurationRegistered = false
+                    activity.unregisterComponentCallbacks(callback)
+                }
+            }
         }
     }
 
@@ -109,7 +134,7 @@ internal class HostBookImageDialog(
 
     @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
     @Composable private fun ImageContent() {
-        val palette = StructureHome130Style.palette(activity, dark)
+        val palette = HostEmbeddedStyle.palette(activity, dark)
         val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
         val typography = remember(scale, LocalConfiguration.current) { BookImageDialogStyle.typography(activity, scale) }
         MaterialTheme(colorScheme = palette.controlsScheme(), typography = typography) {
@@ -125,11 +150,15 @@ internal class HostBookImageDialog(
             val usable = preview != null && previewKey == key
             fun task(label: String, writes: Boolean = false, action: suspend () -> Unit) {
                 if (busy) return
+                if (runCatching(::requireDialogCurrent).isFailure) { dismiss(); return }
                 busy = true; committing = writes; failed = false; message = label
                 scope.launch {
-                    try { action() }
+                    try { requireDialogCurrent(); action(); if (!closed) requireDialogCurrent() }
                     catch (e: CancellationException) { throw e }
-                    catch (e: Exception) { failed = true; message = e.message?.take(160) ?: "操作失败，请重试" }
+                    catch (e: Exception) {
+                        if (runCatching(::requireDialogCurrent).isFailure) dismiss()
+                        else { failed = true; message = e.message?.take(160) ?: "操作失败，请重试" }
+                    }
                     finally { busy = false; committing = false }
                 }
             }
@@ -139,24 +168,29 @@ internal class HostBookImageDialog(
                     task(if (generated) "正在生成图片…" else "正在下载图片…") {
 
                         preview = null
-                        preview = withContext(Dispatchers.IO) {
+                        val loadedPreview = withContext(ModuleUiRuntime.io) {
                             val bytes = fetch(request.first, request.second)
+                            requireDialogCurrent()
                             Preview(bytes, decodePreview(bytes), request)
                         }
+                        requireDialogCurrent()
+                        preview = loadedPreview
                         message = "预览已就绪，点击应用才会写入"
                     }
                 })
                 if (saveImage != null) add(Action("保存", !busy && usable) {
                     val data = preview?.takeIf { it.key == currentKey() }?.bytes ?: return@Action
                     task("正在保存到相册…", writes = true) {
-                        withContext(Dispatchers.IO) { saveImage.invoke(data) }
+                        withContext(ModuleUiRuntime.io) { requireDialogCurrent(); saveImage.invoke(data) }
+                        requireDialogCurrent()
                         message = "已保存到相册"
                     }
                 })
                 add(Action("应用", !busy && usable) {
                     val data = preview?.takeIf { it.key == currentKey() }?.bytes ?: return@Action
                     task("正在应用图片…", writes = true) {
-                        val finish = withContext(Dispatchers.IO) { applyImage(data) }
+                        val finish = withContext(ModuleUiRuntime.io) { requireDialogCurrent(); applyImage(data) }
+                        requireDialogCurrent()
                         finish(); dismiss()
                     }
                 })
@@ -260,7 +294,7 @@ internal class HostBookImageDialog(
     }
 
     @Composable private fun InputCard(label: String, value: String, enabled: Boolean,
-        palette: StructureHome130Style.Palette, scale: Float, lines: Int, hint: String,
+        palette: HostEmbeddedStyle.Palette, scale: Float, lines: Int, hint: String,
         uri: Boolean = false, singleLine: Boolean = false, changed: (String) -> Unit) {
         val keyboard = LocalSoftwareKeyboardController.current
         val focus = LocalFocusManager.current

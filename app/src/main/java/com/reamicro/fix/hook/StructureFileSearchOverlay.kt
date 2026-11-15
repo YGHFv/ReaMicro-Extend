@@ -16,7 +16,7 @@ internal fun StructureFileSearchOverlay(
     visible: Boolean,
     paths: List<String>,
     labels: Map<String, List<String>> = emptyMap(),
-    palette: StructureHome130Style.Palette,
+    palette: HostEmbeddedStyle.Palette,
     busy: Boolean,
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,

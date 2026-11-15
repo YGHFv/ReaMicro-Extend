@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -24,8 +25,36 @@ from app.scheduler import (
 )
 from app.security import allow_rate_limit
 from app.state import canonicalize_owner_identities
+from app.users import load_users
 
-app = FastAPI(title="ReaMicro API", version=runtime.API_VERSION)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    runtime.get_state_store().initialize()
+    load_users()
+    canonicalize_owner_identities()
+    if runtime.RUN_SCHEDULER:
+        recover_interrupted_tasks()
+        migrate_device_tasks_to_server()
+    loops = []
+    if runtime.RUN_RELEASE_SYNC:
+        loops.append(asyncio.create_task(release_sync_loop(), name="reamicro-release-sync"))
+    if runtime.RUN_SCHEDULER:
+        loops.append(asyncio.create_task(task_scheduler_loop(), name="reamicro-tasks"))
+        loops.append(asyncio.create_task(server_snapshot_loop(), name="reamicro-snapshots"))
+    app.state.background_tasks = loops
+    try:
+        yield
+    finally:
+        for task in loops:
+            task.cancel()
+        # The scheduler's worker thread owns its lease through its final write. Cancelling
+        # this loop stops new work; an in-flight operation keeps its lease until it ends.
+        if loops:
+            await asyncio.wait_for(asyncio.gather(*loops, return_exceptions=True), timeout=5)
+        app.state.background_tasks = []
+
+
+app = FastAPI(title="ReaMicro API", version=runtime.API_VERSION, lifespan=lifespan)
 
 
 for _module in (
@@ -129,18 +158,3 @@ async def security_middleware(request: Request, call_next):
         runtime.metrics_counters["requests"] += 1
         runtime.metrics_routes[request.url.path] = runtime.metrics_routes.get(request.url.path, 0) + 1
     return result
-
-
-@app.on_event("startup")
-async def start_release_sync() -> None:
-    runtime.get_state_store()
-
-    canonicalize_owner_identities()
-    if runtime.RUN_RELEASE_SYNC:
-        asyncio.create_task(release_sync_loop())
-    if runtime.RUN_SCHEDULER:
-        recover_interrupted_tasks()
-
-        migrate_device_tasks_to_server()
-        asyncio.create_task(task_scheduler_loop())
-        asyncio.create_task(server_snapshot_loop())

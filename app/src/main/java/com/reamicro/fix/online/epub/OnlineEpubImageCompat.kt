@@ -29,29 +29,7 @@ internal fun onlineEpubImageManifestItem(fileName: String): OnlineEpubImageManif
 internal fun mergeOnlineEpubImageManifest(
     original: String,
     images: Collection<OnlineEpubImageManifestItem>,
-): String {
-    if (!original.contains("</manifest>", ignoreCase = true)) return original
-    val existingHrefs = Regex("""(?is)<item\b[^>]*\bhref\s*=\s*["']Images/([^"']+)["'][^>]*/?>""")
-        .findAll(original)
-        .map { it.groupValues[1] }
-        .toMutableSet()
-    val additions = images
-        .distinctBy { it.fileName }
-        .filter { it.fileName !in existingHrefs }
-        .joinToString("\n") { image ->
-            val idSuffix = stableOnlineImageFileStem(image.fileName).removePrefix("online_img_").take(16)
-            "    <item id=\"online-img-$idSuffix\" href=\"Images/${image.fileName.xmlEscapeCompat()}\" media-type=\"${image.mimeType}\"/>"
-        }
-    if (additions.isBlank()) return original
-    return original.replaceFirst(
-        Regex("""(?i)</manifest>"""),
-        "$additions\n  </manifest>",
-    )
-}
-
-private fun String.xmlEscapeCompat(): String =
-    replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\"", "&quot;")
-        .replace("'", "&apos;")
+): String = OnlineEpubManifest.merge(original, images.map { image ->
+    val idSuffix = stableOnlineImageFileStem(image.fileName).removePrefix("online_img_").take(16)
+    OnlineEpubManifest.Item("online-img-$idSuffix", "Images/${image.fileName}", image.mimeType)
+})

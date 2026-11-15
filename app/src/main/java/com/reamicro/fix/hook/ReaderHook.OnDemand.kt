@@ -1,28 +1,27 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.reload.runOnModuleUiThread
+import com.reamicro.fix.core.HostReaderWindowBindings
 
-import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
 import com.reamicro.fix.online.download.OnlineOnDemandBridge
 import com.reamicro.fix.online.download.OnlineOnDemandChapterRequest
 import com.reamicro.fix.online.download.OnlineOnDemandPrefetchPlanner
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.reflect.Method
 import java.io.File
 import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.online.download.OnlineOnDemandMetadataStore
-import com.reamicro.fix.core.typeMatches
 
 internal fun ReaderHook.logOnDemandPrefetchDebug(message: String) {
-    XposedBridge.log("$LOG_PREFIX on-demand prefetch $message")
+    HookRuntime.log("$LOG_PREFIX on-demand prefetch $message")
 }
 
 internal fun ReaderHook.prefetchOnlineOnDemandChapters(page: Any) {
+    if (activeReaderActivity() == null) return
     val bookDir = currentEpubRoot() ?: return
     val currentIndex = onDemandPageLocation(bookDir, page)?.metadataIndex ?: return
     val spineKey = "${bookDir.absolutePath}|$currentIndex"
@@ -59,46 +58,53 @@ internal fun ReaderHook.prefetchOnlineOnDemandChapter(
     reason: String,
 ) {
     val generation = onDemandRefreshCoordinator.generation()
-    if (!sameReaderBookRoot(currentEpubRoot(), bookDir)) return
+    if (activeReaderActivity() == null || !sameReaderBookRoot(currentEpubRoot(), bookDir)) return
     val request = OnlineOnDemandBridge.pendingRequest(bookDir, chapterIndex)
         ?: return logOnDemandPrefetchDebug("skip:no-pending:$chapterIndex:$reason")
     val prefetchKey = "${request.bookDir.absolutePath}|${request.chapter.href}"
-    if (!onDemandPrefetchInFlight.add(prefetchKey)) return
+    var added = false
+    onDemandRefreshCoordinator.inGeneration(generation) { added = onDemandPrefetchInFlight.add(prefetchKey) }
+    if (!added) return
     val accepted = OnlineOnDemandBridge.request(request) { result ->
-        if (!onDemandRefreshCoordinator.isGeneration(generation)) return@request
-        onDemandPrefetchInFlight.remove(prefetchKey)
+        val refreshKey = onDemandRefreshKey(result.request.bookDir, result.request.chapter.href)
+        if (!onDemandRefreshCoordinator.inGeneration(generation) {
+            onDemandPrefetchInFlight.remove(prefetchKey)
+            if (result.isSuccess) {
+                onDemandPrefetchRetryCount.remove(prefetchKey)
+                onDemandRefreshPending += refreshKey
+            }
+        }) return@request
         if (result.isSuccess) {
-            onDemandPrefetchRetryCount.remove(prefetchKey)
-            onDemandRefreshPending += onDemandRefreshKey(result.request.bookDir, result.request.chapter.href)
-            XposedBridge.log(
+            HookRuntime.log(
                 "$LOG_PREFIX on-demand prefetch completed anchor=${anchorIndex + 1} " +
                     "target=${result.request.chapterIndex + 1} reason=$reason " +
                     "href=${result.request.chapter.href}",
             )
         } else {
             val error = result.error
-            XposedBridge.log(
+            HookRuntime.log(
                 "$LOG_PREFIX on-demand prefetch failed index=${result.request.chapterIndex + 1} " +
                     "reason=$reason: ${error?.stackTraceToString()}",
             )
-            if (error?.message.orEmpty().contains("HTTP 429")) {
+            if (error?.message.orEmpty().contains("HTTP 429") && activeReaderActivity() != null) {
                 scheduleOnDemandPrefetchRetry(
                     bookDir = bookDir,
                     anchorIndex = anchorIndex,
                     chapterIndex = chapterIndex,
                     reason = reason,
                     prefetchKey = prefetchKey,
+                    generation = generation,
                 )
             }
         }
     }
     if (accepted) {
-        XposedBridge.log(
+        HookRuntime.log(
             "$LOG_PREFIX on-demand prefetch requested anchor=${anchorIndex + 1} " +
                 "target=${request.chapterIndex + 1} reason=$reason href=${request.chapter.href}",
         )
     } else {
-        onDemandPrefetchInFlight.remove(prefetchKey)
+        onDemandRefreshCoordinator.inGeneration(generation) { onDemandPrefetchInFlight.remove(prefetchKey) }
     }
 }
 
@@ -108,19 +114,25 @@ internal fun ReaderHook.scheduleOnDemandPrefetchRetry(
     chapterIndex: Int,
     reason: String,
     prefetchKey: String,
+    generation: Long,
 ) {
-    val retry = (onDemandPrefetchRetryCount[prefetchKey] ?: 0) + 1
+    if (activeReaderActivity() == null) return
+    var retry = 0
+    if (!onDemandRefreshCoordinator.inGeneration(generation) {
+        retry = (onDemandPrefetchRetryCount[prefetchKey] ?: 0) + 1
+        if (retry <= ON_DEMAND_PREFETCH_429_RETRIES) onDemandPrefetchRetryCount[prefetchKey] = retry
+        else onDemandPrefetchRetryCount.remove(prefetchKey)
+    }) return
     if (retry > ON_DEMAND_PREFETCH_429_RETRIES) {
-        onDemandPrefetchRetryCount.remove(prefetchKey)
-        XposedBridge.log("$LOG_PREFIX on-demand prefetch abandoned after rate limit index=${chapterIndex + 1}")
+        HookRuntime.log("$LOG_PREFIX on-demand prefetch abandoned after rate limit index=${chapterIndex + 1}")
         return
     }
-    onDemandPrefetchRetryCount[prefetchKey] = retry
     val delayMs = ON_DEMAND_PREFETCH_429_RETRY_MS * retry
-    val generation = onDemandRefreshCoordinator.generation()
-    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed(
+    val presentation = onDemandRefreshCoordinator.presentation()
+    onDemandHandler.postDelayed(
         {
-            if (!onDemandRefreshCoordinator.isGeneration(generation)) return@postDelayed
+            if (!onDemandRefreshCoordinator.isGeneration(generation) ||
+                !onDemandRefreshCoordinator.isPresentation(presentation) || activeReaderActivity() == null) return@postDelayed
             prefetchOnlineOnDemandChapter(
                 bookDir = bookDir,
                 anchorIndex = anchorIndex,
@@ -130,31 +142,24 @@ internal fun ReaderHook.scheduleOnDemandPrefetchRetry(
         },
         delayMs,
     )
-    XposedBridge.log(
+    HookRuntime.log(
         "$LOG_PREFIX on-demand prefetch retry scheduled index=${chapterIndex + 1} " +
             "attempt=$retry delay=${delayMs}ms",
     )
 }
 
 internal fun ReaderHook.interceptOnDemandChapterStep(
-    param: XC_MethodHook.MethodHookParam,
+    param: HookCallback.Call,
     intent: Any,
     step: Int,
 ): Boolean {
     val bookDir = currentEpubRoot() ?: return false
     val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return false
-    val viewModel = param.thisObject
-    val uiState = callNoArg(viewModel, "getUiState")
-        ?.let { callNoArg(it, "getValue") }
-        ?: return false
-    val catalogIndex = (callNoArg(uiState, "getCatalogIndex") as? Number)?.toInt() ?: 0
-    val target = runCatching {
-        XposedHelpers.callMethod(epub, "findChapterByStep", catalogIndex, step)
-    }.onFailure { error ->
-        XposedBridge.log("$LOG_PREFIX on-demand chapter-step resolve failed: ${error.stackTraceToString()}")
-    }.getOrNull() ?: return false
-    val chapter = callNoArg(target, "getFirst") ?: return false
-    val href = callNoArg(chapter, "getHref")?.toString().orEmpty()
+    val viewModel = param.thisObject ?: return false
+    val host = requireNotNull(com.reamicro.fix.core.HostEpubRuntimeBindings.current)
+    val catalogIndex = host.int("state.catalogIndex", host.state(viewModel)) ?: 0
+    val chapter = host.list("epub.chapters", epub).getOrNull(catalogIndex + step) ?: return false
+    val href = host.text("chapter.href", chapter)
     val refreshKey = onDemandRefreshKey(bookDir, href)
     val request = OnlineOnDemandBridge.pendingRequest(bookDir, href)
         ?: if (refreshKey in onDemandRefreshPending) {
@@ -163,7 +168,7 @@ internal fun ReaderHook.interceptOnDemandChapterStep(
             null
         }
         ?: return false
-    XposedBridge.log(
+    HookRuntime.log(
         "$LOG_PREFIX on-demand chapter-step pending step=$step catalog=$catalogIndex " +
             "target=${request.chapterIndex + 1} href=$href",
     )
@@ -171,15 +176,17 @@ internal fun ReaderHook.interceptOnDemandChapterStep(
         param = param,
         intent = intent,
         request = request,
-        targetCfi = callNoArg(chapter, "getCfi"),
+        targetCfi = host.chapterCfi(chapter),
         replayLabel = if (step > 0) "OnDemandJumpNextChapter" else "OnDemandJumpPreviousChapter",
     )
 }
 
-internal fun ReaderHook.interceptOnDemandJump(param: XC_MethodHook.MethodHookParam, intent: Any): Boolean {
+internal fun ReaderHook.interceptOnDemandJump(param: HookCallback.Call, intent: Any): Boolean {
     val bookDir = currentEpubRoot() ?: return false
-    val chapter = callNoArg(intent, "getChapter") ?: return false
-    val href = callNoArg(chapter, "getHref")?.toString().orEmpty()
+    val lifecycle = requireNotNull(com.reamicro.fix.core.HostReaderLifecycleBindings.current)
+    val host = requireNotNull(com.reamicro.fix.core.HostEpubRuntimeBindings.current)
+    val chapter = lifecycle.field("JumpChapter.chapter").get(intent) ?: return false
+    val href = host.text("chapter.href", chapter)
     val refreshKey = onDemandRefreshKey(bookDir, href)
     val request = OnlineOnDemandBridge.pendingRequest(bookDir, href)
         ?: if (refreshKey in onDemandRefreshPending) {
@@ -188,22 +195,22 @@ internal fun ReaderHook.interceptOnDemandJump(param: XC_MethodHook.MethodHookPar
             null
         }
         ?: return false
-    XposedBridge.log(
+    HookRuntime.log(
         "$LOG_PREFIX on-demand catalog jump pending " +
-            "index=${callNoArg(intent, "getIndex") ?: -1} href=$href " +
+            "index=${lifecycle.field("JumpChapter.index").getInt(intent)} href=$href " +
             "spine=${request.chapterIndex} target=${request.chapterIndex + 1}",
     )
     return interceptOnDemandRequest(
         param = param,
         intent = intent,
         request = request,
-        targetCfi = callNoArg(chapter, "getCfi"),
+        targetCfi = host.chapterCfi(chapter),
         replayLabel = "OnDemandJumpChapter",
     )
 }
 
 internal fun ReaderHook.interceptOnDemandRequest(
-    param: XC_MethodHook.MethodHookParam,
+    param: HookCallback.Call,
     intent: Any,
     request: OnlineOnDemandChapterRequest,
     targetCfi: Any?,
@@ -218,21 +225,30 @@ internal fun ReaderHook.interceptOnDemandRequest(
         ?: return false
     onDemandJumpLease = lease
     val accepted = OnlineOnDemandBridge.request(request) { result ->
-        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-            if (!isRefreshSessionCurrent(session) || !onDemandRefreshCoordinator.isCurrent(lease)) return@post
+        if (result.isSuccess) markOnDemandDownloadReady(session.generation, result.request)
+        if (!isRefreshSessionCurrent(session)) {
+            onDemandRefreshCoordinator.release(lease)
+            return@request
+        }
+        val posted = onDemandHandler.post {
+            if (!isRefreshSessionCurrent(session) || !onDemandRefreshCoordinator.isCurrent(lease)) {
+                onDemandRefreshCoordinator.release(lease)
+                return@post
+            }
             if (result.isSuccess) {
                 if (replayLabel == "OnDemandJumpChapter") prefetchOnlineOnDemandNeighborhood(result.request)
                 replayOnDemandJumpWhenSpineCacheReady(session, lease, result.request, targetCfi, intent, replayLabel)
             } else {
                 onDemandRefreshCoordinator.release(lease)
-                XposedBridge.log("$LOG_PREFIX on-demand chapter failed: ${result.error?.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX on-demand chapter failed: ${result.error?.stackTraceToString()}")
                 activityProvider()?.let { Toast.makeText(it, "章节下载失败：${result.error?.message.orEmpty()}", Toast.LENGTH_LONG).show() }
             }
         }
+        if (!posted) onDemandRefreshCoordinator.release(lease)
     }
     if (!accepted) { onDemandRefreshCoordinator.release(lease); return false }
     param.result = null
-    activityProvider()?.let { activity -> activity.runOnUiThread {
+    activityProvider()?.let { activity -> activity.runOnModuleUiThread {
         if (isRefreshSessionCurrent(session)) Toast.makeText(activity, "正在下载：${request.chapter.title}", Toast.LENGTH_SHORT).show()
     } }
     return true
@@ -260,20 +276,20 @@ internal fun ReaderHook.replayOnDemandJumpWhenSpineCacheReady(
                 rebuildOnDemandVirtualWindow(session, cfi, spine, current)
             }
             refreshOnMain(session, current) {
-                onDemandRefreshPending.remove(onDemandRefreshKey(request.bookDir, request.chapter.href))
                 try {
                     replayingOnDemandJump.set(true)
                     dispatchReaderIntent(lastCatalogContext?.intentReceiver, session.viewModel, intent, replayLabel)
-                    XposedBridge.log("$LOG_PREFIX on-demand virtual window rebuilt index=${request.chapterIndex + 1} page=${rebuiltPage ?: -1}")
+                    onDemandRefreshPending.remove(onDemandRefreshKey(request.bookDir, request.chapter.href))
+                    HookRuntime.log("$LOG_PREFIX on-demand virtual window rebuilt index=${request.chapterIndex + 1} page=${rebuiltPage ?: -1}")
                 } finally { replayingOnDemandJump.remove() }
                 targetUnit()
             }
         } catch (error: Throwable) {
             if (!current() || error is InterruptedException || error is java.util.concurrent.CancellationException) {
-                XposedBridge.log("$LOG_PREFIX on-demand jump cancelled: session/target changed")
+                HookRuntime.log("$LOG_PREFIX on-demand jump cancelled: session/target changed")
             } else {
-                XposedBridge.logError("$LOG_PREFIX on-demand jump refresh failed", error)
-                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
+                HookRuntime.logError("$LOG_PREFIX on-demand jump refresh failed", error)
+                onDemandHandler.post {
                     if (isRefreshSessionCurrent(session) && onDemandJumpLease === lease) activityProvider()?.let {
                         Toast.makeText(it, "章节已下载，但分页未就绪，请重新点击目录", Toast.LENGTH_LONG).show()
                     }
@@ -286,11 +302,19 @@ internal fun ReaderHook.replayOnDemandJumpWhenSpineCacheReady(
 internal fun ReaderHook.onDemandRefreshKey(bookDir: File, href: String): String =
     "${bookDir.canonicalPath}|${href.trim().substringBefore('#').replace('\\', '/')}"
 
+private fun ReaderHook.markOnDemandDownloadReady(generation: Long, request: OnlineOnDemandChapterRequest) {
+    val key = onDemandRefreshKey(request.bookDir, request.chapter.href)
+    onDemandRefreshCoordinator.inGeneration(generation) { onDemandRefreshPending += key }
+}
+
 internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page: Any) {
+    if (activeReaderActivity() == null) return
     if (Looper.myLooper() != Looper.getMainLooper()) {
         val generation = onDemandRefreshCoordinator.generation()
-        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-            if (onDemandRefreshCoordinator.isGeneration(generation)) scheduleOnDemandVisiblePageRefresh(viewModel, page)
+        val presentation = onDemandRefreshCoordinator.presentation()
+        onDemandHandler.post {
+            if (onDemandRefreshCoordinator.isGeneration(generation) &&
+                onDemandRefreshCoordinator.isPresentation(presentation)) scheduleOnDemandVisiblePageRefresh(viewModel, page)
         }
         return
     }
@@ -322,20 +346,28 @@ internal fun ReaderHook.scheduleOnDemandVisiblePageRefresh(viewModel: Any, page:
         return
     }
     val accepted = OnlineOnDemandBridge.request(request) { result ->
-        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-            if (!isRefreshSessionCurrent(session) || !onDemandRefreshCoordinator.isCurrent(lease)) return@post
+        if (result.isSuccess) markOnDemandDownloadReady(session.generation, result.request)
+        if (!isRefreshSessionCurrent(session)) {
+            onDemandRefreshCoordinator.release(lease)
+            return@request
+        }
+        val posted = onDemandHandler.post {
+            if (!isRefreshSessionCurrent(session) || !onDemandRefreshCoordinator.isCurrent(lease)) {
+                onDemandRefreshCoordinator.release(lease)
+                return@post
+            }
             if (result.isSuccess) {
-                onDemandRefreshPending += refreshKey
-                XposedBridge.log("$LOG_PREFIX on-demand visible chapter downloaded index=${request.chapterIndex + 1}")
+                HookRuntime.log("$LOG_PREFIX on-demand visible chapter downloaded index=${request.chapterIndex + 1}")
                 refreshOnDemandVisiblePageWhenSpineCacheReady(session, lease, result.request, refreshKey)
             } else {
                 onDemandRefreshCoordinator.release(lease)
-                XposedBridge.logError("$LOG_PREFIX on-demand visible chapter failed", result.error)
+                HookRuntime.logError("$LOG_PREFIX on-demand visible chapter failed", result.error)
             }
         }
+        if (!posted) onDemandRefreshCoordinator.release(lease)
     }
     if (!accepted) onDemandRefreshCoordinator.release(lease)
-    else XposedBridge.log("$LOG_PREFIX on-demand visible chapter requested index=${location.metadataIndex + 1} spine=${location.hostSpineIndex}")
+    else HookRuntime.log("$LOG_PREFIX on-demand visible chapter requested index=${location.metadataIndex + 1} spine=${location.hostSpineIndex}")
 }
 
 internal fun ReaderHook.refreshOnDemandVisiblePageWhenSpineCacheReady(
@@ -359,7 +391,7 @@ internal fun ReaderHook.refreshOnDemandVisiblePageWhenSpineCacheReady(
             } ?: return@submit
             val location = onDemandPageLocation(session.root, anchorPage) ?: return@submit
             if (location.metadataIndex != request.chapterIndex) return@submit
-            val cfi = callNoArg(anchorPage, "getStart") ?: return@submit
+            val cfi = com.reamicro.fix.core.HostEpubRuntimeBindings.current?.value("page.start", anchorPage) ?: return@submit
             val page = rebuildOnDemandVirtualWindow(session, cfi, location.hostSpineIndex, current, anchorPage)
             refreshOnMain(session, current) {
 
@@ -367,24 +399,24 @@ internal fun ReaderHook.refreshOnDemandVisiblePageWhenSpineCacheReady(
                 val delivered = emitOnDemandPagerCorrection(session.viewModel, page)
                 onDemandRefreshPending.remove(refreshKey)
                 onDemandVisibleBusyRetries = 0
-                XposedBridge.log("$LOG_PREFIX on-demand visible page refreshed index=${request.chapterIndex + 1} page=$page correction=$delivered")
+                HookRuntime.log("$LOG_PREFIX on-demand visible page refreshed index=${request.chapterIndex + 1} page=$page correction=$delivered")
                 targetUnit()
             }
         } catch (error: Throwable) {
             when {
                 !current() || error is InterruptedException || error is java.util.concurrent.CancellationException ->
-                    XposedBridge.log("$LOG_PREFIX on-demand visible refresh cancelled: session/viewport changed")
-                error is ReaderRefreshLockBusy -> com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
+                    HookRuntime.log("$LOG_PREFIX on-demand visible refresh cancelled: session/viewport changed")
+                error is ReaderRefreshLockBusy -> onDemandHandler.post {
                     if (isVisibleSession()) {
                         onDemandVisibleBusyRetries++
-                        XposedBridge.log("$LOG_PREFIX on-demand visible refresh deferred: host loading retry=$onDemandVisibleBusyRetries")
-                        if (onDemandVisibleBusyRetries < 3) com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
+                        HookRuntime.log("$LOG_PREFIX on-demand visible refresh deferred: host loading retry=$onDemandVisibleBusyRetries")
+                        if (onDemandVisibleBusyRetries < 3) onDemandHandler.postDelayed({
                             if (isVisibleSession()) currentReaderPage()?.let { scheduleOnDemandVisiblePageRefresh(session.viewModel, it) }
                         }, 500L)
-                        else XposedBridge.logError("$LOG_PREFIX on-demand visible refresh waiting exhausted; turn away/back to retry")
+                        else HookRuntime.logError("$LOG_PREFIX on-demand visible refresh waiting exhausted; turn away/back to retry")
                     }
                 }
-                else -> XposedBridge.logError("$LOG_PREFIX on-demand visible page refresh failed", error)
+                else -> HookRuntime.logError("$LOG_PREFIX on-demand visible page refresh failed", error)
             }
         }
     }
@@ -399,8 +431,7 @@ internal fun ReaderHook.onDemandPageLocation(
         ?: return null
     val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return null
     val table = onDemandSpineTable(epub) ?: return null
-    val cfi = callString(page, "getAnchor")
-        .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
+    val cfi = requireNotNull(com.reamicro.fix.core.HostEpubRuntimeBindings.current).anchor(page)
     val hostSpineIndex = OnlineOnDemandPrefetchPlanner.hostSpinePositionFromCfi(cfi, table.positions)
         ?: return null
 
@@ -434,7 +465,8 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
     visiblePage: Any? = null,
 ): Int {
     requireRefreshCurrent(current)
-    val mutex = XposedHelpers.getObjectField(session.viewModel, "virtualPageLoadMutex")
+    val host = requireNotNull(HostReaderWindowBindings.current) { "Reader window contract unavailable" }
+    val mutex = host.field("vm.mutex").get(session.viewModel)
         ?: error("宿主缺少章节加载锁，未修改分页缓存")
     val lease = com.reamicro.fix.core.HostMutex(mutex, Any())
     var locked = false
@@ -453,10 +485,10 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
         val method = findOnDemandRecenterMethod(session.viewModel, session.epub, anchorCfi)
             ?: error("宿主缺少 recenterVirtualWindow")
         if (visiblePage != null && selectionWindowHookInstalled) {
-            val pages = XposedHelpers.getObjectField(session.viewModel, "virtualPages") as? Map<*, *>
+            val pages = host.pages(session.viewModel)
             val slot = (pages?.entries?.firstOrNull { it.value === visiblePage }?.key as? Number)?.toInt()
-            val mapping = XposedHelpers.getObjectField(session.viewModel, "virtualToReal") as? Map<*, *>
-            val local = slot?.let { mapping?.get(it) }?.let { callNoArg(it, "getSecond") as? Number }?.toInt()
+            val mapping = host.forward(session.viewModel)
+            val local = slot?.let { mapping[it] }?.let { host.pair(it).second }
             if (slot != null && local != null) {
                 window = ReaderSelectionWindow(session.viewModel, slot, anchorSpineIndex, local, anchorCfi)
                 selectionWindow = window
@@ -468,10 +500,10 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
         } as? Number)?.toInt() ?: error("宿主重排没有返回有效页码")
         val target = if (window?.applied == true) window!!.visibleSlot else rebuilt
 
-        val pages = XposedHelpers.getObjectField(session.viewModel, "virtualPages") as? Map<*, *>
+        val pages = host.pages(session.viewModel)
         val targetPage = pages?.get(target) ?: error("重排目标页不存在")
         val table = onDemandSpineTable(session.epub) ?: error("宿主章节列表不可用")
-        val targetCfi = callNoArg(targetPage, "getStart")?.toString().orEmpty()
+        val targetCfi = host.start(targetPage).toString()
         val actualSpine = OnlineOnDemandPrefetchPlanner.hostSpinePositionFromCfi(targetCfi, table.positions)
         check(actualSpine == anchorSpineIndex) {
             "重排章节校验失败 expected=$anchorSpineIndex actual=$actualSpine；未发送翻页通知"
@@ -485,35 +517,15 @@ internal fun ReaderHook.rebuildOnDemandVirtualWindow(
 
 internal fun ReaderHook.emitOnDemandPagerCorrection(viewModel: Any, virtualPage: Int): Boolean =
     runCatching {
-        val correction = XposedHelpers.getObjectField(viewModel, "_pagerCorrection")
-        XposedHelpers.callMethod(correction, "tryEmit", Integer.valueOf(virtualPage)) == true
-    }.onFailure { XposedBridge.logError("$LOG_PREFIX on-demand pager correction failed", it) }.getOrDefault(false)
+        requireNotNull(HostReaderWindowBindings.current).emitCorrection(viewModel, virtualPage)
+    }.onFailure { HookRuntime.logError("$LOG_PREFIX on-demand pager correction failed", it) }.getOrDefault(false)
 
 internal fun ReaderHook.findOnDemandRecenterMethod(viewModel: Any, epub: Any, anchorCfi: Any): Method? {
-    val candidates = mutableListOf<Method>()
-    var type: Class<*>? = viewModel.javaClass
-    while (type != null) {
-        candidates += runCatching { type.declaredMethods.asList() }.getOrDefault(emptyList())
-        type = type.superclass
+    val host = HostReaderWindowBindings.current ?: return null
+    return host.method("recenter").takeIf {
+        host.type("vm").isInstance(viewModel) && host.type("epub").isInstance(epub) && host.type("cfi").isInstance(anchorCfi)
     }
-    fun Method.matchesSignature(): Boolean {
-        val parameters = parameterTypes
-        return (parameters.size == 4 || parameters.size == 5) &&
-            parameters[0] == Int::class.javaPrimitiveType &&
-            parameters[1].isAssignableFrom(epub.javaClass) &&
-            parameters[2].isAssignableFrom(anchorCfi.javaClass) &&
-            (if (parameters.size == 4) {
-                typeMatches(parameters[3], KOTLIN_CONTINUATION_CLASS)
-            } else {
-                parameters[3] == Boolean::class.javaPrimitiveType &&
-                    typeMatches(parameters[4], KOTLIN_CONTINUATION_CLASS)
-            })
-    }
-    return candidates.firstOrNull { it.hostNameMatches("recenterVirtualWindow") && it.matchesSignature() }
-        ?.apply { isAccessible = true }
-
 }
-
 internal fun invokeOnDemandRecenter(
     method: Method, target: Any, spine: Int, epub: Any, cfi: Any?, continuation: Any?,
 ): Any? = when (method.parameterTypes.size) {
@@ -524,6 +536,7 @@ internal fun invokeOnDemandRecenter(
 
 internal fun ReaderHook.isOnDemandSpineLoaded(viewModel: Any, spineIndex: Int): Boolean =
     runCatching {
-        val loadedSpines = XposedHelpers.getObjectField(viewModel, "loadedSpines") as? Set<*>
+        val host = requireNotNull(HostReaderWindowBindings.current)
+        val loadedSpines = host.field("vm.loaded").get(viewModel) as? Set<*>
         loadedSpines?.any { (it as? Number)?.toInt() == spineIndex } == true
     }.getOrDefault(false)

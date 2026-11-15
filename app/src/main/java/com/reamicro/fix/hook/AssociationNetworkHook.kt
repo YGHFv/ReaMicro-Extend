@@ -2,8 +2,8 @@ package com.reamicro.fix.hook
 
 import android.annotation.SuppressLint
 import com.reamicro.fix.association.network.AssociationNetworkScope
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.net.URL
 
 internal object AssociationNetworkHook {
@@ -28,8 +28,8 @@ internal object AssociationNetworkHook {
         policyClasses.forEach { policy ->
             runCatching {
                 val method = policy.getDeclaredMethod("isCleartextTrafficPermitted", String::class.java)
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                HookRuntime.hookMethod(method, object : HookCallback() {
+                    override fun before(param: Call) {
                         val host = param.args?.firstOrNull() as? String ?: return
                         if (AssociationNetworkScope.allowsHost(host)) param.result = true
                     }
@@ -40,8 +40,8 @@ internal object AssociationNetworkHook {
         runCatching {
             val filter = Class.forName("com.android.okhttp.HttpHandler\$CleartextURLFilter")
             val method = filter.getDeclaredMethod("checkURLPermitted", URL::class.java)
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     val url = param.args?.firstOrNull() as? URL ?: return
                     if (AssociationNetworkScope.allowsUrl(url)) param.result = null
                 }
@@ -50,9 +50,9 @@ internal object AssociationNetworkHook {
         }
         installed = count > 0
         if (installed) {
-            XposedBridge.log("ReaMicro LSP association HTTP search scope installed: $count")
+            HookRuntime.log("ReaMicro LSP association HTTP search scope installed: $count")
         } else {
-            XposedBridge.logError("ReaMicro LSP association HTTP search scope unavailable; host may reject FanQie HTTP requests")
+            HookRuntime.logError("ReaMicro LSP association HTTP search scope unavailable; host may reject FanQie HTTP requests")
         }
     }
 }

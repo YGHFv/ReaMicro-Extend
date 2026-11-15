@@ -421,8 +421,11 @@ async def rollback_package(
 
 @router.get("/v1/packages/{package_kind}/{package_id}/download")
 async def package_download(package_kind: str, package_id: str, _: None = Depends(authenticated)) -> FileResponse:
-    if not package_kind.replace("_", "").replace("-", "").isalnum() or not package_id.replace("_", "").replace("-", "").isalnum():
-        raise HTTPException(status_code=400, detail=response(code="INVALID_PACKAGE", message="内容包标识无效"))
+    try:
+        package_kind = safe_package_segment(package_kind)
+        package_id = safe_package_segment(package_id)
+    except HTTPException:
+        raise HTTPException(status_code=400, detail=response(code="INVALID_PACKAGE", message="内容包标识无效")) from None
     manifest_path = runtime.PACKAGE_ROOT / package_kind / package_id / "manifest.json"
     if not manifest_path.is_file():
         raise HTTPException(status_code=404, detail=response(code="NOT_FOUND", message="内容包不存在"))

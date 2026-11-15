@@ -21,7 +21,6 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -33,6 +32,7 @@ import com.reamicro.fix.core.InjectedModuleContext
 
 internal class ReaderThoughtSelectionEditor(
     private val activity: Activity, private val initialText: String,
+    private val fonts: ReaderSelectionEditorFonts,
     private val onSave: (String, ReaderSelectionEditDialog) -> Unit,
 ) : Dialog(InjectedModuleContext.create(activity)) {
     private val owner = ModuleComposeOwner(activity) { dismiss() }
@@ -58,6 +58,7 @@ internal class ReaderThoughtSelectionEditor(
                 setViewTreeLifecycleOwner(owner)
                 setViewTreeSavedStateRegistryOwner(owner)
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+                owner.attach(this)
                 setContent { this@ReaderThoughtSelectionEditor.EditorContent() }
             }
             compose = view
@@ -76,9 +77,9 @@ internal class ReaderThoughtSelectionEditor(
             setOnDismissListener { release() }
             super.show()
             window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        } catch (e: Exception) {
-            if (isShowing) runCatching { dismiss() }
-            release()
+        } catch (e: Throwable) {
+            if (isShowing) runCatching { dismiss() }.onFailure(e::addSuppressed)
+            runCatching { release() }.onFailure(e::addSuppressed)
             throw e
         }
     }
@@ -86,28 +87,34 @@ internal class ReaderThoughtSelectionEditor(
     private fun release() {
         if (closed) return
         closed = true
-        if (observingConfiguration) {
-            activity.unregisterComponentCallbacks(configuration)
-            observingConfiguration = false
-        }
-        compose?.disposeComposition()
+        val view = compose
         compose = null
-        owner.close()
+        try {
+            view?.disposeComposition()
+        } finally {
+            try {
+                owner.close()
+            } finally {
+                if (observingConfiguration) {
+                    observingConfiguration = false
+                    activity.unregisterComponentCallbacks(configuration)
+                }
+            }
+        }
     }
 
     @Composable private fun EditorContent() {
 
         val revision = themeRevision
-        val p = StructureHome130Style.palette(activity, StructureHome130Style.isDark(activity))
-        val fonts = remember(revision) { StructureHome130Style.fonts(activity) }
-        val uiFont = remember(revision) { EmbeddedHostUi.uiTypeface(activity)?.let { FontFamily(it) } }
+        val p = HostEmbeddedStyle.palette(activity, HostEmbeddedStyle.isDark(activity))
+        val typography = remember(revision, fonts) { HostEmbeddedStyle.typography(fonts.native, fonts.ui) }
         val scale = EmbeddedHostUi.scale(activity)
         var text by rememberSaveable(stateSaver = TextFieldValue.Saver) {
             mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length)))
         }
         val focus = remember { FocusRequester() }
         val keyboard = LocalSoftwareKeyboardController.current
-        MaterialTheme(colorScheme = p.controlsScheme(), typography = StructureHome130Style.typography(fonts, uiFont)) {
+        MaterialTheme(colorScheme = p.controlsScheme(), typography = typography) {
 
             Box(Modifier.fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))

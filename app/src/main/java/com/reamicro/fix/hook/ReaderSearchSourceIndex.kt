@@ -1,7 +1,7 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.hook.reader.*
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.security.MessageDigest
 
 internal fun ReaderHook.hostIndexedSearchText(raw: String, base: CfiBase?): IndexedSearchText {
@@ -11,7 +11,7 @@ internal fun ReaderHook.hostIndexedSearchText(raw: String, base: CfiBase?): Inde
         builder.index(raw, base)
     }.getOrElse {
         if (it is InterruptedException || it is java.util.concurrent.CancellationException) throw it
-        XposedBridge.logError("ReaMicro search source indexing failed type=${it.javaClass.simpleName}", it)
+        HookRuntime.logError("ReaMicro search source indexing failed type=${it.javaClass.simpleName}", it)
 
         throw IllegalStateException("正文索引失败，请确认模块与阅微版本匹配后重新搜索", it)
     }

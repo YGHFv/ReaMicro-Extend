@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="epub_structure_metadata">Metadata</string>
+    <string name="epub_structure_toc">Table of contents</string>
+    <string name="epub_structure_css">Stylesheet</string>
+    <string name="epub_structure_font">Font</string>
+    <string name="epub_structure_image">Image</string>
+    <string name="epub_structure_cover">Cover</string>
+    <string name="epub_structure_bookmarks">Bookmark file</string>
+    <string name="epub_structure_container">Container file</string>
+    <string name="epub_structure_content">%1$s content</string>
+    <string name="epub_structure_unknown_file">Unknown file</string>
+    <string name="epub_structure_unknown_format">Unknown format%1$s</string>
+    <string name="epub_structure_unsupported">Preview is not available for this format</string>
+    <string name="epub_structure_editor_title">Edit</string>
+    <string name="epub_structure_editor_confirm">Confirm changes</string>
+    <string name="epub_structure_search_title">Search files</string>
+    <string name="epub_structure_search_hint">Enter a filename, content name, chapter title, or relative path</string>
+    <string name="epub_structure_search_confirm">Go to file</string>
+    <string name="epub_structure_search_empty">No matching files</string>
+    <string name="epub_structure_search_ambiguous">Multiple matches found. Choose a file below or enter the full path</string>
+    <string name="epub_structure_search_count">Found %1$d files</string>
+    <string name="epub_structure_banner">Banner</string>
+</resources>

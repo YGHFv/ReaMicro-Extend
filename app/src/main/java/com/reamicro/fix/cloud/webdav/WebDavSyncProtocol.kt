@@ -32,9 +32,10 @@ internal object WebDavSyncProtocol {
     }
 
     fun requireStrongEtag(value: String?): String {
-        val tag = value?.trim().orEmpty()
+        val tag = value?.trim(' ', '\t').orEmpty()
+        // RFC 9110 entity-tag is one quoted opaque value, not a list or a quoted-string.
         require(tag.length >= 2 && tag.startsWith('"') && tag.endsWith('"') &&
-            !tag.startsWith("W/") && tag.none { it == '\r' || it == '\n' }) {
+            tag.substring(1, tag.lastIndex).all { it == '\u0021' || it in '\u0023'..'\u007e' || it in '\u0080'..'\u00ff' }) {
             "WebDAV 服务必须支持强 ETag 和条件写入，不能安全同步到此服务"
         }
         return tag

@@ -3,10 +3,12 @@ package com.reamicro.fix.cloud.root
 import com.reamicro.fix.cloud.local.LocalTask
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskRepository
+import com.reamicro.fix.cloud.local.LocalTaskRuntimeMerge
 import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.cloud.local.appendTaskNotification
 import com.reamicro.fix.cloud.local.appendLocalTaskRecord
 import com.reamicro.fix.cloud.local.applyLocalTaskExecution
+import com.reamicro.fix.cloud.local.applyLocalTaskRecordDeletionCounts
 import com.reamicro.fix.cloud.local.clearLocalTaskRecordsBefore
 import com.reamicro.fix.cloud.local.localTaskFromJson
 import com.reamicro.fix.cloud.local.localTaskRuntimeState
@@ -41,7 +43,7 @@ internal class RootTaskRepository(
     override fun recordState(accountId: String, taskType: String, state: JSONObject) {
         access(write = true) { root ->
             val current = task(root, accountId, taskType) ?: return@access
-            for (key in LocalTaskStore.RUNTIME_STATE_KEYS) if (state.has(key)) current.put(key, state.get(key))
+            LocalTaskRuntimeMerge.patch(current, state)
         }
     }
     override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean) {
@@ -67,6 +69,7 @@ internal class RootTaskRepository(
                 incoming.keys().forEach { accountId ->
                     val source = incoming.optJSONObject(accountId) ?: return@forEach
                     val target = account(root, accountId) ?: JSONObject().also { accounts(root).put(accountId, it) }
+                    applyLocalTaskRecordDeletionCounts(target, source)
                     clearLocalTaskRecordsBefore(target, source.optLong("recordsClearedAt"))
                     val sourceTasks = source.optJSONObject("tasks") ?: JSONObject()
                     val targetTasks = target.optJSONObject("tasks") ?: JSONObject().also { target.put("tasks", it) }
@@ -92,6 +95,7 @@ internal class RootTaskRepository(
 
     fun requestRun(request: JSONObject) {
         access(write = true) { root ->
+            check(root.optBoolean("enabled") && moduleEnabled()) { "Root 执行已停止，拒绝排入旧请求" }
             val requests = root.optJSONArray("requests") ?: JSONArray()
             require(requests.length() < 32) { "待执行请求过多，请稍后重试" }
             requests.put(JSONObject(request.toString()))
@@ -157,11 +161,15 @@ internal class RootTaskRepository(
         RandomAccessFile(File(directory, "state.lock"), "rw").use { lockFile ->
             lockFile.channel.lock().use {
                 val stateFile = File(directory, "state.json")
-                val root = if (stateFile.isFile) JSONObject(stateFile.readText(Charsets.UTF_8)) else JSONObject().put("schema", SCHEMA)
+                val original = if (stateFile.isFile) stateFile.readText(Charsets.UTF_8) else null
+                val root = if (original != null) JSONObject(original) else JSONObject().put("schema", SCHEMA)
                 val result = block(root)
                 if (write) {
-                    atomicWrite("state.json", root.toString())
-                    atomicWrite("next-run-at", nextTaskAt(root).let { if (it <= 0L) 0L else (it / 1000L).coerceAtLeast(1L) }.toString())
+                    val updated = root.toString()
+                    if (updated != original) atomicWrite("state.json", updated)
+                    val next = nextTaskAt(root).let { if (it <= 0L) 0L else (it / 1000L).coerceAtLeast(1L) }.toString()
+                    val schedule = File(directory, "next-run-at")
+                    if (!schedule.isFile || schedule.readText(Charsets.UTF_8) != next) atomicWrite("next-run-at", next)
                 }
                 result
             }

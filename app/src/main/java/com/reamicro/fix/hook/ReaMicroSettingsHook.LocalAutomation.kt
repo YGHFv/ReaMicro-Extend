@@ -1,9 +1,7 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-
-import android.app.Dialog
 import android.text.InputType
 import android.widget.TextView
 import com.reamicro.fix.cloud.api.ApiServerClient
@@ -17,7 +15,7 @@ import com.reamicro.fix.cloud.local.mergeLocalTaskRecordViews
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.hook.settings.*
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import org.json.JSONObject
 
 private const val LOCAL_AUTOMATION_LOG_PREFIX = "[ReaMicroFix/LocalAutomation]"
@@ -164,9 +162,9 @@ private fun ReaMicroSettingsHook.openLocalAutomationRecordsDialog() {
         showToast("请先在阅微登录账号")
         return
     }
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "任务记录", colors))
         val status = TextView(activity).apply {
@@ -314,8 +312,7 @@ private fun ReaMicroSettingsHook.renderLocalAutomationTaskSwitch(
     val targetChecked = task?.enabled == true
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
+        setStateValue(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
     val checked = if (rememberedChecked != targetChecked && spec.taskType !in localAutomationUpdatingTaskTypes) {
@@ -335,7 +332,7 @@ private fun ReaMicroSettingsHook.renderLocalAutomationTaskSwitch(
         updateChecked(applied)
         targetUnit()
     }
-    renderAbiSwitch(checked, onCheckedChange, composer)
+    nativeUi.settingsSwitch(checked, onCheckedChange, composer)
 }
 
 private fun ReaMicroSettingsHook.setLocalAutomationTaskEnabled(
@@ -383,9 +380,9 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         return
     }
     val accountId = currentCredential.accountId
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, spec.title, colors))
         val account = TextView(activity).apply {
@@ -438,7 +435,8 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             SettingsDialogButtonRole.Neutral,
         ).apply {
             setOnClickListener {
-                com.reamicro.fix.ui.ModuleUiKit(activity).multiSelectDialog(
+                showNativeMultiSelectDialog(
+                    activity,
                     "禁当期物",
                     "点一下锁定期物禁止典当；清单来自当日期物与背包，可点「刷新期物清单」现拉一次",
                     pawnPropOptions,
@@ -450,7 +448,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                         } else {
                             val fetched = com.reamicro.fix.cloud.local.CloudTaskLocalRunner
                                 .fetchPawnPropCatalog(currentCredential.token)
-                            fetched.error?.let { XposedBridge.log("$LOCAL_AUTOMATION_LOG_PREFIX 期物清单部分缺失：$it") }
+                            fetched.error?.let { HookRuntime.log("$LOCAL_AUTOMATION_LOG_PREFIX 期物清单部分缺失：$it") }
                             refreshedPawnCatalog = fetched.catalog
                             val state = JSONObject().put(
                                 com.reamicro.fix.cloud.local.CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,
@@ -622,23 +620,30 @@ internal fun ReaMicroSettingsHook.disableLocalAutomationTask(accountId: String, 
             }
         }
     }.onFailure {
-        XposedBridge.log("$LOCAL_AUTOMATION_LOG_PREFIX disable local failed: ${it.message}")
+        HookRuntime.log("$LOCAL_AUTOMATION_LOG_PREFIX disable local failed: ${it.message}")
     }
 }
 
 internal fun ReaMicroSettingsHook.disableCloudAutomationTask(accountId: String, taskType: String) {
     val activity = activityProvider() ?: return
+    if (accountId.isBlank()) return
     val store = ApiServerSettingsStore { activity.applicationContext }
-    if (!store.get().enabled || store.get().baseUrl.isBlank()) return
-    val appContext = activity.applicationContext
+    val requestSettings = store.get().copy(hostAccountId = accountId)
+    if (!requestSettings.enabled || requestSettings.baseUrl.isBlank()) return
     com.reamicro.fix.reload.ModuleResources.thread {
         runCatching {
-            val manager = CloudTaskManager(ApiServerClient(store))
+            // Finish the account's local/cloud handoff even if the foreground changes meanwhile.
+            val manager = CloudTaskManager(ApiServerClient(store, requestSettings))
+            val credentialIds = manager.credentials().filter { it.accountId == accountId }.mapTo(hashSetOf()) { it.id }
             manager.list()
-                .filter { it.taskType == taskType && it.enabled }
+                .filter { it.taskType == taskType && it.enabled && it.credentialId in credentialIds }
                 .forEach { manager.pause(it.id) }
         }.onFailure {
-            XposedBridge.log("$LOCAL_AUTOMATION_LOG_PREFIX disable cloud failed: ${it.message}")
+            HookRuntime.log("$LOCAL_AUTOMATION_LOG_PREFIX disable cloud failed: ${it.message}")
+            activity.runOnModuleUiThread {
+                if (AccountHostRuntime.snapshot(activity)?.accountId?.toString() == accountId)
+                    showToast("本地任务已启用，停用对应云端任务失败，请刷新任务状态")
+            }
         }
     }.apply { isDaemon = true; start() }
 }
@@ -665,7 +670,5 @@ private fun ReaMicroSettingsHook.localAutomationVersionValue(): Int =
 private fun ReaMicroSettingsHook.bumpLocalAutomationVersion() {
     val state = localAutomationVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    setStateValue(state, value + 1)
 }

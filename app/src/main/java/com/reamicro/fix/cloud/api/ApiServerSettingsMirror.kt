@@ -2,7 +2,7 @@ package com.reamicro.fix.cloud.api
 
 import android.content.Context
 import android.content.Intent
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import org.json.JSONObject
 
 object ApiServerSettingsMirror {
@@ -24,7 +24,7 @@ object ApiServerSettingsMirror {
             )
             true
         }.onFailure {
-            XposedBridge.log("ReaMicro API settings mirror broadcast failed: ${it.message}")
+            HookRuntime.log("ReaMicro API settings mirror broadcast failed: ${it.message}")
         }.getOrDefault(false)
     }
 }

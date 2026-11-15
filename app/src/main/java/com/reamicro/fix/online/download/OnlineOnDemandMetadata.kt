@@ -170,8 +170,14 @@ internal object OnlineOnDemandMetadataStore {
 
     private val readCache = ConcurrentHashMap<String, ReadCacheEntry>()
 
-    fun <T> resourceEdit(bookDir: File, action: () -> T): T = synchronized(lockFor(bookDir)) {
-        require(readUnlocked(bookDir)?.chapters?.none { it.state == OnlineChapterState.DOWNLOADING } != false) {
+    fun <T> resourceEdit(
+        bookDir: File,
+        allowInterruptedDownloads: Boolean = false,
+        action: () -> T,
+    ): T = synchronized(lockFor(bookDir)) {
+        // Only a caller holding OnlineOnDemandBridge.withIdleBook may admit abandoned states.
+        require(allowInterruptedDownloads ||
+            readUnlocked(bookDir)?.chapters?.none { it.state == OnlineChapterState.DOWNLOADING } != false) {
             "章节正在下载，请下载结束后再编辑图书结构"
         }
         try { action() } finally { readCache.remove(cacheKey(bookDir)) }
@@ -195,20 +201,37 @@ internal object OnlineOnDemandMetadataStore {
             }
     }
 
-    fun write(bookDir: File, metadata: OnlineOnDemandMetadata) {
+    fun write(
+        bookDir: File, metadata: OnlineOnDemandMetadata,
+        commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {},
+    ) {
+        checkCurrent()
         synchronized(lockFor(bookDir)) {
-            writeUnlocked(bookDir, metadata)
+            checkCurrent()
+            writeUnlocked(bookDir, metadata, commit, checkCurrent)
         }
     }
 
     fun update(
         bookDir: File,
         transform: (OnlineOnDemandMetadata) -> OnlineOnDemandMetadata,
-    ): OnlineOnDemandMetadata = synchronized(lockFor(bookDir)) {
-        val current = readUnlocked(bookDir) ?: error("按需章节元数据不存在")
-        val updated = transform(current)
-        writeUnlocked(bookDir, updated)
-        updated
+    ): OnlineOnDemandMetadata = update(bookDir, { it() }, {}, transform)
+
+    fun update(
+        bookDir: File,
+        commit: (() -> Unit) -> Unit,
+        checkCurrent: () -> Unit = {},
+        transform: (OnlineOnDemandMetadata) -> OnlineOnDemandMetadata,
+    ): OnlineOnDemandMetadata {
+        checkCurrent()
+        return synchronized(lockFor(bookDir)) {
+            checkCurrent()
+            val current = readUnlocked(bookDir) ?: error("按需章节元数据不存在")
+            val updated = transform(current)
+            checkCurrent()
+            writeUnlocked(bookDir, updated, commit, checkCurrent)
+            updated
+        }
     }
 
     private fun readUnlocked(bookDir: File): OnlineOnDemandMetadata? =
@@ -217,23 +240,20 @@ internal object OnlineOnDemandMetadataStore {
             ?.readText(Charsets.UTF_8)
             ?.let(OnlineOnDemandMetadataCodec::decode)
 
-    private fun writeUnlocked(bookDir: File, metadata: OnlineOnDemandMetadata) {
+    private fun writeUnlocked(
+        bookDir: File, metadata: OnlineOnDemandMetadata,
+        commit: (() -> Unit) -> Unit, checkCurrent: () -> Unit,
+    ) {
+        checkCurrent()
         val target = file(bookDir).canonicalFile
-        target.parentFile?.mkdirs()
-        val temp = File(
-            target.parentFile,
-            "${target.name}.tmp-${System.nanoTime()}",
-        ).canonicalFile
-        temp.writeText(OnlineOnDemandMetadataCodec.encode(metadata), Charsets.UTF_8)
-        if (target.exists() && !target.delete()) {
-            temp.delete()
-            error("无法替换按需章节元数据：${target.name}")
+        try {
+            writeOnlineCompletionTextAtomically(
+                target, OnlineOnDemandMetadataCodec.encode(metadata), commit = commit, checkCurrent = checkCurrent,
+            )
+            checkCurrent()
+        } finally {
+            readCache.remove(cacheKey(bookDir))
         }
-        if (!temp.renameTo(target)) {
-            temp.copyTo(target, overwrite = true)
-            temp.delete()
-        }
-        readCache.remove(cacheKey(bookDir))
     }
 
     private fun lockFor(bookDir: File): Any =

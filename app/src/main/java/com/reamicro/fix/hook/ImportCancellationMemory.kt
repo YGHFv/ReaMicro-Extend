@@ -1,6 +1,6 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.util.concurrent.ConcurrentHashMap
 
 internal const val IMPORT_CANCELLATION_TTL_MS = 10 * 60_000L
@@ -51,15 +51,37 @@ internal fun importCancellationKeys(
     fileName.trim().takeIf { it.isNotBlank() }?.let { add("file:$it") }
 }
 
+internal data class ModuleDirectoryImportPlan(
+    val allowed: Boolean,
+    val uuid: String,
+    val title: String,
+    val token: Any? = null,
+)
+
 internal object ModuleImportPrecheck {
     @Volatile private var hook: ReaderImportOverwriteHook? = null
 
+    @Synchronized
     fun attach(hook: ReaderImportOverwriteHook) {
         this.hook = hook
     }
 
+    @Synchronized
+    fun detach(hook: ReaderImportOverwriteHook) {
+        if (this.hook === hook) this.hook = null
+    }
+
     fun precheck(epubFile: java.io.File, sourceUri: String): Boolean =
         hook?.precheckModuleImport(epubFile, sourceUri) ?: true
+
+    fun prepareDirectory(
+        directory: java.io.File, sourceUri: String, uuid: String, title: String, continuingUuid: String?,
+    ): ModuleDirectoryImportPlan = hook?.prepareModuleDirectoryImport(directory, sourceUri, uuid, title, continuingUuid)
+        ?: ModuleDirectoryImportPlan(true, uuid, title)
+
+    fun discard(plan: ModuleDirectoryImportPlan) {
+        hook?.discardModuleDirectoryImport(plan)
+    }
 }
 
 internal fun String.normalizedCancellationTitle(): String = trim().replace(Regex("\\s+"), " ")
@@ -70,7 +92,7 @@ internal object ImportCancellations {
     fun remember(uuid: String, title: String, uri: String, fileName: String, fileSize: Long): Boolean {
         val keys = importCancellationKeys(uuid, title, uri, fileName)
         val ok = memory.remember(keys)
-        XposedBridge.log(
+        HookRuntime.log(
             "ReaMicro LSP import cancellation remembered ok=$ok size=$fileSize keys=${keys.joinToString(" ").take(240)}",
         )
         return ok
@@ -79,7 +101,7 @@ internal object ImportCancellations {
     fun isCancelled(uuid: String, title: String, uri: String, fileName: String, fileSize: Long): Boolean {
         val keys = importCancellationKeys(uuid, title, uri, fileName)
         val hit = memory.isCancelled(keys)
-        XposedBridge.log(
+        HookRuntime.log(
             "ReaMicro LSP import cancellation lookup hit=$hit size=$fileSize keys=${keys.joinToString(" ").take(240)}",
         )
         return hit

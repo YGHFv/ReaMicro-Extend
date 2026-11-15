@@ -4,14 +4,20 @@ import android.content.Context
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.notification.CloudTaskNotifications
 import java.util.concurrent.atomic.AtomicBoolean
+import com.reamicro.fix.reload.TaskCancellation
 
 object LocalTaskRunner {
     private val running = AtomicBoolean(false)
+    @Volatile private var activeCancellation: TaskCancellation? = null
 
     fun runTaskNow(context: Context, accountId: String, taskType: String): String {
+        if (!ModuleTaskActivation.isEnabled(context)) return "补全计划已关闭"
         if (!running.compareAndSet(false, true)) return "任务正在执行，请稍后重试"
         val appContext = context.applicationContext
-        return try {
+        val cancellation = TaskCancellation.current()?.child() ?: TaskCancellation()
+        activeCancellation = cancellation
+        return try { cancellation.run {
+            if (!ModuleTaskActivation.isEnabled(appContext)) return@run "补全计划已关闭"
             if (com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(appContext)) {
                 com.reamicro.fix.cloud.root.RootTaskBridge.synchronize(appContext, requested = LocalTaskKey(accountId, taskType))
                 "已提交 Root 后台任务，请稍后查看任务记录"
@@ -22,8 +28,18 @@ object LocalTaskRunner {
                 retryNotifications(appContext)
                 result
             }
-        } finally {
+        } } finally {
+            activeCancellation = null
             running.set(false)
+        }
+    }
+
+    internal fun stopForModuleSwitch() {
+        activeCancellation?.cancel()
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (running.get()) {
+            check(System.nanoTime() < deadline) { "任务仍在停止，请稍后重试" }
+            Thread.sleep(20)
         }
     }
 
@@ -43,6 +59,7 @@ object LocalTaskRunner {
 
     @Synchronized
     internal fun retryNotifications(context: Context) {
+        if (!ModuleTaskActivation.isEnabled(context)) return
         val store = LocalTaskStore { context }
         val delivered = mutableMapOf<String, MutableSet<String>>()
         for (item in store.pendingNotifications()) {

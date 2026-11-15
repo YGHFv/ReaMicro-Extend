@@ -3,6 +3,7 @@ package com.reamicro.fix.online
 import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
+import com.reamicro.fix.association.network.HttpRequestPolicy
 
 object OnlineSourceTrxsCompat {
     private const val DEFAULT_API_BASE = "https://www.trxs666.com"
@@ -22,9 +23,7 @@ object OnlineSourceTrxsCompat {
 
     fun shouldAuthorize(source: OnlineSourceEntry, requestUrl: String): Boolean {
         if (!isSource(source) || requestUrl.isBlank()) return false
-        val apiHost = runCatching { java.net.URL(apiBase(source)).host }.getOrNull().orEmpty()
-        val requestHost = runCatching { java.net.URL(requestUrl).host }.getOrNull().orEmpty()
-        return apiHost.isNotBlank() && apiHost.equals(requestHost, ignoreCase = true)
+        return HttpRequestPolicy.sameOrigin(apiBase(source), requestUrl)
     }
 
     fun apiBase(source: OnlineSourceEntry): String {

@@ -45,7 +45,7 @@ import com.reamicro.fix.R
 import com.reamicro.fix.core.InjectedModuleContext
 import com.reamicro.fix.hook.reader.FullTextSearchResult
 import java.io.File
-import kotlinx.coroutines.Dispatchers
+import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.withContext
 
 internal class HostFullTextSearchDialog(
@@ -54,7 +54,7 @@ internal class HostFullTextSearchDialog(
     private val initialQuery:String,
     private val initialScroll:Int,
     private val initialScrollOffset:Int,
-    private val initialTheme:StructureHost232Colors.Snapshot?,
+    private val initialTheme:HostThemeColors.Snapshot?,
     private val fontSelection:()->String,
     private val onSearch:(String)->Unit,
     private val onChoose:(FullTextSearchResult,Int)->Boolean,
@@ -62,15 +62,20 @@ internal class HostFullTextSearchDialog(
 ):Dialog(InjectedModuleContext.create(activity),R.style.EpubFullScreenDialog) {
     private data class State(val keyword:String="",val results:List<FullTextSearchResult> = emptyList(),val searching:Boolean=false,val error:String?=null,val active:Int=-1)
     private var state by mutableStateOf(State())
-    private var darkHint by mutableStateOf(initialTheme?.dark ?: StructureHome130Style.isDark(activity))
+    private var darkHint by mutableStateOf(initialTheme?.dark ?: HostEmbeddedStyle.isDark(activity))
     private val owner=ModuleComposeOwner(activity){dismiss()}
     private var compose:ComposeView?=null
     private var closed=false
+    private var configurationRegistered=false
     private var firstVisible=initialScroll
     private var firstVisibleOffset=initialScrollOffset
     private var scrollResetEpoch by mutableIntStateOf(0)
+    private var configurationEpoch by mutableIntStateOf(0)
     private val callback=object:ComponentCallbacks {
-        override fun onConfigurationChanged(config:Configuration){darkHint=StructureHome130Style.isDark(activity)}
+        override fun onConfigurationChanged(config:Configuration){
+            darkHint=HostEmbeddedStyle.isDark(activity)
+            configurationEpoch++
+        }
         override fun onLowMemory()=Unit
     }
     fun render(keyword:String,results:List<FullTextSearchResult>,searching:Boolean,active:Int=-1,resetScroll:Boolean=false){
@@ -81,53 +86,81 @@ internal class HostFullTextSearchDialog(
     }
     fun error(message:String){if(!closed)state=state.copy(searching=false,error=message,results=emptyList())}
     override fun show() {
-        if(isShowing)return
-        if(activity.isFinishing || activity.isDestroyed)return
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-        owner.start()
-        val view=ComposeView(context).apply {
-            setViewTreeLifecycleOwner(owner);setViewTreeSavedStateRegistryOwner(owner)
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            setContent { this@HostFullTextSearchDialog.SearchContent() }
-        }
-        compose=view;setContentView(view)
-        window?.decorView?.apply {
-            setViewTreeLifecycleOwner(owner);setViewTreeSavedStateRegistryOwner(owner)
-            findViewById<android.view.View>(android.R.id.content)?.apply {setViewTreeLifecycleOwner(owner);setViewTreeSavedStateRegistryOwner(owner)}
-        }
-        setOnDismissListener {
-            if(!closed){closed=true;compose?.disposeComposition();compose=null;owner.close()
-                runCatching {activity.unregisterComponentCallbacks(callback)};onClosed(firstVisible,firstVisibleOffset)}
-        }
-        activity.registerComponentCallbacks(callback)
+        if(isShowing || closed || activity.isFinishing || activity.isDestroyed)return
         try {
-            val p=initialTheme ?: StructureHost232Colors.snapshot(activity,darkHint)
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setOnDismissListener { release() }
+            owner.start()
+            val view=ComposeView(context)
+            compose=view
+            view.apply {
+                setViewTreeLifecycleOwner(owner);setViewTreeSavedStateRegistryOwner(owner)
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+                owner.attach(this)
+                setContent { this@HostFullTextSearchDialog.SearchContent() }
+            }
+            setContentView(view)
+            window?.decorView?.apply {
+                setViewTreeLifecycleOwner(owner);setViewTreeSavedStateRegistryOwner(owner)
+                findViewById<android.view.View>(android.R.id.content)?.apply {setViewTreeLifecycleOwner(owner);setViewTreeSavedStateRegistryOwner(owner)}
+            }
+            activity.registerComponentCallbacks(callback)
+            configurationRegistered=true
+            val p=initialTheme ?: HostThemeColors.snapshot(activity,darkHint)
             configureEpubEdgeToEdgeWindow(window,p.pageArgb,p.dark)
             window?.setWindowAnimations(0)
             super.show()
+        } catch(error:Throwable) {
+            if(isShowing)runCatching { dismiss() }.onFailure(error::addSuppressed)
+            runCatching { release() }.onFailure(error::addSuppressed)
+            throw error
         }
-        catch(error:Exception){closed=true;view.disposeComposition();owner.close();activity.unregisterComponentCallbacks(callback);throw error}
+    }
+    private fun release() {
+        if(closed)return
+        closed=true
+        val view=compose
+        compose=null
+        try {
+            view?.disposeComposition()
+        } finally {
+            try {
+                owner.close()
+            } finally {
+                try {
+                    if(configurationRegistered) {
+                        configurationRegistered=false
+                        activity.unregisterComponentCallbacks(callback)
+                    }
+                } finally {
+                    onClosed(firstVisible,firstVisibleOffset)
+                }
+            }
+        }
     }
     @Composable private fun SearchContent() {
-        val native=remember(darkHint) {initialTheme?.takeIf {it.dark==darkHint} ?: StructureHost232Colors.snapshot(activity,darkHint)}
-        val palette=remember(native){StructureHome130Style.Palette(native)}
-        val selection=remember {fontSelection()}
-        val resources by produceState<ReaderSearchUiResources.TextResources?>(null, selection) {
-            value=withContext(Dispatchers.IO) {ReaderSearchUiResources.text(activity,selection)}
+        val native=remember(darkHint,configurationEpoch) {
+            initialTheme?.takeIf {configurationEpoch==0 && it.dark==darkHint}
+                ?: HostThemeColors.snapshot(activity,darkHint)
+        }
+        val palette=remember(native){HostEmbeddedStyle.Palette(native)}
+        val selection=remember(configurationEpoch) {fontSelection()}
+        val resources by produceState<ReaderSearchUiResources.TextResources?>(null, selection, configurationEpoch) {
+            value=withContext(ModuleUiRuntime.io) {ReaderSearchUiResources.text(activity,selection)}
         }
         LaunchedEffect(native){configureEpubEdgeToEdgeWindow(window,native.pageArgb,native.dark)}
         // 字体全部就绪后才首次测量列表，避免先用默认字体再替换造成跳动。
         val text=resources
         if(text==null){Box(Modifier.fillMaxSize().background(palette.content));return}
-        MaterialTheme(colorScheme=native.controlsScheme(),typography=StructureHome130Style.typography(text.fonts,text.family)) {
+        MaterialTheme(colorScheme=native.controlsScheme(),typography=HostEmbeddedStyle.typography(text.fonts,text.family)) {
             val keyboard=LocalSoftwareKeyboardController.current
             val requester=remember {FocusRequester()}
             var query by remember {mutableStateOf(initialQuery)}
             val scroll=rememberLazyListState(initialFirstVisibleItemIndex=initialScroll.coerceAtLeast(0),
                 initialFirstVisibleItemScrollOffset=initialScrollOffset.coerceAtLeast(0))
-            val scale=remember {EmbeddedHostUi.scale(activity)}
+            val scale=remember(configurationEpoch) {EmbeddedHostUi.scale(activity)}
             val density=androidx.compose.ui.platform.LocalDensity.current
-            val metrics=remember {EmbeddedHostUi.textMetrics}
+            val metrics=EmbeddedHostUi.textMetrics
             val labelSize=if(metrics.labelLargePx>0f)with(density){metrics.labelLargePx.toSp()} else metrics.labelLarge.sp
             val labelLine=if(metrics.labelLinePx>0f)with(density){metrics.labelLinePx.toSp()} else MaterialTheme.typography.labelLarge.lineHeight
             val statusTop=WindowInsets.safeDrawing.getTop(density)
@@ -147,8 +180,8 @@ internal class HostFullTextSearchDialog(
                             singleLine=true,textStyle=searchStyle.copy(color=palette.text),
                             cursorBrush=SolidColor(palette.primary),keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search),keyboardActions=KeyboardActions(onSearch={submit()}),
                             decorationBox={inner->Box {if(query.isEmpty())Text("输入关键词搜索全书",style=searchStyle,color=palette.caption,maxLines=1);inner()}})
-                        if(query.isNotEmpty())IconButton(onClick={query="";onSearch("")},modifier=Modifier.size(32.dp)) {
-                            Icon(StructureHome130Icons.Close,"清空搜索",Modifier.size(18.dp),tint=palette.caption)
+                        if(query.isNotEmpty())IconButton(onClick={query="";onSearch("")},modifier=Modifier.size(48.dp)) {
+                            Icon(HostEmbeddedIcons.Close,"清空搜索",Modifier.size(18.dp),tint=palette.caption)
                         }
                     }
                     TextButton(onClick={submit()},enabled=query.isNotBlank()) { Text("搜索",color=if(query.isNotBlank())palette.primary else palette.caption) }

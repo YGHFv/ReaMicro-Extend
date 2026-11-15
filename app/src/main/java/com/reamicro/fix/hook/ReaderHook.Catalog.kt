@@ -1,15 +1,15 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-import com.reamicro.fix.core.hostNameMatches
 
-import com.reamicro.fix.core.hostClass
+
+import com.reamicro.fix.core.HostEpubRuntimeBindings
+import com.reamicro.fix.core.HostReaderWindowBindings
 import android.widget.Toast
 import com.reamicro.fix.online.OnlineReaderContextBridge
 import com.reamicro.fix.settings.ReaderHighlightBookContext
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import com.reamicro.fix.hook.reader.*
 
@@ -27,8 +27,8 @@ internal fun ReaderHook.openReaderCompletionPlanPage() {
         navGraphScope = navGraphScope,
     )
     if (!opened) {
-        XposedBridge.log("$LOG_PREFIX open completion plan page failed (navGraphScope unavailable)")
-        activity?.runOnUiThread {
+        HookRuntime.log("$LOG_PREFIX open completion plan page failed (navGraphScope unavailable)")
+        activity?.runOnModuleUiThread {
             Toast.makeText(activity, "\u672a\u80fd\u6253\u5f00\u8865\u5168\u8ba1\u5212", Toast.LENGTH_SHORT).show()
         }
     }
@@ -44,7 +44,7 @@ internal fun ReaderHook.jumpToCfi(
     summary: String,
 ): Boolean {
     val markJumped = runCatching {
-        val markClass = classLoader.hostClass(MARK_CLASS)
+        val host = requireNotNull(HostEpubRuntimeBindings.current)
         val targetMark = mark ?: createReaderMark(
             id = -System.currentTimeMillis(),
             chapter = title,
@@ -54,97 +54,72 @@ internal fun ReaderHook.jumpToCfi(
             style = MARK_STYLE_LINE,
             color = MARK_COLOR_RED,
         ) ?: return@runCatching false
-        val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$MarkJump")
-        val intent = intentClass.getDeclaredConstructor(markClass).newInstance(targetMark)
+        val intent = host.constructor("MarkJump").newInstance(targetMark)
         dispatchReaderIntent(receiver, viewModel, intent, "MarkJump")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX full-text search mark jump failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX full-text search mark jump failed: ${it.stackTraceToString()}")
     }.getOrDefault(false)
     if (markJumped) {
-        XposedBridge.log("$LOG_PREFIX full-text search mark jump dispatched cfi=$cfi")
+        HookRuntime.log("$LOG_PREFIX full-text search mark jump dispatched cfi=$cfi")
         return true
     }
 
-    val bookmarkClass = classLoader.hostClass(BOOKMARK_CLASS)
-    val bookmark = bookmarkClass
-        .getDeclaredConstructor(
-            Int::class.javaPrimitiveType,
-            String::class.java,
-            String::class.java,
-            String::class.java,
-            String::class.java,
-            Int::class.javaPrimitiveType,
-        )
-        .newInstance(
-            chapterIndex,
-            title,
-            summary,
-            cfi,
-            "",
-            0,
-        )
-    val intentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$BookmarkJump")
-    val intent = intentClass.getDeclaredConstructor(bookmarkClass).newInstance(bookmark)
+    val host = requireNotNull(HostEpubRuntimeBindings.current)
+    val bookmark = host.record("bookmark", mapOf(
+        "chapter" to chapterIndex, "title" to title, "summary" to summary,
+        "epubcfi" to cfi, "remark" to "", "type" to 0,
+    ))
+    val intent = host.constructor("BookmarkJump").newInstance(bookmark)
     return dispatchReaderIntent(receiver, viewModel, intent, "BookmarkJump").also {
-        XposedBridge.log("$LOG_PREFIX full-text search bookmark jump dispatched=$it cfi=$cfi")
+        HookRuntime.log("$LOG_PREFIX full-text search bookmark jump dispatched=$it cfi=$cfi")
     }
 }
 
-internal fun ReaderHook.isValidEpubCfi(cfi: String): Boolean {
-    val looksValid = Regex("""^epubcfi\(/\d+/\d+/4(?:/\d+)*(?::\d+)?\)$""").matches(cfi)
-    return runCatching {
-        val epubCfiClass = classLoader.hostClass("org.epub.html.EpubCFI")
-        val companion = runCatching { epubCfiClass.hostField("INSTANCE").get(null) }.getOrNull()
-            ?: runCatching { epubCfiClass.getField("Companion").get(null) }.getOrNull()
-            ?: return@runCatching looksValid
-        val create = companion.javaClass.methods.firstOrNull {
-            it.hostNameMatches("create") && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
-        } ?: return@runCatching looksValid
-        create.invoke(companion, cfi) != null
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX full-text search cfi validation failed: ${it.stackTraceToString()}")
-    }.getOrDefault(looksValid)
-}
+internal fun ReaderHook.isValidEpubCfi(cfi: String): Boolean = createEpubCfi(cfi) != null
 
 internal fun ReaderHook.catalogChapterItemMarkId(item: Any?): Long? =
-    callNoArg(item, "getMark")?.let(::transientHighlightMarkId)
+    HostEpubRuntimeBindings.current?.value("catalogItem.mark", item)?.let(::transientHighlightMarkId)
 
-internal fun ReaderHook.resolveCatalogIndexForCfi(cfi: String, catalog: List<Any>): Int? =
-    runCatching {
-        if (cfi.isBlank() || catalog.isEmpty()) return@runCatching null
-        val cfiObject = createEpubCfi(cfi) ?: return@runCatching null
-        val viewModel = currentViewModelRef?.get() ?: return@runCatching null
-        (XposedHelpers.callMethod(viewModel, "resolveCatalogIndexByCfi", cfiObject, catalog) as? Number)?.toInt()
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX resolve search highlight catalog index failed: ${it.stackTraceToString()}")
-    }.getOrNull()
+internal fun ReaderHook.resolveCatalogIndexForCfi(cfi: String, catalog: List<Any>): Int? = runCatching {
+    if (cfi.isBlank() || catalog.isEmpty()) return@runCatching null
+    val host = requireNotNull(HostEpubRuntimeBindings.current)
+    val cfiObject = createEpubCfi(cfi) ?: return@runCatching null
+    (host.method("catalogIndex").invoke(null, cfiObject, catalog) as? Number)?.toInt()
+}.onFailure { HookRuntime.log("$LOG_PREFIX resolve search highlight catalog index failed: ${it.stackTraceToString()}") }.getOrNull()
 
-internal fun ReaderHook.createEpubCfi(cfi: String): Any? =
-    runCatching {
-        if (cfi.isBlank()) return@runCatching null
-        val cfiClass = classLoader.hostClass("org.epub.html.EpubCFI")
-        val cfiObject = companionObject(cfiClass) ?: return@runCatching null
-        val create = cfiObject.javaClass.methods.firstOrNull {
-            it.hostNameMatches("create") && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
-        } ?: return@runCatching null
-        create.invoke(cfiObject, cfi)
-    }.getOrNull()
+internal fun ReaderHook.createEpubCfi(cfi: String): Any? = runCatching {
+    if (cfi.isBlank()) null else requireNotNull(HostEpubRuntimeBindings.current).method("cfi").invoke(null, cfi)
+}.getOrNull()
 
-internal fun ReaderHook.epubPageNumber(page: Any?): Int? =
-    (callNoArg(page, "getNumber") as? Number)?.toInt()
-        ?: (callNoArg(page, "getIndex") as? Number)?.toInt()
+internal fun ReaderHook.epubPageNumber(page: Any?): Int? {
+    page ?: return null
+    val vm = currentViewModelRef?.get() ?: return null
+    val window = HostReaderWindowBindings.current ?: return null
+    return (window.pages(vm).entries.firstOrNull { it.value === page }?.key as? Number)?.toInt()
+}
+
+internal fun ReaderHook.epubPageSpine(page: Any): Int? {
+    val vm = currentViewModelRef?.get()
+    val window = HostReaderWindowBindings.current
+    if (vm != null && window != null) {
+        val slot = epubPageNumber(page)
+        if (slot != null) window.forward(vm)[slot]?.let { return window.pair(it).first }
+    }
+    val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return null
+    val table = onDemandSpineTable(epub) ?: return null
+    val anchor = HostEpubRuntimeBindings.current?.anchor(page).orEmpty()
+    return com.reamicro.fix.online.download.OnlineOnDemandPrefetchPlanner.hostSpinePositionFromCfi(anchor, table.positions)
+}
 
 internal fun ReaderHook.epubPageSignature(page: Any?): String? {
-    val range = callNoArg(page, "getRange")?.toString().orEmpty()
-    val anchor = callString(page, "getAnchor")
-        .ifBlank { callNoArg(page, "getStart")?.toString().orEmpty() }
-    val number = epubPageNumber(page)
-    val signature = listOfNotNull(
-        number?.let { "n=$it" },
-        range.takeIf { it.isNotBlank() }?.let { "r=$it" },
-        anchor.takeIf { it.isNotBlank() }?.let { "a=$it" },
-    ).joinToString("|")
-    return signature.takeIf { it.isNotBlank() }
+    page ?: return null
+    val host = HostEpubRuntimeBindings.current ?: return null
+    if (!host.type("page").isInstance(page)) return null
+    return listOfNotNull(epubPageNumber(page)?.let { "n=$it" },
+        host.text("page.start", page).takeIf { it.isNotBlank() }?.let { "s=$it" },
+        host.text("page.end", page).takeIf { it.isNotBlank() }?.let { "e=$it" },
+        host.anchor(page).takeIf { it.isNotBlank() }?.let { "a=$it" })
+        .joinToString("|").takeIf { it.isNotBlank() }
 }
 
 internal fun ReaderHook.logCatalogDumpIfNeeded(
@@ -156,26 +131,25 @@ internal fun ReaderHook.logCatalogDumpIfNeeded(
     val key = "${bookKey(context)}:${catalog.size}:${root.absolutePath}"
     if (catalogDumpLoggedForKey == key) return
     catalogDumpLoggedForKey = key
-    XposedBridge.log("$LOG_PREFIX catalog dump root=${root.absolutePath} count=${catalog.size} pathHits=$pathHitCount")
+    HookRuntime.log("$LOG_PREFIX catalog dump root=${root.absolutePath} count=${catalog.size} pathHits=$pathHitCount")
     catalog.take(12).forEach { entry ->
         val chapter = entry.chapter
-        XposedBridge.log(
+        HookRuntime.log(
             "$LOG_PREFIX catalog dump #${entry.index} class=${chapter.javaClass.name} " +
-                "title=${catalogChapterTitle(chapter)} href=${callString(chapter, "getHref")} " +
-                "id=${catalogChapterId(chapter)} parent=${catalogChapterParentId(chapter)} " +
-                "level=${catalogChapterLevel(chapter, entry.index)} path=${entry.titlePath} " +
+                "title=${catalogChapterTitle(chapter)} href=${requireNotNull(HostEpubRuntimeBindings.current).text("chapter.href", chapter)} " +
+                "id=${catalogChapterId(chapter)} parent=${HostEpubRuntimeBindings.current?.int("chapter.parentOrder", chapter)} " +
+                "level=${catalogChapterLevel(chapter, context.catalog)} path=${entry.titlePath} " +
                 "fields=${catalogChapterFields(chapter)}",
         )
     }
 }
 
-internal fun ReaderHook.catalogChapterFields(chapter: Any): String =
-    chapter.javaClass.declaredFields.take(12).joinToString(";") { field ->
-        runCatching {
-            field.isAccessible = true
-            "${field.name}=${field.get(chapter)?.toString()?.take(80)}"
-        }.getOrDefault("${field.name}=?")
+internal fun ReaderHook.catalogChapterFields(chapter: Any): String {
+    val host = requireNotNull(HostEpubRuntimeBindings.current)
+    return com.reamicro.fix.core.HostEpubRuntimeQueries.records.getValue("chapter").second.joinToString(";") { role ->
+        "$role=${host.value("chapter.$role", chapter)?.toString()?.take(80)}"
     }
+}
 
 internal fun ReaderHook.indexedCatalogChapters(
     catalog: List<Any>,
@@ -188,15 +162,14 @@ internal fun ReaderHook.indexedCatalogChapters(
     return catalog.mapIndexed { index, chapter ->
         val title = catalogChapterTitle(chapter).normalizeChapterTitle()
         val id = catalogChapterId(chapter)
-        val href = normalizeCatalogHref(callString(chapter, "getHref"))
+        val href = normalizeCatalogHref(requireNotNull(HostEpubRuntimeBindings.current).text("chapter.href", chapter))
         val epubTitlePath = epubTitlePaths.titlePathForHref(href)
-        val level = catalogChapterLevel(chapter, index).coerceAtLeast(0)
+        val level = catalogChapterLevel(chapter, catalog).coerceAtLeast(0)
         while (titleStack.size > level) titleStack.removeAt(titleStack.lastIndex)
-        if (titleStack.size == level) {
-            titleStack.add(title)
-        } else {
-            titleStack[titleStack.lastIndex] = title
-        }
+        // Malformed or filtered catalogs may start below depth zero or skip ancestors.
+        // Preserve that missing depth without indexing an empty stack or overwriting a parent.
+        while (titleStack.size < level) titleStack.add("")
+        titleStack.add(title)
         val sequentialTitlePath = if (isVolumeCatalogTitle(title)) {
             currentVolumeTitle = title
             title
@@ -237,31 +210,22 @@ internal fun ReaderHook.isChapterCatalogTitle(value: String): Boolean {
 }
 
 internal fun ReaderHook.catalogParentTitlePaths(catalog: List<Any>): Map<Long, List<String>> {
-    val byId = catalog.mapNotNull { chapter ->
-        val id = catalogChapterId(chapter).takeIf { it != 0L } ?: return@mapNotNull null
-        id to chapter
-    }.toMap()
-    val result = linkedMapOf<Long, List<String>>()
-    fun pathFor(chapter: Any, visiting: Set<Long> = emptySet()): List<String> {
-        val id = catalogChapterId(chapter)
-        result[id]?.let { return it }
+    val host = requireNotNull(HostEpubRuntimeBindings.current)
+    val byOrder = catalog.associateBy { host.int("chapter.playOrder", it) }
+    val cache = java.util.IdentityHashMap<Any, List<String>>()
+    fun pathFor(chapter: Any, visiting: Set<Int> = emptySet()): List<String> {
+        cache[chapter]?.let { return it }
+        val order = host.int("chapter.playOrder", chapter) ?: return emptyList()
+        val parentOrder = host.int("chapter.parentOrder", chapter)
+        val parent = parentOrder?.takeIf { it != order && it !in visiting }?.let { byOrder[it] }
         val title = catalogChapterTitle(chapter).normalizeChapterTitle()
-        val parentId = catalogChapterParentId(chapter).takeIf { it != 0L && it != id }
-        val parent = parentId?.takeIf { it !in visiting }?.let { byId[it] }
-        val path = if (parent != null) {
-            (pathFor(parent, visiting + id) + title)
-                .filter { it.isNotBlank() }
-                .dedupeAdjacent()
-        } else {
-            listOf(title).filter { it.isNotBlank() }
-        }
-        if (id != 0L) result[id] = path
+        val path = ((parent?.let { pathFor(it, visiting + order) }).orEmpty() + title)
+            .filter { it.isNotBlank() }.dedupeAdjacent()
+        cache[chapter] = path
         return path
     }
-    catalog.forEach { pathFor(it) }
-    return result
+    return catalog.associate { catalogChapterId(it) to pathFor(it) }
 }
-
 internal fun ReaderHook.epubCatalogTitlePaths(root: File): Map<String, List<String>> {
     val result = linkedMapOf<String, List<String>>()
     root.walkTopDown()
@@ -283,53 +247,24 @@ internal fun ReaderHook.normalizeCatalogHref(value: String): String {
     return file + anchor.orEmpty().let { if (it.isBlank()) "" else "#$it" }
 }
 
-internal fun ReaderHook.catalogChapterLevel(chapter: Any, index: Int): Int {
-    listOf("getLevel", "getDepth", "getIndent", "getTier", "getLayer").forEach { method ->
-        (callNoArg(chapter, method) as? Number)?.toInt()?.let { return it }
+internal fun ReaderHook.catalogChapterLevel(chapter: Any, catalog: List<Any>): Int {
+    val host = requireNotNull(HostEpubRuntimeBindings.current)
+    val byOrder = catalog.associateBy { host.int("chapter.playOrder", it) }
+    val seen = HashSet<Int>()
+    var cursor = chapter
+    var depth = 0
+    while (true) {
+        val order = host.int("chapter.playOrder", cursor) ?: break
+        if (!seen.add(order)) break
+        val parentOrder = host.int("chapter.parentOrder", cursor) ?: break
+        if (parentOrder in seen) break
+        cursor = byOrder[parentOrder] ?: break
+        depth++
     }
-    listOf("level", "depth", "indent", "tier", "layer").forEach { fieldName ->
-        runCatching {
-            chapter.javaClass.declaredFields.firstOrNull { it.name == fieldName }?.let { field ->
-                field.isAccessible = true
-                (field.get(chapter) as? Number)?.toInt()
-            }
-        }.getOrNull()?.let { return it }
-    }
-    val value = chapter.toString()
-    Regex("""(?:level|depth|indent|tier|layer)=(-?\d+)""")
-        .find(value)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.toIntOrNull()
-        ?.let { return it }
-    return if (index == 0) 0 else 0
+    return depth
 }
-
 internal fun ReaderHook.catalogChapterId(chapter: Any): Long =
-    catalogChapterLongValue(chapter, listOf("getId", "getID", "getChapterId", "getChapterID"), listOf("id", "chapterId"))
-
-internal fun ReaderHook.catalogChapterParentId(chapter: Any): Long =
-    catalogChapterLongValue(
-        chapter,
-        listOf("getParentId", "getParentID", "getPid", "getPId", "getParentChapterId", "getParentChapterID"),
-        listOf("parentId", "parentID", "pid", "pId", "parentChapterId"),
-    )
-
-internal fun ReaderHook.catalogChapterLongValue(chapter: Any, methods: List<String>, fields: List<String>): Long {
-    methods.forEach { method ->
-        (callNoArg(chapter, method) as? Number)?.toLong()?.let { return it }
-    }
-    fields.forEach { fieldName ->
-        runCatching {
-            chapter.javaClass.declaredFields.firstOrNull { it.name == fieldName }?.let { field ->
-                field.isAccessible = true
-                val value = field.get(chapter)
-                (value as? Number)?.toLong() ?: value?.toString()?.toLongOrNull()
-            }
-        }.getOrNull()?.let { return it }
-    }
-    return 0L
-}
+    (HostEpubRuntimeBindings.current?.value("chapter.id", chapter) as? Number)?.toLong() ?: 0L
 
 internal fun ReaderHook.currentEpubRoot(): File? =
     (currentEpubStrong ?: currentEpubRef?.get())
@@ -339,12 +274,12 @@ internal fun ReaderHook.currentEpubRoot(): File? =
         ?.takeIf { it.isDirectory }
 
 internal fun ReaderHook.publishOnlineReaderPage(page: Any) {
-    val spineIndex = (callNoArg(page, "getSpineIndex") as? Number)?.toInt() ?: return
+    val spineIndex = epubPageSpine(page) ?: return
     OnlineReaderContextBridge.updatePage(currentEpubRoot(), spineIndex)
 }
 
 internal fun ReaderHook.epubDirectory(epub: Any?): String =
-    callNoArg(epub, "getDirectory")?.toString().orEmpty()
+    HostEpubRuntimeBindings.current?.text("epub.directory", epub).orEmpty()
 
 internal fun ReaderHook.coverUriFromEpubRoot(root: File): String {
     findOpfCoverFile(root)?.let { return it.absolutePath }
@@ -379,8 +314,8 @@ internal fun ReaderHook.coverUriFromEpubRoot(root: File): String {
 internal fun ReaderHook.catalogTextFiles(root: File, catalog: List<Any>, itemRefs: List<Any>): List<File> {
     val fromSpine = itemRefs
         .mapIndexedNotNull { position, item ->
-            val file = searchFileForHref(root, callString(item, "getHref")) ?: return@mapIndexedNotNull null
-            val index = (callNoArg(item, "getIndex") as? Number)?.toInt() ?: position
+            val file = searchFileForHref(root, requireNotNull(HostEpubRuntimeBindings.current).text("item.href", item)) ?: return@mapIndexedNotNull null
+            val index = HostEpubRuntimeBindings.current?.int("item.index", item) ?: position
             index to file
         }
         .sortedBy { it.first }
@@ -389,7 +324,7 @@ internal fun ReaderHook.catalogTextFiles(root: File, catalog: List<Any>, itemRef
     if (fromSpine.isNotEmpty()) return fromSpine
 
     val fromCatalog = catalog
-        .mapNotNull { searchFileForHref(root, callString(it, "getHref")) }
+        .mapNotNull { searchFileForHref(root, requireNotNull(HostEpubRuntimeBindings.current).text("chapter.href", it)) }
         .distinctBy { it.absolutePath }
     if (fromCatalog.isNotEmpty()) return fromCatalog
     return root.walkTopDown()
@@ -427,28 +362,8 @@ internal fun ReaderHook.isBareChapterLabel(value: String): Boolean {
         compact in setOf("番外", "序章", "楔子", "后记", "尾声", "前言")
 }
 
-internal fun ReaderHook.catalogChapterTitle(chapter: Any): String {
-    listOf("getTitle", "getName", "getLabel", "getText", "getChapterName").forEach { method ->
-        callString(chapter, method).takeIf { it.isNotBlank() }?.let { return it }
-    }
-    listOf("title", "name", "label", "text", "chapterName").forEach { fieldName ->
-        runCatching {
-            chapter.javaClass.declaredFields.firstOrNull { it.name == fieldName }?.let { field ->
-                field.isAccessible = true
-                field.get(chapter)?.toString()?.takeIf { it.isNotBlank() }
-            }
-        }.getOrNull()?.let { return it }
-    }
-    val value = chapter.toString()
-    Regex("""(?:title|name|label|text|chapterName)=([^,\)]+)""")
-        .find(value)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.trim()
-        ?.takeIf { it.isNotBlank() }
-        ?.let { return it }
-    return ""
-}
+internal fun ReaderHook.catalogChapterTitle(chapter: Any): String =
+    HostEpubRuntimeBindings.current?.text("chapter.title", chapter).orEmpty()
 
 internal fun ReaderHook.cfiBaseForFile(
     root: File,
@@ -461,15 +376,15 @@ internal fun ReaderHook.cfiBaseForFile(
     if (spineCfiIndex < 0) return null
     val relative = normalizePath(relativePath(root, file))
     val itemRef = itemRefs.firstOrNull { item ->
-        val href = normalizePath(callString(item, "getHref").substringBefore('#'))
+        val href = normalizePath(requireNotNull(HostEpubRuntimeBindings.current).text("item.href", item).substringBefore('#'))
         href.isNotBlank() && (relative == href || relative.endsWith("/$href") || href.endsWith("/$relative"))
     } ?: return null
-    val itemRefIndex = (callNoArg(itemRef, "getIndex") as? Number)?.toInt() ?: return null
+    val itemRefIndex = HostEpubRuntimeBindings.current?.int("item.index", itemRef) ?: return null
     return CfiBase(spineCfiIndex, itemRefIndex)
 }
 
 internal fun ReaderHook.cfiBaseFromChapter(chapter: Any?): CfiBase? {
-    val cfi = callNoArg(chapter, "getCfi")?.toString().orEmpty()
+    val cfi = HostEpubRuntimeBindings.current?.chapterCfi(chapter)?.toString().orEmpty()
     val match = Regex("""epubcfi\(/(\d+)/(\d+)""").find(cfi) ?: return null
     val spineIndex = match.groupValues.getOrNull(1)?.toIntOrNull() ?: return null
     val itemRefIndex = match.groupValues.getOrNull(2)?.toIntOrNull() ?: return null
@@ -509,7 +424,7 @@ internal fun ReaderHook.chaptersForFile(
 
 internal fun ReaderHook.chapterAnchorsForFile(raw: String, chapters: List<IndexedChapter>): List<ChapterAnchor> =
     chapters.mapNotNull { chapter ->
-        val href = normalizeCatalogHref(callString(chapter.entry.chapter, "getHref"))
+        val href = normalizeCatalogHref(requireNotNull(HostEpubRuntimeBindings.current).text("chapter.href", chapter.entry.chapter))
         val anchor = href.substringAfter('#', "").takeIf { it.isNotBlank() } ?: return@mapNotNull null
         val textStart = htmlAnchorTextStart(raw, anchor) ?: return@mapNotNull null
         ChapterAnchor(
@@ -521,11 +436,8 @@ internal fun ReaderHook.chapterAnchorsForFile(raw: String, chapters: List<Indexe
         )
     }.sortedBy { it.textStart }
 
-internal fun ReaderHook.fallbackCurrentChapterTitle(): String {
-    val page = currentPageRef?.get()
-    return callString(callNoArg(page, "getChapter"), "getTitle")
-        .ifBlank { callString(page, "getTitle") }
-}
+internal fun ReaderHook.fallbackCurrentChapterTitle(): String =
+    HostEpubRuntimeBindings.current?.text("page.chapter", currentReaderPage()).orEmpty()
 
 internal fun ReaderHook.titleFromCurrentEpubRoot(): String =
     currentEpubRoot()

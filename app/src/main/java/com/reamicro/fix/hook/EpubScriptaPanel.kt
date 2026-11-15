@@ -1,13 +1,11 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import android.app.Application
 import android.app.Dialog
 import android.content.ComponentCallbacks
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
-import android.os.Bundle
 import android.view.Window
 import android.widget.Toast
 import androidx.compose.animation.core.MutableTransitionState
@@ -26,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -44,12 +43,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.R
 import com.reamicro.fix.epub.editor.CommittedFileFeedback
@@ -58,10 +52,10 @@ import com.reamicro.fix.epub.editor.EpubTextFiles
 import com.reamicro.fix.epub.editor.EpubTextSnapshot
 import com.reamicro.fix.epub.editor.canEditEpubSource
 import com.reamicro.fix.epub.editor.EpubNavigation
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
+import com.reamicro.fix.reload.ModuleUiRuntime
 import java.io.File
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -84,19 +78,22 @@ internal class EpubScriptaPanel(
     private val filePaths: () -> List<String>,
     private val fileSearchLabels: () -> Map<String, List<String>>,
     private val onOpenStructureFile: (String) -> Unit,
+    private val onPageVisible: (Boolean) -> Unit,
     private val onSaved: suspend (Set<String>) -> Unit,
     private val onClosed: () -> Unit,
     private val startWithSearch: Boolean = false,
     private val uiFontFileProvider: () -> File? = { null },
-
+    private val onFileSearchOpened: () -> Unit = {},
+    private val commit: (() -> Unit) -> Unit = { it() },
+    private val checkCurrent: () -> Unit = {},
 ) {
-    private val owner = EditorOwner()
-    private val darkHint = mutableStateOf(StructureHome130Style.isDark(activity))
+    private val owner = ModuleComposeOwner(activity) { dismissForHostShutdown() }
+    private val darkHint = mutableStateOf(HostEmbeddedStyle.isDark(activity))
     private var requestClose: (() -> Unit)? = null
     private var composeView: ComposeView? = null
-    private var closed = false
+    @Volatile private var closed = false
     private val returnRoute = StructureEditorReturnRoute()
-    private var hostShuttingDown = false
+    @Volatile private var hostShuttingDown = false
     private var appliedWindowPalette: Pair<Int, Boolean>? = null
     private val dialog by lazy { object : Dialog(
         com.reamicro.fix.core.InjectedModuleContext.create(activity),
@@ -107,65 +104,54 @@ internal class EpubScriptaPanel(
     } }
     private val configCallbacks = object : ComponentCallbacks {
         override fun onConfigurationChanged(newConfig: Configuration) {
-            darkHint.value = StructureHome130Style.isDark(activity)
+            darkHint.value = HostEmbeddedStyle.isDark(activity)
             configureWindow()
         }
         override fun onLowMemory() = Unit
     }
-    private val lifecycleCallbacks = object : Application.ActivityLifecycleCallbacks {
-        override fun onActivityDestroyed(a: Activity) { if (a === activity) dismissForHostShutdown() }
-        override fun onActivityResumed(a: Activity) {
-            if (a === activity && !closed) owner.state(Lifecycle.State.RESUMED)
-        }
-        override fun onActivityPaused(a: Activity) {
-            if (a === activity && !closed) owner.state(Lifecycle.State.STARTED)
-        }
-        override fun onActivityStopped(a: Activity) {
-            if (a === activity && !closed) owner.state(Lifecycle.State.CREATED)
-        }
-        override fun onActivityCreated(a: Activity, state: Bundle?) = Unit
-        override fun onActivityStarted(a: Activity) = Unit
-        override fun onActivitySaveInstanceState(a: Activity, state: Bundle) = Unit
-    }
-
     fun show() {
-        com.reamicro.fix.reload.ModuleUiReloadGuard.markUsed()
+        requireEditorCurrent()
         require(canEditEpubSource(initialPath)) { "该文件不是可编辑的文本资源" }
         check(!activity.isFinishing && !activity.isDestroyed) { "页面已关闭" }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setCanceledOnTouchOutside(false)
         val context = com.reamicro.fix.core.InjectedModuleContext.create(activity)
-        owner.create()
-        val view = ComposeView(context).apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-            setContent { EditorContent(initialPath) }
-        }
-        composeView = view
-        dialog.window?.decorView?.apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-        }
-        dialog.setContentView(view)
-        dialog.window?.decorView?.findViewById<android.view.View>(android.R.id.content)?.apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-        }
-        dialog.setOnDismissListener { cleanup() }
-        activity.registerComponentCallbacks(configCallbacks)
-        activity.application.registerActivityLifecycleCallbacks(lifecycleCallbacks)
+        owner.start()
         try {
+            val view = ComposeView(context).apply {
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                owner.attach(this)
+                setContent { EditorContent(initialPath) }
+            }
+            composeView = view
+            dialog.window?.decorView?.apply {
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+            }
+            dialog.setContentView(view)
+            dialog.window?.decorView?.findViewById<android.view.View>(android.R.id.content)?.apply {
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+            }
+            dialog.setOnDismissListener { cleanup() }
+            activity.registerComponentCallbacks(configCallbacks)
             dialog.show()
             configureWindow()
-            owner.state(Lifecycle.State.RESUMED)
             if (Build.VERSION.SDK_INT >= 33) {
                 dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(
                     android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
                 ) { requestClose?.invoke() ?: dialog.dismiss() }
             }
         } catch (error: Throwable) {
-            cleanup()
+            hostShuttingDown = true
+            returnRoute.cancel()
+            runCatching { dialog.dismiss() }.onFailure {
+                ModuleUiRuntime.recordFailure("编辑器窗口未能关闭")
+                error.addSuppressed(it)
+            }
+            runCatching { cleanup() }.onFailure(error::addSuppressed)
             throw error
         }
     }
@@ -174,32 +160,63 @@ internal class EpubScriptaPanel(
         if (closed) return
         hostShuttingDown = true
         returnRoute.cancel()
-        dialog.dismiss()
-        cleanup()
+        try { dialog.dismiss() } finally { cleanup() }
     }
 
     private fun cleanup() {
         if (closed) return
+        prepareReturnDestination()
         closed = true
         requestClose = null
-        runCatching { activity.unregisterComponentCallbacks(configCallbacks) }
-        runCatching { activity.application.unregisterActivityLifecycleCallbacks(lifecycleCallbacks) }
-        composeView?.disposeComposition()
-        owner.state(Lifecycle.State.DESTROYED)
+        runCatching { activity.unregisterComponentCallbacks(configCallbacks) }.onFailure {
+            ModuleUiRuntime.recordFailure("编辑器配置监听未能注销")
+            HookRuntime.logError("ReaMicro editor configuration cleanup failed", it)
+        }
+        owner.close()
         composeView = null
+        onPageVisible(false)
         onClosed()
-        if (!hostShuttingDown && !activity.isFinishing && !activity.isDestroyed) {
-            when (val target = returnRoute.destination) {
+    }
+
+    private fun prepareReturnDestination() {
+        val target = returnRoute.takeExitDestination() ?: return
+        if (hostShuttingDown || activity.isFinishing || activity.isDestroyed ||
+            runCatching { requireEditorCurrent() }.isFailure) return
+        runCatching {
+            when (target) {
                 StructureEditorDestination.Context -> Unit
                 StructureEditorDestination.Home -> onShowStructureHome()
                 is StructureEditorDestination.File -> onOpenStructureFile(target.path)
             }
-        }
+        }.onFailure { HookRuntime.logError("ReaMicro editor return page unavailable", it) }
     }
 
+    private fun requireEditorCurrent() {
+        check(!closed && !hostShuttingDown && !activity.isFinishing && !activity.isDestroyed) { "编辑器已关闭" }
+        checkCurrent()
+    }
+
+    private fun canStartEditorAction(): Boolean = runCatching { requireEditorCurrent() }
+        .onFailure { Toast.makeText(activity, it.message ?: "请重新打开编辑器", Toast.LENGTH_LONG).show() }
+        .isSuccess
+
+    private fun saveTextSource(
+        file: File, text: String, snapshot: EpubTextSnapshot, checkCancelled: () -> Unit,
+    ): EpubTextSnapshot = EpubTextFiles.save(
+        file, text, snapshot,
+        commit = { action ->
+            commit {
+                checkCancelled()
+                requireEditorCurrent()
+                action()
+            }
+        },
+        checkCancelled = { checkCancelled(); requireEditorCurrent() },
+    )
+
     private fun configureWindow() {
-        val native = StructureHost232Colors.snapshot(activity, darkHint.value)
-        configureEpubEdgeToEdgeWindow(dialog.window, native.contentArgb, native.dark)
+        val native = HostThemeColors.snapshot(activity, darkHint.value)
+        configureEpubEdgeToEdgeWindow(dialog.window, android.graphics.Color.TRANSPARENT, native.dark)
         appliedWindowPalette = native.contentArgb to native.dark
     }
 
@@ -207,7 +224,7 @@ internal class EpubScriptaPanel(
         if (!dialog.isShowing || appliedWindowPalette == (background to dark)) return
         appliedWindowPalette = background to dark
         dialog.window?.let { window ->
-            window.setBackgroundDrawable(ColorDrawable(background))
+            window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
             WindowCompat.getInsetsController(window, window.decorView).apply {
                 isAppearanceLightStatusBars = !dark
                 isAppearanceLightNavigationBars = !dark
@@ -219,9 +236,9 @@ internal class EpubScriptaPanel(
     @Composable
     private fun EditorContent(initialPath: String) {
 
-        val native = StructureHost232Colors.snapshot(activity, darkHint.value)
-        val p = remember(native) { StructureHome130Style.Palette(native) }
-        val hostFonts = remember { StructureHome130Style.fonts(activity) }
+        val native = HostThemeColors.snapshot(activity, darkHint.value)
+        val p = remember(native) { HostEmbeddedStyle.Palette(native) }
+        val hostFonts = remember { HostEmbeddedStyle.fonts(activity) }
         val typography = rememberStructureContentTypography(hostFonts, uiFontFileProvider)
         LaunchedEffect(native.contentArgb, native.dark) { applyWindowPalette(native.contentArgb, native.dark) }
         val controller = rememberCodeEditorController()
@@ -231,12 +248,19 @@ internal class EpubScriptaPanel(
         var fileSearchVisible by remember { mutableStateOf(false) }
         val editorVisibility = remember { MutableTransitionState(false) }
         var dismissRequested by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) { editorVisibility.targetState = true }
+        LaunchedEffect(Unit) {
+            withFrameNanos { }
+            onPageVisible(true)
+            editorVisibility.targetState = true
+        }
         LaunchedEffect(editorVisibility.isIdle, editorVisibility.currentState, dismissRequested) {
             if (dismissRequested && editorVisibility.isIdle && !editorVisibility.currentState) dialog.dismiss()
         }
         fun dismissWithTransition() {
+            if (dismissRequested) return
+            prepareReturnDestination()
             dismissRequested = true
+            onPageVisible(false)
             editorVisibility.targetState = false
         }
         var snapshot by remember { mutableStateOf<EpubTextSnapshot?>(null) }
@@ -269,11 +293,15 @@ internal class EpubScriptaPanel(
             snapshot = null
             controller.setDocument("")
             try {
-                val loaded = withContext(Dispatchers.IO) {
+                val loaded = withContext(ModuleUiRuntime.io) {
                     val job = currentCoroutineContext()
-                    EpubTextFiles.load(EpubTextFiles.resolve(root, pathAtLoad)) { job.ensureActive() }.also { com.reamicro.fix.epub.editor.EpubSourceLayoutSafety.requireEditable(it.text) }
+                    requireEditorCurrent()
+                    EpubTextFiles.load(EpubTextFiles.resolve(root, pathAtLoad)) {
+                        job.ensureActive(); requireEditorCurrent()
+                    }.also { com.reamicro.fix.epub.editor.EpubSourceLayoutSafety.requireEditable(it.text) }
                 }
                 currentCoroutineContext().ensureActive()
+                requireEditorCurrent()
                 if (currentPath != pathAtLoad || dismissRequested) return@LaunchedEffect
                 controller.setDocument(loaded.text)
                 snapshot = loaded.snapshot
@@ -348,6 +376,7 @@ internal class EpubScriptaPanel(
         fun save(closeAfter: Boolean = false) {
             val original = snapshot ?: return
             if (saving || searchBusy || loading || dismissRequested || failure != null) return
+            if (!canStartEditorAction()) return
             if (controller.isComposing) {
                 Toast.makeText(activity, "请先确认输入法候选词，再保存", Toast.LENGTH_SHORT).show()
                 return
@@ -359,19 +388,20 @@ internal class EpubScriptaPanel(
             saving = true
             confirmClose = false
             coroutineScope.launch {
+                var committed = false
                 try {
-                    val updated = withContext(Dispatchers.IO) {
+                    val updated = withContext(ModuleUiRuntime.io) {
                         val job = currentCoroutineContext()
                         EpubNavigation.validateSource(pathAtSave, text)
-                        EpubTextFiles.save(EpubTextFiles.resolve(root, pathAtSave), text, original) {
-                            job.ensureActive()
-                        }
+                        saveTextSource(EpubTextFiles.resolve(root, pathAtSave), text, original) { job.ensureActive() }
                     }
+                    committed = true
+                    requireEditorCurrent()
                     if (currentPath == pathAtSave) {
                         snapshot = updated
                         controller.markSaved(version)
                     }
-                    val syncError = runCatching { onSaved(setOf(pathAtSave)) }.exceptionOrNull()
+                    val syncError = runCatching { requireEditorCurrent(); onSaved(setOf(pathAtSave)) }.exceptionOrNull()
                     if (syncError is CancellationException) throw syncError
                     val feedback = CommittedFileFeedback(
                         if (syncError == null) "已保存并同步书架" else "文件已保存")
@@ -391,7 +421,12 @@ internal class EpubScriptaPanel(
                     returnRoute.cancel()
                     confirmTarget = null
                     pendingSelection = null
-                    Toast.makeText(activity, "保存失败：${error.message}", Toast.LENGTH_LONG).show()
+                    val message = when {
+                        error is com.reamicro.fix.epub.editor.EpubWriteNotConfirmed -> error.message.orEmpty()
+                        committed -> "文件已保存；后续处理未完成：${error.message.orEmpty()}"
+                        else -> "保存失败：${error.message.orEmpty()}"
+                    }
+                    Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
                 } finally {
                     saving = false
                 }
@@ -426,6 +461,7 @@ internal class EpubScriptaPanel(
 
         fun searchNow(selectFirst: Boolean) {
             if (searchBusy || loading || saving || confirmClose || dismissRequested) return
+            if (!canStartEditorAction()) return
             val query = searchQuery
             if (query.isBlank()) {
                 searchResults = emptyList()
@@ -442,7 +478,9 @@ internal class EpubScriptaPanel(
             searchMessage = "搜索中…"
             coroutineScope.launch {
                 try {
-                    val documents = withContext(Dispatchers.IO) {
+                    val documents = withContext(ModuleUiRuntime.io) {
+                        currentCoroutineContext().ensureActive()
+                        requireEditorCurrent()
                         EpubScriptaSearch.loadDocuments(
                             root = root,
                             currentPath = activePath,
@@ -453,6 +491,7 @@ internal class EpubScriptaPanel(
                             textOnly = textOnly,
                         )
                     }
+                    requireEditorCurrent()
                     if (generation != searchGeneration) return@launch
                     searchResults = documents
                     searchFileIndex = if (selectFirst && documents.isNotEmpty()) 0 else -1
@@ -525,6 +564,7 @@ internal class EpubScriptaPanel(
 
         fun replaceCurrent() {
             if (loading || saving || searchBusy || confirmClose || dismissRequested) return
+            if (!canStartEditorAction()) return
             if (searchResults.isEmpty() || searchFileIndex < 0) {
                 searchNow(true)
                 return
@@ -548,6 +588,7 @@ internal class EpubScriptaPanel(
 
         fun replaceAll() {
             if (searchBusy || loading || saving || confirmClose || dismissRequested) return
+            if (!canStartEditorAction()) return
             if (searchQuery.isBlank()) {
                 searchMessage = "请输入查找内容"
                 return
@@ -570,10 +611,14 @@ internal class EpubScriptaPanel(
             searchBusy = true
             searchMessage = "替换中…"
             coroutineScope.launch {
+                val writtenPaths = linkedSetOf<String>()
                 try {
-                    val documents = withContext(Dispatchers.IO) {
+                    val documents = withContext(ModuleUiRuntime.io) {
+                        currentCoroutineContext().ensureActive()
+                        requireEditorCurrent()
                         EpubScriptaSearch.loadDocuments(root, activePath, activeText, scope, query, useRegex, false)
                     }
+                    requireEditorCurrent()
                     check(currentPath == activePath && controller.documentVersion == activeVersion) {
                         "编辑内容已变化，本次替换已取消"
                     }
@@ -594,33 +639,43 @@ internal class EpubScriptaPanel(
                         }
                     }
                     val external = documents.filter { it.path != activePath }
-                    val saved = withContext(Dispatchers.IO) {
+                    val saved = withContext(ModuleUiRuntime.io) {
+                        val job = currentCoroutineContext()
                         external.map { document ->
+                            job.ensureActive()
+                            requireEditorCurrent()
                             document to runCatching {
                                 val file = EpubTextFiles.resolve(root, document.path)
-                                val loaded = EpubTextFiles.load(file)
+                                val loaded = EpubTextFiles.load(file) { job.ensureActive(); requireEditorCurrent() }
                                 check(document.snapshot?.fingerprint?.sha256 == loaded.snapshot.fingerprint.sha256) {
                                     "文件在查找后已被其他操作修改，未替换"
                                 }
                                 val next = EpubScriptaSearch.replace(loaded.text, query, replacementText, useRegex, false)
                                 if (next.count == 0) 0 else {
-                                    EpubTextFiles.save(file, next.text, loaded.snapshot)
+                                    saveTextSource(file, next.text, loaded.snapshot) { job.ensureActive() }
+                                    writtenPaths += document.path
                                     next.count
                                 }
                             }.getOrElse { error ->
-                                XposedBridge.log("ReaMicro Scripta replace failed (${document.path}): ${error.message}")
-                                -1
+                                if (error is CancellationException) throw error
+                                HookRuntime.log("ReaMicro Scripta replace failed (${document.path}): ${error.message}")
+                                if (error is com.reamicro.fix.epub.editor.EpubWriteNotConfirmed) {
+                                    writtenPaths += document.path
+                                    -2
+                                } else -1
                             }
                         }
                     }
+                    requireEditorCurrent()
                     val savedCount = saved.filter { it.second > 0 }
-                    val failedCount = saved.count { it.second < 0 }
+                    val failedCount = saved.count { it.second == -1 }
+                    val unconfirmedCount = saved.count { it.second == -2 }
                     replaced += savedCount.sumOf { it.second }
                     changed += savedCount.size
 
-                    val committed = savedCount.map { it.first.path }.toSet()
+                    val committed = writtenPaths.toSet()
                     val syncError = if (committed.isEmpty()) null else
-                        runCatching { onSaved(committed) }.exceptionOrNull()
+                        runCatching { requireEditorCurrent(); onSaved(committed) }.exceptionOrNull()
                     if (syncError is CancellationException) throw syncError
 
                     searchResults = emptyList()
@@ -632,12 +687,14 @@ internal class EpubScriptaPanel(
                         changed = committed.isNotEmpty(),
                     )
                     if (failedCount > 0) feedback.addWarning("$failedCount 个文件读取或保存失败")
+                    if (unconfirmedCount > 0) feedback.addWarning("$unconfirmedCount 个文件写入已发生但未确认，请重新打开检查，勿重复提交")
                     if (syncError != null) feedback.addWarning("书架同步失败")
                     searchMessage = feedback.displayMessage
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    searchMessage = error.message ?: "替换失败"
+                    searchMessage = (if (writtenPaths.isEmpty()) "" else "已有 ${writtenPaths.size} 个文件写入；") +
+                        (error.message ?: "替换失败")
                 } finally {
                     searchBusy = false
                 }
@@ -654,22 +711,26 @@ internal class EpubScriptaPanel(
         val safeDrawingInsets = WindowInsets.safeDrawing
 
         MaterialTheme(colorScheme = native.controlsScheme(), typography = typography) {
+            androidx.compose.animation.AnimatedVisibility(
+                visibleState = editorVisibility, modifier = Modifier.fillMaxSize(),
+                enter = StructureFileMotion.enter(), exit = StructureFileMotion.exit(),
+            ) {
             Box(Modifier.fillMaxSize().background(p.content).drawBehind { drawRect(p.page, size = androidx.compose.ui.geometry.Size(size.width, safeDrawingInsets.getTop(this).toFloat())) }.safeDrawingPadding().imePadding()) {
                 Column(Modifier.fillMaxSize()) {
                     StructureToolbar(
                         modifier = Modifier.background(p.page),
                         title = bookTitle + if (controller.isModified) " ·" else "", subtitle = currentPath,
-                        titleStyle = StructureHome130Style.title(hostFonts),
-                        subtitleStyle = StructureHome130Style.caption(hostFonts),
+                        titleStyle = HostEmbeddedStyle.title(hostFonts),
+                        subtitleStyle = HostEmbeddedStyle.caption(hostFonts),
                         titleColor = textColor, subtitleColor = muted,
                         navigationIcon = {
                             IconButton(enabled = !saving && !searchBusy, onClick = { close() }) {
-                                Icon(StructureHome130Icons.Back, "返回", tint = textColor)
+                                Icon(HostEmbeddedIcons.Back, "返回", tint = textColor)
                             }
                         },
                         actions = {
                             IconButton(enabled = !loading && !saving && !searchBusy && !confirmClose && !dismissRequested && !drawer.isOpen,
-                                onClick = { fileSearchVisible = true }) {
+                                onClick = { onFileSearchOpened(); fileSearchVisible = true }) {
                                 Icon(painterResource(R.drawable.ic_structure_search),
                                     stringResource(R.string.epub_structure_search_title), Modifier.size(24.dp), tint = textColor)
                             }
@@ -700,10 +761,6 @@ internal class EpubScriptaPanel(
                         },
                     ) {
                         Box(Modifier.fillMaxSize()) {
-                            androidx.compose.animation.AnimatedVisibility(
-                                visibleState = editorVisibility, modifier = Modifier.fillMaxSize(),
-                                enter = StructureFileMotion.enter(), exit = StructureFileMotion.exit(),
-                            ) {
                                 val showSearchPanel = searchVisible && !loading && failure == null
                                 StructureScriptaBody(
                                     searchVisible = showSearchPanel,
@@ -719,8 +776,7 @@ internal class EpubScriptaPanel(
                                                         Column(Modifier.fillMaxSize().padding(16.dp),
                                                             horizontalAlignment = Alignment.CenterHorizontally,
                                                             verticalArrangement = Arrangement.Center) {
-                                                            if (loading) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp,
-                                                                color = p.primary, trackColor = p.content)
+                                                            if (loading) StructureDataLoading()
                                                             Text(if (loading) "正在读取文件…" else failure.orEmpty(),
                                                                 Modifier.padding(top = 12.dp), style = MaterialTheme.typography.bodyMedium,
                                                                 color = if (failure != null) p.error else p.caption)
@@ -776,7 +832,6 @@ internal class EpubScriptaPanel(
                                             onGotoLine = { searchVisible = false; controller.openGotoLine() }, onSoftWrap = { softWrap = !softWrap })
                                     },
                                 )
-                            }
                             StructureFileSearchOverlay(
                                 visible = fileSearchVisible, paths = filePaths(), labels = fileSearchLabels(), palette = p,
                                 busy = loading || saving || searchBusy || dismissRequested,
@@ -797,20 +852,8 @@ internal class EpubScriptaPanel(
                     },
                     onSave = { save(closeAfter = confirmTarget == null) })
             }
+            }
         }
-    }
-
-    private class EditorOwner : SavedStateRegistryOwner {
-        private val registry = LifecycleRegistry(this)
-        private val saved = SavedStateRegistryController.create(this)
-        override val lifecycle: Lifecycle get() = registry
-        override val savedStateRegistry: SavedStateRegistry get() = saved.savedStateRegistry
-        fun create() {
-            saved.performAttach()
-            saved.performRestore(null)
-            state(Lifecycle.State.CREATED)
-        }
-        fun state(value: Lifecycle.State) { registry.currentState = value }
     }
 
     private data class PendingSelection(val path: String, val start: Int, val end: Int)

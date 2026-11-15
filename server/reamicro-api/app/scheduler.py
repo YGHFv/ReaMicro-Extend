@@ -1,6 +1,7 @@
 import asyncio
 import json
 import secrets
+import threading
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,6 +19,7 @@ from app.releases import sync_module_release
 from app.responses import response
 from app.state import (
     enqueue_task_notification,
+    find_duplicate_task,
     load_tasks,
     save_tasks,
     task_credential_id,
@@ -31,6 +33,30 @@ TASK_CONFIGURATION_FIELDS = {
     "schedule", "createdAt", "updatedAt", "maxRetries", "runRequestedAt",
     "enabled", "status", "nextRunAt",
 }
+
+
+def upsert_task_configuration(tasks: dict[str, dict[str, Any]], proposed: dict[str, Any],
+                              now: int) -> tuple[dict[str, Any], bool]:
+    """Called inside a task transaction so a reconfiguration cannot reset worker state."""
+    duplicate = find_duplicate_task(tasks, proposed)
+    if duplicate is None:
+        tasks[str(proposed["id"])] = proposed
+        return proposed, False
+    task_id, previous = duplicate
+    task = deepcopy(previous)
+    for key in TASK_CONFIGURATION_FIELDS - {"id", "createdAt", "status", "nextRunAt"}:
+        if key in proposed:
+            task[key] = proposed[key]
+    task["id"] = task_id
+    task["updatedAt"] = max(now, bounded_config_int(previous.get("updatedAt", 0), 0, 0) + 1)
+    if not task.get("enabled", True):
+        task["status"] = "paused"
+        task["nextRunAt"] = 0
+    elif previous.get("status") != "running":
+        task["status"] = "scheduled"
+        task["nextRunAt"] = proposed.get("nextRunAt", now)
+    tasks[task_id] = task
+    return task, True
 
 
 def normalized_task_schedule(task_type: str, schedule: dict[str, Any]) -> dict[str, Any]:
@@ -89,23 +115,14 @@ def next_task_run(task: dict[str, Any], now_ms: int | None = None) -> int:
 
 
 def retry_delay_seconds(task: dict[str, Any]) -> int:
-    attempts = max(int(task.get("consecutiveFailures", 0)), 1)
-    return min(300 * (2 ** (attempts - 1)), 21_600)
+    attempts = bounded_config_int(task.get("consecutiveFailures", 0), 1, 1)
+    return min(300 * (2 ** min(attempts - 1, 7)), 21_600)
 
 
 def recover_interrupted_tasks() -> int:
-    tasks = load_tasks()
-    recovered = 0
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    for task in tasks.values():
-        if task.get("status") != "running":
-            continue
-        task["status"] = "scheduled"
-        task["lastMessage"] = "服务器重启后已恢复中断任务"
-        task["nextRunAt"] = 0 if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward") else now + 60_000
-        recovered += 1
+    recovered = runtime.get_state_store().recover_interrupted_tasks(now)
     if recovered:
-        save_tasks(tasks)
         audit_event("interrupted_tasks_recovered", metadata={"count": recovered})
     return recovered
 
@@ -278,55 +295,121 @@ def complete_task_execution(current: dict[str, Any], original: dict[str, Any], e
     return task
 
 
+def claim_due_task(tasks: dict[str, dict[str, Any]], task_id: str, now: int,
+                   execution_id: str = "") -> dict[str, Any] | None:
+    """Called under the store transaction, after acquiring this worker's task lease."""
+    task = tasks.get(task_id)
+    if task is None or not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
+        return None
+    if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
+        task["status"] = "scheduled"
+        task["nextRunAt"] = 0
+        task["schedule"] = {"event": YESHE_DRAW_TRIGGER_EVENT}
+        return None
+    if bounded_config_int(task.get("nextRunAt", 0), 0, 0) > now and not requires_automation_recovery(task):
+        return None
+    recover_automation_task(task, now)
+    task["status"] = "running"
+    task["lastRunAt"] = now
+    task["executionId"] = execution_id or secrets.token_hex(12)
+    return deepcopy(task)
+
+
+def commit_task_execution(tasks: dict[str, dict[str, Any]], task_id: str, original: dict[str, Any],
+                          executed: dict[str, Any], result: str, message: str,
+                          started_at: int, finished_at: int) -> dict[str, Any] | None:
+    current = tasks.get(task_id)
+    if (current is None or current.get("executionId") != original.get("executionId")
+            or current.get("lastRunAt") != original.get("lastRunAt")):
+        return None
+    task = complete_task_execution(current, original, executed, result, message, started_at, finished_at)
+    tasks[task_id] = task
+    # A user may have changed this task's credential while its old check-in ran.
+    # Trigger the reward's original account, then consume the transient marker.
+    schedule_linked_draw_task(tasks, deepcopy(executed), finished_at)
+    task.pop("claimJustCompleted", None)
+    return task
+
+
+def run_due_task_once(task_id: str, worker_id: str) -> None:
+    """Own the lease in the actual worker thread, including its final commit/release.
+
+    Cancelling asyncio.to_thread only cancels its awaiter. It cannot free a lease for
+    a still-running HTTP operation. Another process sees the lease until this ends.
+    """
+    store = runtime.get_state_store()
+    lease_owner = worker_id + "_" + secrets.token_hex(6)
+    claimed = False
+    original = None
+    renewal_done = threading.Event()
+    renewal = None
+    try:
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        claimed = store.acquire_task_lock(task_id, lease_owner, now + 15 * 60_000, now)
+        if not claimed:
+            return
+        task = store.mutate_namespace("tasks", lambda tasks: claim_due_task(tasks, task_id, now, lease_owner))
+        if task is None:
+            return
+        original = deepcopy(task)
+
+        def renew_lease() -> None:
+            while not renewal_done.wait(60):
+                try:
+                    expiry = int(datetime.now(timezone.utc).timestamp() * 1000) + 15 * 60_000
+                    if not store.renew_task_lock(task_id, lease_owner, expiry):
+                        return
+                except Exception as error:
+                    print(f"task lease renewal failed: {type(error).__name__}", flush=True)
+        renewal = threading.Thread(target=renew_lease, name="reamicro-task-lease", daemon=True)
+        renewal.start()
+        started_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+        result, message = execute_task(task)
+        finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+        task = store.mutate_namespace("tasks", lambda tasks: commit_task_execution(
+            tasks, task_id, original, task, result, message, started_at, finished_at,
+        ))
+        if task is not None:
+            enqueue_task_notification(task, result, message, finished_at)
+        task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
+    except Exception as error:
+        message = redact_message(str(error))
+        print(f"task scheduler failed for {task_id}: {message}", flush=True)
+        if original is not None:
+            def release_attempt(tasks):
+                current = tasks.get(task_id)
+                if (current is not None and current.get("status") == "running"
+                        and current.get("executionId") == original.get("executionId")):
+                    current["status"] = "paused"
+                    current["enabled"] = False
+                    current["nextRunAt"] = 0
+                    current["lastMessage"] = "执行结果保存失败，已暂停；请核对任务结果后手动恢复"
+            try:
+                store.mutate_namespace("tasks", release_attempt)
+            except Exception as recovery_error:
+                print(f"task recovery failed: {type(recovery_error).__name__}", flush=True)
+    finally:
+        renewal_done.set()
+        if renewal is not None and renewal.ident is not None:
+            renewal.join(timeout=1)
+        if claimed:
+            try:
+                store.release_task_lock(task_id, lease_owner)
+            except Exception as error:
+                print(f"task lease release failed: {type(error).__name__}", flush=True)
+
+
 async def task_scheduler_loop() -> None:
     worker_id = "worker_" + secrets.token_hex(6)
     while True:
         try:
-            for task_id in list(load_tasks()):
-                tasks = load_tasks()
-                task = tasks.get(task_id)
-                if task is None:
-                    continue
-                now = int(datetime.now(timezone.utc).timestamp() * 1000)
-                if not task.get("enabled", True) or task.get("status") in {"paused", "cancelled", "running"}:
-                    continue
-                if task.get("taskType") == "yeshe_draw_card" and not task.get("triggeredByCheckinReward"):
-                    if task.get("status") != "scheduled" or bounded_config_int(task.get("nextRunAt", 0), 0, 0) != 0 or task.get("schedule") != {"event": YESHE_DRAW_TRIGGER_EVENT}:
-                        task["status"] = "scheduled"
-                        task["nextRunAt"] = 0
-                        task["schedule"] = {"event": YESHE_DRAW_TRIGGER_EVENT}
-                        save_tasks(tasks)
-                    continue
-                next_run = int(task.get("nextRunAt", 0))
-                if next_run > now and not requires_automation_recovery(task):
-                    continue
-                if not runtime.get_state_store().acquire_task_lock(task_id, worker_id, now + 15 * 60 * 1000, now):
-                    continue
-                recover_automation_task(task, now)
-                task["status"] = "running"
-                task["lastRunAt"] = now
-                save_tasks(tasks)
-                original = deepcopy(task)
-                try:
-                    started_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-                    result, message = await asyncio.to_thread(execute_task, task)
-                    finished_at = int(datetime.now(timezone.utc).timestamp() * 1000)
-                    task_log(task_id, message, "ERROR" if result == "failed" else "WARN" if result == "paused" else "INFO")
-                    tasks = load_tasks()
-                    current = tasks.get(task_id)
-                    if current is None:
-                        continue
-                    task = complete_task_execution(current, original, task, result, message, started_at, finished_at)
-                    tasks[task_id] = task
-                    enqueue_task_notification(task, result, message, finished_at)
-                    linked_draw = schedule_linked_draw_task(tasks, task, finished_at)
-                    if linked_draw:
-                        task["lastMessage"] = message
-                    save_tasks(tasks)
-                finally:
-                    runtime.get_state_store().release_task_lock(task_id, worker_id)
+            recover_interrupted_tasks()
+            task_ids = list(load_tasks())
         except Exception as error:
-            print(f"task scheduler failed: {error}", flush=True)
+            print(f"task scheduler state read failed: {redact_message(str(error))}", flush=True)
+            task_ids = []
+        for task_id in task_ids:
+            await asyncio.to_thread(run_due_task_once, task_id, worker_id)
         await asyncio.sleep(15)
 
 
@@ -372,6 +455,8 @@ def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str
             request_value = {}
     if include_request:
         value["request"] = request_value
+    elif task.get("taskType") == "yeshe_checkin":
+        value["configuration"] = {"blessingType": str(request_value.get("blessingType", "")).strip().upper()[:64]}
     elif task.get("taskType") == "yeshe_draw_card":
         value["configuration"] = {
             "dailyLimit": min(20, bounded_config_int(request_value.get("dailyLimit", 3), 3, 0)),
@@ -391,6 +476,7 @@ def public_task(task: dict[str, Any], include_request: bool = False) -> dict[str
         }
     elif task.get("taskType") == "traveling_merchant":
         value["configuration"] = {
+            "blessingType": str(request_value.get("blessingType", "")).strip().upper()[:64],
             "merchantAutoComplete": bool(request_value.get("merchantAutoComplete", False)),
             "merchantCityCode": str(request_value.get("merchantCityCode", ""))[:64],
             "merchantPrincipal": bounded_config_int(request_value.get("merchantPrincipal", 0), 0, 0),

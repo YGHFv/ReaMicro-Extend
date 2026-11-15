@@ -152,7 +152,6 @@ def _admin_package_table(records: list[dict[str, Any]], can_write: bool, query: 
 
         health = stored_health(item)
         health_status = health["status"]
-        health_class = status_tone(health_status)
         health_detail = (
             _admin_time_label(health["checkedAt"], "从未检测")
             if health["checkedAt"] else "从未检测"
@@ -617,17 +616,17 @@ def _admin_security_content(config: dict[str, Any], actor: dict[str, Any], csrf_
         blocks.append(
             f"<div class='panel'><h2>服务器加密密钥</h2>"
             f"<p class='muted'>该密钥用于加密阅微登录凭据和任务参数。轮换会用新密钥重新加密所有既有数据；"
-            f"轮换期间请避免并发写入，并务必保存新密钥，丢失后既有凭据无法解密。</p>"
+            f"轮换前可先创建服务器快照。已有凭据会重新加密，轮换中断后仍可读取并重试。</p>"
             f"<form method='post' action='/admin/security/rotate-secret'>{csrf_html}"
             f"<label>新的加密密钥（留空则自动生成随机长密钥）<input type='password' name='new_secret_key' autocomplete='new-password'></label>"
             f"<button class='button danger' type='submit'>轮换加密密钥</button></form></div>"
         )
     if is_primary or "audit:read" in permissions:
         blocks.append(
-            f"<div class='panel'><h2>审计日志</h2>"
-            f"<p class='muted'>记录登录、设置变更、内容包操作、模块上传和快照操作，保存在数据卷的 "
-            f"<code>/data/audit/events.jsonl</code>。</p>"
-            f"<p><a class='button subtle' href='/admin/audit'>查看审计日志</a></p></div>"
+            "<div class='panel'><h2>审计日志</h2>"
+            "<p class='muted'>记录登录、设置变更、内容包操作、模块上传和快照操作，保存在数据卷的 "
+            "<code>/data/audit/events.jsonl</code>。</p>"
+            "<p><a class='button subtle' href='/admin/audit'>查看审计日志</a></p></div>"
         )
     if not is_primary:
         blocks.append(

@@ -8,9 +8,6 @@ on:
     paths:
       - "app/**"
       - "module/**"
-      - "tools/build-fanqie-source.py"
-      - "tools/build-module.py"
-      - "tools/export-bundled-module.py"
       - "third_party/**"
       - "source-files/**"
       - "config/detekt/**"
@@ -160,8 +157,7 @@ jobs:
           python3 -c 'import sys, zipfile; apks = [zipfile.ZipFile(p) for p in sys.argv[1:]]; required = {"AndroidManifest.xml", "resources.arsc", "classes.dex"}; assert all(required.issubset(z.namelist()) and z.testzip() is None for z in apks), "Invalid APK contents"' "artifacts/$DEBUG_APK" "artifacts/$RELEASE_APK"
           "$ANDROID_HOME/build-tools/37.0.0/aapt2" dump badging "artifacts/$RELEASE_APK" > /dev/null
           (cd artifacts && sha256sum "$DEBUG_APK" > "$DEBUG_APK.sha256" && sha256sum "$RELEASE_APK" > "$RELEASE_APK.sha256")
-      - name: Export and verify bundled companion module
-        run: python3 tools/export-bundled-module.py --output artifacts artifacts/*.apk
+          cp app/build/generated/reamicroModule/module/ReaMicro-Automation-Root-*.zip artifacts/
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:

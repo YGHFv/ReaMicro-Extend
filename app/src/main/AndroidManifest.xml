@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <uses-sdk tools:overrideLibrary="top.yukonga.miuix.kmp.blur" />
+    <!-- Effects are gated at API 33; older devices keep the app's solid-surface UI. -->
+    <uses-sdk tools:overrideLibrary="top.yukonga.miuix.kmp.blur,top.yukonga.miuix.kmp.glass" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -59,6 +60,7 @@
             <intent-filter>
                 <action android:name="com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION" />
                 <action android:name="com.reamicro.fix.ONLINE_COMPLETION_CANCEL" />
+                <action android:name="com.reamicro.fix.ONLINE_COMPLETION_PAUSE" />
             </intent-filter>
         </receiver>
 
@@ -106,6 +108,7 @@
 
         <activity
             android:name=".ui.ModuleMainActivity"
+            android:enableOnBackInvokedCallback="true"
             android:launchMode="singleTop"
             android:configChanges="locale|layoutDirection|uiMode"
             android:enabled="true"

@@ -33,10 +33,17 @@ internal fun throwIfWebDavDownloadCancelled(token: CancellableWebDavDownload) {
     if (token.cancelRequested || Thread.currentThread().isInterrupted) {
         throw CloudDownloadCancelledException()
     }
+    if (!com.reamicro.fix.hook.AccountHostRuntime.isCurrentStorage(token.storageIdentity)) {
+        throw CloudDownloadCancelledException("账号已切换，已停止旧账号下载")
+    }
 }
 
 internal fun webDavDownloadKey(path: String, name: String): String =
     normalizeWebDavPath(path.ifBlank { name })
+
+internal fun webDavDownloadKey(
+    identity: com.reamicro.fix.hook.AccountHostRuntime.Identity, path: String, name: String,
+): String = "${identity.accountId}:${identity.generation}|${webDavDownloadKey(path, name)}"
 
 internal fun syntheticWebDavBookEntry(path: String): WebDavEntry {
     val normalized = normalizeWebDavPath(path)

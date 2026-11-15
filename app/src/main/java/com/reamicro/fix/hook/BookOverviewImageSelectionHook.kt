@@ -1,11 +1,6 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethod
-
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.typeMatches
-
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
 import android.content.ContentValues
@@ -19,10 +14,9 @@ import android.widget.Toast
 import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiImagePresetTarget
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.epub.editor.AccountBookImageFiles
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.io.InputStream
 import java.lang.reflect.Proxy
@@ -39,206 +33,170 @@ class BookOverviewImageSelectionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val requestCoverFix: (Any) -> Boolean = { false },
+    private val enabledProvider: () -> Boolean = { true },
 ) {
 
-    private val contextStack = ThreadLocal.withInitial { mutableListOf<BookImageContext?>() }
+    private val host get() = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.imageSheet)
+    private val contextStack = ThreadLocal<java.util.ArrayDeque<BookImageContext>>()
+    private val sheetRenderStack = ThreadLocal<java.util.ArrayDeque<SheetRenderFrame>>()
     private val sheetGates = WeakHashMap<Any, BookImageSheetActionGate>()
-    private val nativeSheetUi by lazy { BookImageSheetUi(classLoader) }
+    private val nativeSheetUi by lazy { HostBookImageSheetUi(classLoader) }
+    private val imageUiHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
 
     fun install() {
-        hookBookCoverBannerItem()
-        hookBottomSheet(COVER_BOTTOM_SHEET_METHOD, ImageTarget.Cover)
-        hookBottomSheet(BANNER_BOTTOM_SHEET_METHOD, ImageTarget.Banner)
-    }
-
-    private fun hookBookCoverBannerItem() {
-        runCatching {
-            val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
-            val methods = itemsClass.declaredMethods.filter { method ->
-                method.hostNameMatches(BOOK_COVER_BANNER_ITEM_METHOD) &&
-                    method.parameterTypes.size == 5 &&
-                    // B4 把 Book 混淆为 of0，直接比名字会永远不成立，必须走符号解析。
-                    typeMatches(method.parameterTypes.getOrNull(1), BOOK_CLASS) &&
-                    typeMatches(method.parameterTypes.getOrNull(2), FUNCTION1_CLASS)
-            }
-            if (methods.isEmpty()) error("BookCoverBannerItem composable not found")
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val book = param.args?.getOrNull(1)
-                        val onUpdateCover = param.args?.getOrNull(2)
-
-                        stack().add(if (book != null && onUpdateCover != null) BookImageContext(book, onUpdateCover) else null)
-                        runCatching { EmbeddedHostUi.captureTypography(classLoader, param.args?.getOrNull(3)) }
-                        BookImageDialogStyle.capture(classLoader, param.args?.getOrNull(3))
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val stack = stack()
-                        if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex)
+        val symbols = host
+        requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+        requireNotNull(com.reamicro.fix.core.HostReaderFeatures.current)
+        val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        try {
+            handles += HookRuntime.hookMethod(symbols.method("overview"), object : HookCallback() {
+                override fun before(param: Call) {
+                    val book = param.args.getOrNull(1)?.takeIf(symbols.type("book")::isInstance) ?: return
+                    val update = param.args.getOrNull(2)?.takeIf(symbols.type("function1")::isInstance) ?: return
+                    val activity = activityProvider()?.takeUnless { it.isFinishing || it.isDestroyed } ?: return
+                    val identity = AccountHostRuntime.storageSnapshot(activity) ?: return
+                    val uuid = bookString(book, "uuid").trim()
+                    if (bookUid(book) != identity.accountId || !AccountBookImageFiles.validUuid(uuid) ||
+                        !AccountHostRuntime.isCurrentStorage(identity, activity)) return
+                    val frame = BookImageContext(book, update, java.lang.ref.WeakReference(activity), identity, uuid)
+                    (contextStack.get() ?: java.util.ArrayDeque<BookImageContext>().also(contextStack::set)).addLast(frame)
+                    param.setObjectExtra(IMAGE_FRAME, frame)
+                    runCatching { EmbeddedHostUi.captureTypography(classLoader, param.args.getOrNull(3)) }
+                    BookImageDialogStyle.capture(classLoader, param.args.getOrNull(3))
+                }
+                override fun after(param: Call) {
+                    val frame = param.getObjectExtra(IMAGE_FRAME) as? BookImageContext ?: return
+                    val frames = contextStack.get() ?: return
+                    if (frames.peekLast() === frame) frames.removeLast() else frames.remove(frame)
+                    if (frames.isEmpty()) contextStack.remove()
+                }
+            })
+            for (target in ImageTarget.entries) {
+                val role = target.id
+                val count = symbols.number("$role.callbacks")
+                val entry = symbols.method("$role.entry")
+                val content = symbols.method("$role.content")
+                handles += HookRuntime.hookMethod(entry, object : HookCallback() {
+                    override fun before(param: Call) {
+                        val args = param.args
+                        val previous = sheetBinding(args.getOrNull(1))
+                        val context = contextStack.get()?.peekLast() ?: previous?.context ?: return
+                        val callbacks = (1..count).map { index ->
+                            val callback = args[index]?.takeIf(symbols.type("function")::isInstance) ?: return
+                            sheetBinding(callback)?.callbacks?.first() ?: callback
+                        }
+                        val binding = SheetBinding(context, target, args[0] as Boolean, callbacks)
+                        args[1] = Proxy.newProxyInstance(classLoader, arrayOf(symbols.type("function")), binding)
+                        // Compose parameter 1 occupies bits 4..6 in the first changed mask.
+                        args[args.lastIndex] = (args.last() as Int) and (14 shl 3).inv()
                     }
                 })
+                handles += HookRuntime.hookMethod(content, object : HookCallback() {
+                    override fun before(param: Call) {
+                        val closure = param.thisObject ?: return
+                        val binding = sheetBinding(symbols.field("$role.pick").get(closure)) ?: return
+                        if (binding.target != target) return
+                        val state = symbols.field("$role.state").get(closure)?.takeIf(symbols.type("sheet")::isInstance) ?: return
+                        val scope = symbols.field("$role.scope").get(closure)?.takeIf(symbols.type("$role.scope")::isInstance) ?: return
+                        val composer = param.args.getOrNull(1)?.takeIf(symbols.type("composer")::isInstance) ?: return
+                        val activity = runCatching { requireImageOwner(binding.context) }.getOrNull() ?: return
+                        val lease = com.reamicro.fix.reload.ModuleResources.lease() ?: return
+                        val frame = SheetRenderFrame(binding, composer, scope, state, activity, lease)
+                        (sheetRenderStack.get() ?: java.util.ArrayDeque<SheetRenderFrame>().also(sheetRenderStack::set)).addLast(frame)
+                        param.setObjectExtra(IMAGE_SHEET_FRAME, frame)
+                        // Render the complete native sheet, including its own card and cancel row.
+                    }
+                    override fun after(param: Call) {
+                        val frame = param.getObjectExtra(IMAGE_SHEET_FRAME) as? SheetRenderFrame ?: return
+                        val frames = sheetRenderStack.get()
+                        if (frames?.peekLast() === frame) frames.removeLast() else frames?.remove(frame)
+                        if (frames?.isEmpty() == true) sheetRenderStack.remove()
+                        frame.lease.close()
+                    }
+                })
+                HookRuntime.deoptimize(entry)
+                HookRuntime.deoptimize(content)
             }
-            XposedBridge.log("$LOG_PREFIX book overview image context hook installed (${methods.size})")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook BookCoverBannerItem: ${it.stackTraceToString()}")
+            handles += HookRuntime.hookMethod(symbols.method("menu.text"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val frame = sheetRenderStack.get()?.peekLast() ?: return
+                    if (!frame.injected && param.throwable == null && param.args.getOrNull(16) === frame.composer &&
+                        param.args.firstOrNull() == "选取图片") frame.awaitingArrow = true
+                }
+            })
+            handles += HookRuntime.hookMethod(symbols.method("menu.icon"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val frame = sheetRenderStack.get()?.peekLast() ?: return
+                    if (!frame.injected && frame.awaitingArrow && param.throwable == null &&
+                        param.args.getOrNull(4) === frame.composer && param.args.firstOrNull() === symbols.call("menu.next")) {
+                        frame.awaitingArrow = false
+                        frame.awaitingRowEnd = true
+                    }
+                }
+            })
+            handles += HookRuntime.hookMethod(symbols.method("menu.endNode"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val frame = sheetRenderStack.get()?.peekLast() ?: return
+                    if (frame.injected || !frame.awaitingRowEnd || param.throwable != null ||
+                        param.thisObject !== frame.composer || param.args.firstOrNull() != true) return
+                    frame.awaitingRowEnd = false
+                    frame.injected = true
+                    runCatching {
+                        nativeSheetUi.renderAdditionalRows(frame.composer,
+                            BookImageSheetActions.additions(frame.binding.target == ImageTarget.Cover, frame.binding.hasSecondary)) { id ->
+                            performSheetAction(frame, id)
+                        }
+                    }.onFailure { HookRuntime.logError("$LOG_PREFIX native image menu additions failed", it) }
+                }
+            })
+            HookRuntime.deoptimize(symbols.method("overview"))
+            com.reamicro.fix.reload.ModuleResources.cleanup {
+                contextStack.remove()
+                sheetRenderStack.remove()
+                synchronized(sheetGates) { sheetGates.clear() }
+            }
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            throw error
         }
     }
 
-    private fun hookBottomSheet(methodName: String, target: ImageTarget) {
-        if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
-            hookMergedBottomSheet(methodName, target)
-            return
-        }
+    private inner class SheetRenderFrame(
+        val binding: SheetBinding,
+        val composer: Any,
+        val scope: Any,
+        val state: Any,
+        val activity: Activity,
+        val lease: AutoCloseable,
+    ) {
+        var awaitingArrow = false
+        var awaitingRowEnd = false
+        var injected = false
+    }
+
+    private fun performSheetAction(frame: SheetRenderFrame, id: BookImageSheetActions.Id) {
+        if (!isImageOwnerCurrent(frame.binding.context)) return
+        val gate = synchronized(sheetGates) { sheetGates.getOrPut(frame.state) { BookImageSheetActionGate() } }
+        if (!gate.tryStart()) return
         runCatching {
-
-            val ui = nativeSheetUi
-            val itemsClass = cls(BOOK_OVERVIEW_ITEMS_CLASS)
-            val callbackCount = if (target == ImageTarget.Cover) 4 else 3
-            val entry = itemsClass.declaredMethods.single { method ->
-                method.hostNameMatches(methodName) &&
-                    method.parameterTypes.map { it.name } == listOf("boolean") +
-                    List(callbackCount) { FUNCTION0_CLASS } + listOf(COMPOSER_CLASS, "int")
-            }.apply { isAccessible = true }
-            val content = itemsClass.declaredMethods.single { method ->
-                method.hostNameMatches("$methodName\$lambda\$2") &&
-                    method.parameterTypes.size == callbackCount + 6 &&
-                    typeMatches(method.parameterTypes[0], "kotlinx.coroutines.CoroutineScope") &&
-                    typeMatches(method.parameterTypes[1], "androidx.compose.material3.SheetState") &&
-                    method.parameterTypes.count { typeMatches(it, FUNCTION0_CLASS) } == callbackCount &&
-                    method.parameterTypes.takeLast(3).map { it.name } ==
-                    listOf("androidx.compose.foundation.layout.ColumnScope", COMPOSER_CLASS, "int")
-            }.apply { isAccessible = true }
-
-            XposedBridge.hookMethod(content, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val args = param.args ?: return
-                    val binding = args.firstNotNullOfOrNull(::sheetBinding) ?: return
-                    if (binding.target != target) return
-                    val activity = activityProvider() ?: return
-                    if (activity.isFinishing || activity.isDestroyed) return
-                    val scope = args[0] ?: return
-                    val sheetState = args[1] ?: return
-                    val composer = args[args.size - 2] ?: return
-                    val gate = synchronized(sheetGates) {
-                        sheetGates.getOrPut(sheetState) { BookImageSheetActionGate() }
-                    }
-
-                    ui.render(composer, BookImageSheetActions.items(target == ImageTarget.Cover, binding.hasSecondary)) { id ->
-                        if (gate.tryStart()) {
-                            runCatching {
-                                ui.hide(scope, sheetState) { hidden, error ->
-                                    gate.hideFinished(hidden)
-                                    if (hidden) {
-                                        synchronized(sheetGates) { sheetGates.remove(sheetState) }
-                                        activity.runOnUiThread {
-                                            if (!activity.isFinishing && !activity.isDestroyed) {
-                                                runCatching { binding.execute(id) }.onFailure {
-                                                    activity.toast("操作失败，请重试")
-                                                    XposedBridge.log("$LOG_PREFIX image action failed: $it")
-                                                }
-                                            }
-                                        }
-                                    } else if (error != null) {
-                                        XposedBridge.log("$LOG_PREFIX image sheet dismissal cancelled: $error")
-                                    }
-                                }
-                            }.onFailure {
-                                gate.hideFinished(false)
-                                activity.toast("窗口关闭失败，请重试")
-                                XposedBridge.log("$LOG_PREFIX image sheet dismissal failed: $it")
-                            }
+            nativeSheetUi.hide(frame.binding.target.id, frame.scope, frame.state) { hidden, error ->
+                gate.hideFinished(hidden)
+                if (hidden) {
+                    synchronized(sheetGates) { sheetGates.remove(frame.state) }
+                    frame.activity.runOnModuleUiThread {
+                        if (isImageOwnerCurrent(frame.binding.context)) runCatching {
+                            frame.binding.execute(id)
+                        }.onFailure {
+                            if (isImageOwnerCurrent(frame.binding.context)) frame.activity.toast("操作失败，请重试")
+                            HookRuntime.logError("$LOG_PREFIX image action failed", it)
                         }
                     }
-                    param.result = ui.unit
-                }
-            })
-            XposedBridge.hookMethod(entry, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val args = param.args ?: return
-                    val previous = sheetBinding(args.getOrNull(1))
-                    val context = currentBookContext() ?: previous?.context ?: return
-                    val callbacks = (1..callbackCount).map { index ->
-                        val callback = args[index] ?: return
-
-                        sheetBinding(callback)?.callbacks?.first() ?: callback
-                    }
-                    val binding = SheetBinding(context, target, args[0] as Boolean, callbacks)
-                    args[1] = Proxy.newProxyInstance(classLoader, arrayOf(cls(FUNCTION0_CLASS)), binding)
-
-                    args[args.lastIndex] = (args.last() as Int) and (0x7 shl 4).inv()
-
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX $methodName unified native content installed")
-        }.onFailure {
-
-            XposedBridge.log("$LOG_PREFIX $methodName native menu kept (unsupported ABI): ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookMergedBottomSheet(methodName: String, target: ImageTarget) {
-        com.reamicro.fix.core.HookInstallReport.install("BookOverviewImageSelectionHook", methodName) {
-            val ui = B4BookImageSheetUi(classLoader)
-            val cover = target == ImageTarget.Cover
-            val callbackCount = if (cover) 4 else 3
-            val entry = cls(BOOK_OVERVIEW_ITEMS_CLASS).declaredMethods.single {
-                it.hostNameMatches(methodName) && it.parameterCount == callbackCount + 3 &&
-                    it.parameterTypes.first() == Boolean::class.javaPrimitiveType
+                } else if (error != null) HookRuntime.logError("$LOG_PREFIX image sheet dismissal failed", error)
             }
-            XposedBridge.hookMethod(entry, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val args = param.args ?: return
-                    val previous = sheetBinding(args.getOrNull(1))
-                    val context = currentBookContext() ?: previous?.context ?: return
-                    val callbacks = (1..callbackCount).map { index ->
-                        val callback = args[index] ?: return
-                        sheetBinding(callback)?.callbacks?.first() ?: callback
-                    }
-                    val binding = SheetBinding(context, target, args[0] as Boolean, callbacks)
-                    args[1] = Proxy.newProxyInstance(classLoader, arrayOf(cls(FUNCTION0_CLASS)), binding)
-                    args[args.lastIndex] = (args.last() as Int) and (0x7 shl 4).inv()
-                }
-            })
-            val content = cls(if (cover) "ReaMicroHost.BookCoverSheetContent" else "ReaMicroHost.BookBannerSheetContent")
-            val invoke = content.hostMethod("invoke", Any::class.java, Any::class.java, Any::class.java)
-            XposedBridge.hookMethod(invoke, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val closure = param.thisObject ?: return
-                    if (content.hostField("branch").getByte(closure) != 0.toByte()) return
-                    val binding = sheetBinding(content.hostField("pick").get(closure)) ?: return
-                    if (binding.target != target) return
-                    val composer = param.args?.getOrNull(1) ?: return
-                    val activity = activityProvider() ?: return
-                    val state = content.hostField("sheetState").get(closure) ?: return
-                    val scope = content.hostField("coroutineScope").get(closure) ?: return
-                    val gate = synchronized(sheetGates) { sheetGates.getOrPut(state) { BookImageSheetActionGate() } }
-                    ui.render(composer, BookImageSheetActions.items(cover, binding.hasSecondary)) { id ->
-                        if (gate.tryStart()) {
-                            ui.hide(scope, state) { hidden, error ->
-                                gate.hideFinished(hidden)
-                                if (hidden) {
-                                    synchronized(sheetGates) { sheetGates.remove(state) }
-                                    activity.runOnUiThread {
-                                        if (!activity.isFinishing && !activity.isDestroyed) {
-                                            runCatching { binding.execute(id) }.onFailure {
-                                                activity.toast("操作失败，请重试")
-                                                XposedBridge.log("$LOG_PREFIX image action failed: $it")
-                                            }
-                                        }
-                                    }
-                                } else if (error != null) {
-                                    XposedBridge.log("$LOG_PREFIX image sheet dismissal failed: $error")
-                                }
-                            }
-                        }
-                    }
-                    param.result = targetUnit()
-                }
-            })
-            XposedBridge.deoptimize(entry)
-            XposedBridge.deoptimize(invoke)
+        }.onFailure {
+            gate.hideFinished(false)
+            if (isImageOwnerCurrent(frame.binding.context)) frame.activity.toast("窗口关闭失败，请重试")
+            HookRuntime.logError("$LOG_PREFIX image sheet dismissal failed", it)
         }
     }
 
@@ -252,50 +210,57 @@ class BookOverviewImageSelectionHook(
         val hasSecondary: Boolean,
         val callbacks: List<Any>,
     ) : InvocationHandler {
-        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? = when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
-            "invoke" -> { invokeFunction0(callbacks.first()); targetUnit() }
-            "toString" -> "ReaMicro-NativeImageSheetBinding"
-            "hashCode" -> System.identityHashCode(proxy)
-            "equals" -> proxy === args?.firstOrNull()
+        override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?): Any? = when {
+            method == host.method("invoke") -> {
+                if (isImageOwnerCurrent(context)) invokeFunction0(callbacks.first())
+                targetUnit()
+            }
+            method.name == "toString" -> "ReaMicro-NativeImageSheetBinding"
+            method.name == "hashCode" -> System.identityHashCode(proxy)
+            method.name == "equals" -> proxy === args?.firstOrNull()
             else -> null
         }
 
         fun execute(id: BookImageSheetActions.Id) {
+            val activity = requireImageOwner(context)
             fun dismiss() = invokeFunction0(callbacks.last())
             when (id) {
-                BookImageSheetActions.Id.Pick -> invokeFunction0(callbacks[0])
-                BookImageSheetActions.Id.Save -> if (target == ImageTarget.Cover)
-                    invokeFunction0(callbacks[1])
-                else { dismiss(); saveCurrentImageToGallery(context, target) }
-                BookImageSheetActions.Id.Restore -> if (hasSecondary) invokeFunction0(callbacks[2])
-                BookImageSheetActions.Id.Remove -> if (hasSecondary) invokeFunction0(callbacks[1])
+                BookImageSheetActions.Id.Save -> { dismiss(); saveCurrentImageToGallery(context, target) }
                 BookImageSheetActions.Id.Online -> { dismiss(); showOnlineImageDialog(context, target) }
                 BookImageSheetActions.Id.Generate -> { dismiss(); showAiImageDialog(context, target) }
                 BookImageSheetActions.Id.Fix -> {
                     dismiss()
-                    if (!requestCoverFix(context.book)) activityProvider()?.toast("当前页面无法执行封面修复")
+                    val started = AccountHostRuntime.withCurrentStorage(context.identity, activity) {
+                        requireImageOwner(context)
+                        requestCoverFix(context.book)
+                    }
+                    if (!started && isImageOwnerCurrent(context)) activity.toast("当前页面无法执行封面修复")
                 }
-                BookImageSheetActions.Id.Cancel -> dismiss()
             }
         }
     }
 
     private fun showOnlineImageDialog(context: BookImageContext, target: ImageTarget) {
-        val activity = activityProvider() ?: return
-        activity.runOnUiThread {
+        val activity = requireImageOwner(context)
+        activity.runOnModuleUiThread {
+            if (!isImageOwnerCurrent(context)) return@runOnModuleUiThread
             HostBookImageDialog(activity, "在线${target.label}", generated = false,
-                fetch = { url, _ -> downloadImageBytes(url) },
+                fetch = { url, _ ->
+                    requireImageOwner(context)
+                    downloadImageBytes(url).also { requireImageOwner(context) }
+                },
                 applyImage = { bytes ->
                     val applied = saveBookImage(context, target, bytes)
                     val finish: () -> Unit = { finishApply(activity, context, target, applied) }
                     finish
-                }).show()
+                }, checkCurrent = { requireImageOwner(context) }).show()
         }
     }
 
     private fun showAiImageDialog(context: BookImageContext, target: ImageTarget) {
-        val activity = activityProvider() ?: return
-        activity.runOnUiThread {
+        val activity = requireImageOwner(context)
+        activity.runOnModuleUiThread {
+            if (!isImageOwnerCurrent(context)) return@runOnModuleUiThread
             val appContext = activity.applicationContext ?: activity
             val config = AiApiStore.imageApi(appContext)
             val settings = AiApiStore.imageSettings(appContext)
@@ -304,32 +269,53 @@ class BookOverviewImageSelectionHook(
             HostBookImageDialog(activity, "生成${target.label}", generated = true,
                 initialPrompt = preset.prompt, model = config?.model?.takeIf { it.isNotBlank() } ?: "未配置",
                 fetch = { prompt, size ->
+                    requireImageOwner(context)
                     val api = requireNotNull(config) { "请先在 API 配置里设置生图 API" }
                     generateImage(api, renderImagePrompt(prompt, context.book),
-                        loadReferenceImageBytes(context.book), size, target)
+                        loadReferenceImageBytes(context), size, target).also { requireImageOwner(context) }
                 },
                 applyImage = { bytes ->
                     val applied = saveBookImage(context, target, bytes)
                     val finish: () -> Unit = { finishApply(activity, context, target, applied) }
                     finish
                 },
-                saveImage = { bytes -> saveToGallery(activity, bytes, target); Unit },
+                saveImage = { bytes ->
+                    saveToGallery(activity, bytes, target, checkCurrent = { requireImageOwner(context) },
+                        commit = { action -> AccountHostRuntime.withCurrentStorage(context.identity, activity) {
+                            requireImageOwner(context); action()
+                        } })
+                    Unit
+                },
+                checkCurrent = { requireImageOwner(context) },
             ).show()
         }
     }
 
     private fun saveBookImage(context: BookImageContext, target: ImageTarget, bytes: ByteArray): AppliedImage {
+        val activity = requireImageOwner(context)
         validateImageBytes(bytes)
-        val activity = activityProvider() ?: error("Activity unavailable")
-        val bookDir = resolveBookDir(activity, context.book) ?: error("书籍目录不可用")
+        val coverPlan = if (target == ImageTarget.Cover) {
+            com.reamicro.fix.epub.editor.AccountBookCoverFiles.nativePlan(classLoader,
+                bookString(context.book, "cover"), "cover.${imageExtensionAndMime(bytes).first}")
+        } else null
         val relative = when (target) {
-            ImageTarget.Cover -> coverRelativeForWrite(context.book)
+            ImageTarget.Cover -> requireNotNull(coverPlan).path
             ImageTarget.Banner -> bannerRelativeForWrite(context.book)
         }
-        val targetFile = childFile(bookDir, relative)
-        targetFile.parentFile?.mkdirs()
-        targetFile.writeBytes(bytes)
-        return AppliedImage(relative, targetFile)
+        if (coverPlan != null) {
+            com.reamicro.fix.epub.editor.AccountBookCoverFiles.prepare(
+                AccountBookImageFiles.directory(activity.filesDir, context.identity.accountId, context.uuid), coverPlan,
+                checkCurrent = { requireImageOwner(context) },
+                commit = { action -> AccountHostRuntime.withCurrentStorage(context.identity, activity) {
+                    requireImageOwner(context); action()
+                } })
+        }
+        val file = AccountBookImageFiles.write(activity.filesDir, context.identity.accountId, context.uuid,
+            relative, bytes, checkCurrent = { requireImageOwner(context) },
+            commit = { action -> AccountHostRuntime.withCurrentStorage(context.identity, activity) {
+                requireImageOwner(context); action()
+            } })
+        return AppliedImage(relative, file)
     }
 
     private fun finishApply(
@@ -338,15 +324,20 @@ class BookOverviewImageSelectionHook(
         target: ImageTarget,
         applied: AppliedImage,
     ) {
-        if (target == ImageTarget.Cover) {
-            invokeFunction1(context.onUpdateCover, applied.relativePath)
+        try {
+            AccountBookImageFiles.notifyOwner(checkCurrent = { check(requireImageOwner(context) === activity) },
+                commit = { action -> AccountHostRuntime.withCurrentStorage(context.identity, activity) { action() } },
+                onUpdated = { if (target == ImageTarget.Cover) host.method("update").invoke(context.onUpdateCover, applied.relativePath) })
+        } catch (error: Throwable) {
+            throw com.reamicro.fix.epub.editor.EpubWriteNotConfirmed("图片文件已写入，但页面更新未完成。请重新打开检查。", error)
         }
+        if (!isImageOwnerCurrent(context)) return
         activity.toast("${target.label}已应用")
-        activity.window?.decorView?.postDelayed({
+        imageUiHandler.postDelayed({
             runCatching {
-                if (!activity.isFinishing && !activity.isDestroyed) activity.recreate()
+                if (isImageOwnerCurrent(context)) activity.recreate()
             }.onFailure {
-                XposedBridge.log("$LOG_PREFIX failed to refresh book overview image: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX failed to refresh book overview image: ${it.stackTraceToString()}")
             }
         }, REFRESH_DELAY_MS)
     }
@@ -603,7 +594,7 @@ class BookOverviewImageSelectionHook(
                 runCatching { downloadImageBytes(candidate) }
                     .onSuccess { return it }
                     .onFailure {
-                        XposedBridge.log("$LOG_PREFIX failed to fetch generated image url: ${it.stackTraceToString()}")
+                        HookRuntime.log("$LOG_PREFIX failed to fetch generated image url: ${it.stackTraceToString()}")
                     }
             }
             extractImageBytes(json.opt(key))?.let { return it }
@@ -618,11 +609,11 @@ class BookOverviewImageSelectionHook(
     }
 
     private fun renderImagePrompt(template: String, book: Any): String {
-        val title = callString(book, "getTitle").trim().ifBlank { "当前书籍" }
+        val title = bookString(book, "title").trim().ifBlank { "当前书籍" }
         val bookText = buildList {
             title.takeIf { it.isNotBlank() }?.let { add(it) }
-            callString(book, "getAuthor").trim().takeIf { it.isNotBlank() }?.let { add("作者：$it") }
-            callString(book, "getPublisher").trim().takeIf { it.isNotBlank() }?.let { add("出版/关联：$it") }
+            bookString(book, "author").trim().takeIf { it.isNotBlank() }?.let { add("作者：$it") }
+            bookString(book, "publisher").trim().takeIf { it.isNotBlank() }?.let { add("出版/关联：$it") }
         }.joinToString("，").ifBlank { "当前书籍" }
         val prompt = template.trim()
         val replaced = prompt
@@ -673,37 +664,47 @@ class BookOverviewImageSelectionHook(
         Regex(""".*/api/v\d+$""", RegexOption.IGNORE_CASE).matches(baseUrl)
 
     private fun saveCurrentImageToGallery(context: BookImageContext, target: ImageTarget) {
-        val activity = activityProvider() ?: return
+        val activity = requireImageOwner(context)
         activity.toast("正在保存${target.label}到相册")
         com.reamicro.fix.reload.ModuleResources.thread {
             val result = runCatching {
-                val bytes = loadCurrentImageBytes(activity, context.book, target)
-                    ?: error("未找到${target.label}图片")
-                saveToGallery(activity, bytes, target)
+                val bytes = loadCurrentImageBytes(context, target) ?: error("未找到${target.label}图片")
+                saveToGallery(activity, bytes, target, checkCurrent = { requireImageOwner(context) },
+                    commit = { action -> AccountHostRuntime.withCurrentStorage(context.identity, activity) {
+                        requireImageOwner(context); action()
+                    } })
             }
-            activity.runOnUiThread {
-                result
-                    .onSuccess { activity.toast("${target.label}已保存到相册") }
+            activity.runOnModuleUiThread {
+                if (!isImageOwnerCurrent(context)) return@runOnModuleUiThread
+                result.onSuccess { activity.toast("${target.label}已保存到相册") }
                     .onFailure {
-                        val text = it.message ?: it.javaClass.simpleName
-                        activity.toast(text)
-                        XposedBridge.log("$LOG_PREFIX save $target to gallery failed: ${it.stackTraceToString()}")
+                        activity.toast(it.message ?: it.javaClass.simpleName)
+                        HookRuntime.log("$LOG_PREFIX save $target to gallery failed: ${it.stackTraceToString()}")
                     }
             }
         }.apply { name = "ReaMicro-SaveBookImage" }.start()
     }
 
-    private fun loadCurrentImageBytes(activity: Activity, book: Any, target: ImageTarget): ByteArray? =
-        when (target) {
-            ImageTarget.Cover -> loadReferenceImageBytes(book)
+    private fun loadCurrentImageBytes(context: BookImageContext, target: ImageTarget): ByteArray? {
+        val activity = requireImageOwner(context)
+        return when (target) {
+            ImageTarget.Cover -> loadReferenceImageBytes(context)
             ImageTarget.Banner -> {
-                val bookDir = resolveBookDir(activity, book) ?: return null
-                val relative = bannerRelativeForWrite(book)
-                readImageFile(childFile(bookDir, relative))
+                val bookDir = resolveBookDir(activity, context) ?: return null
+                val relative = bannerRelativeForWrite(context.book)
+                readImageFile(childFile(bookDir, relative)).also { requireImageOwner(context) }
             }
         }
+    }
 
-    private fun saveToGallery(activity: Activity, bytes: ByteArray, target: ImageTarget): Uri {
+    private fun saveToGallery(
+        activity: Activity,
+        bytes: ByteArray,
+        target: ImageTarget,
+        checkCurrent: () -> Unit,
+        commit: (() -> Unit) -> Unit,
+    ): Uri {
+        checkCurrent()
         validateImageBytes(bytes)
         val (extension, mime) = imageExtensionAndMime(bytes)
         val resolver = activity.contentResolver
@@ -716,18 +717,30 @@ class BookOverviewImageSelectionHook(
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             }
         }
+        checkCurrent()
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("无法创建相册文件")
         try {
-            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: error("无法写入相册文件")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
+            resolver.openOutputStream(uri)?.use { output ->
+                var offset = 0
+                while (offset < bytes.size) {
+                    checkCurrent()
+                    val count = minOf(64 * 1024, bytes.size - offset)
+                    output.write(bytes, offset, count)
+                    offset += count
+                }
+            } ?: error("无法写入相册文件")
+            commit {
+                checkCurrent()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    check(resolver.update(uri, values, null, null) > 0) { "相册文件尚未发布" }
+                }
             }
             return uri
         } catch (error: Throwable) {
-            runCatching { resolver.delete(uri, null, null) }
+            runCatching { resolver.delete(uri, null, null) }.onFailure(error::addSuppressed)
             throw error
         }
     }
@@ -794,29 +807,26 @@ class BookOverviewImageSelectionHook(
         return output.toByteArray()
     }
 
-    private fun loadReferenceImageBytes(book: Any): ByteArray? {
-        val activity = activityProvider() ?: return null
-        val cover = callString(book, "getCover").trim()
+    private fun loadReferenceImageBytes(context: BookImageContext): ByteArray? {
+        val activity = requireImageOwner(context)
+        val cover = bookString(context.book, "cover").trim()
         val direct = when {
             cover.startsWith("data:image/", ignoreCase = true) ->
                 runCatching { decodeDataUrl(cover)?.also(::validateImageBytes) }.getOrNull()
-            isRemoteUrl(cover) ->
-                runCatching { downloadImageBytes(cover) }.getOrNull()
+            isRemoteUrl(cover) -> runCatching { downloadImageBytes(cover) }.getOrNull()
             cover.startsWith("content://", ignoreCase = true) ->
                 runCatching { readImageUri(activity, Uri.parse(cover)) }.getOrNull()
             else -> null
         }
+        requireImageOwner(context)
         if (direct != null) return direct
-
-        val bookDir = resolveBookDir(activity, book) ?: return null
-        val relatives = listOf(
-            safeRelativePath(cover),
-            DEFAULT_COVER_FILE,
-        ).filter { it.isNotBlank() }.distinct()
-        relatives.forEach { relative ->
-            runCatching { readImageFile(childFile(bookDir, relative)) }
-                .getOrNull()
-                ?.let { return it }
+        val bookDir = resolveBookDir(activity, context) ?: return null
+        val relatives = listOf(safeRelativePath(cover), DEFAULT_COVER_FILE).filter { it.isNotBlank() }.distinct()
+        for (relative in relatives) {
+            requireImageOwner(context)
+            val bytes = runCatching { readImageFile(childFile(bookDir, relative)) }.getOrNull()
+            requireImageOwner(context)
+            if (bytes != null) return bytes
         }
         return null
     }
@@ -836,13 +846,8 @@ class BookOverviewImageSelectionHook(
         return bytes
     }
 
-    private fun coverRelativeForWrite(book: Any): String {
-        val current = safeRelativePath(callString(book, "getCover"))
-        return current.ifBlank { DEFAULT_COVER_FILE }
-    }
-
     private fun bannerRelativeForWrite(book: Any): String {
-        val cover = safeRelativePath(callString(book, "getCover"))
+        val cover = safeRelativePath(bookString(book, "cover"))
         require(cover.isNotBlank()) { "请先设置封面后再设置横幅" }
         return com.reamicro.fix.epub.editor.EpubBannerVariants.primary(cover, book.javaClass.classLoader)
     }
@@ -856,48 +861,28 @@ class BookOverviewImageSelectionHook(
         return segments.joinToString("/")
     }
 
-    private fun childFile(root: File, relativePath: String): File {
-        val rootFile = root.canonicalFile
-        val child = File(rootFile, relativePath.replace('/', File.separatorChar)).canonicalFile
-        require(child.path == rootFile.path || child.path.startsWith(rootFile.path + File.separator)) {
-            "图片路径越界"
-        }
-        return child
+    private fun childFile(root: File, relativePath: String): File =
+        AccountBookImageFiles.child(root, relativePath)
+
+    private fun resolveBookDir(activity: Activity, context: BookImageContext): File? {
+        check(requireImageOwner(context) === activity)
+        return AccountBookImageFiles.directory(activity.filesDir, context.identity.accountId, context.uuid)
+            .takeIf { it.isDirectory }
     }
 
-    private fun resolveBookDir(activity: Activity, book: Any): File? {
-        val filesDir = activity.filesDir ?: return null
-        val uid = callLong(book, "getUid")
-        val uuid = callString(book, "getUuid").trim()
-        if (uuid.isBlank()) return null
-        val preferred = if (uid >= 0L) File(File(File(filesDir, uid.toString()), "books"), uuid) else null
-        val candidates = buildList {
-            preferred?.let { add(it) }
-            filesDir.listFiles()
-                ?.filter { it.isDirectory && it.name.toLongOrNull() != null }
-                ?.mapTo(this) { File(File(it, "books"), uuid) }
-            uriFile(callString(book, "getUri"))?.let { uri ->
-                add(if (uri.isDirectory) uri else uri.parentFile ?: uri)
-            }
+    private fun requireImageOwner(context: BookImageContext): Activity {
+        check(enabledProvider()) { "封面与横幅选择已关闭" }
+        val activity = context.activity.get() ?: error("图片页面已经关闭")
+        check(activityProvider() === activity && !activity.isFinishing && !activity.isDestroyed &&
+            bookUid(context.book) == context.identity.accountId && bookString(context.book, "uuid").trim() == context.uuid &&
+            AccountHostRuntime.isCurrentStorage(context.identity, activity)) {
+            "账号或图书已变化，请重新打开图片菜单"
         }
-        val existing = candidates
-            .mapNotNull { runCatching { it.canonicalFile }.getOrNull() }
-            .firstOrNull { it.isDirectory }
-        if (existing != null) return existing
-        val target = preferred?.canonicalFile ?: return null
-        target.mkdirs()
-        return target.takeIf { it.isDirectory }
+        return activity
     }
 
-    private fun uriFile(value: String): File? {
-        val trimmed = value.trim()
-        if (trimmed.isBlank()) return null
-        return when {
-            trimmed.startsWith("file://") -> File(Uri.parse(trimmed).path ?: return null)
-            trimmed.startsWith("/") -> File(trimmed)
-            else -> null
-        }
-    }
+    private fun isImageOwnerCurrent(context: BookImageContext): Boolean =
+        runCatching { requireImageOwner(context); true }.getOrDefault(false)
 
     private fun extractApiError(text: String): String =
         runCatching {
@@ -906,41 +891,14 @@ class BookOverviewImageSelectionHook(
             error.optString("message")
         }.getOrDefault("")
 
-    private fun currentBookContext(): BookImageContext? =
-        stack().lastOrNull()
-
-    private fun stack(): MutableList<BookImageContext?> {
-        val existing = contextStack.get()
-        if (existing != null) return existing
-        val created = mutableListOf<BookImageContext?>()
-        contextStack.set(created)
-        return created
-    }
-
     private fun invokeFunction0(callback: Any?) {
-        runCatching { XposedHelpers.callMethod(callback, "invoke") }
-            .onFailure { XposedBridge.log("$LOG_PREFIX failed to invoke Function0: ${it.stackTraceToString()}") }
+        runCatching { host.method("invoke").invoke(callback) }
+            .onFailure { HookRuntime.log("$LOG_PREFIX failed to invoke Function0: ${it.stackTraceToString()}") }
     }
 
-    private fun invokeFunction1(callback: Any?, value: Any?) {
-        runCatching { XposedHelpers.callMethod(callback, "invoke", value) }
-            .onFailure { XposedBridge.log("$LOG_PREFIX failed to invoke Function1: ${it.stackTraceToString()}") }
-    }
-
-    private fun targetUnit(): Any? =
-        runCatching { cls(KOTLIN_UNIT_CLASS).hostField("INSTANCE").get(null) }.getOrNull()
-
-    private fun cls(name: String): Class<*> =
-        XposedHelpers.findClass(name, classLoader)
-
-    private fun callString(target: Any, methodName: String): String =
-        runCatching { XposedHelpers.callMethod(target, methodName) as? String }
-            .getOrDefault("")
-            .orEmpty()
-
-    private fun callLong(target: Any, methodName: String): Long =
-        runCatching { (XposedHelpers.callMethod(target, methodName) as? Number)?.toLong() ?: 0L }
-            .getOrDefault(0L)
+    private fun targetUnit(): Any = requireNotNull(com.reamicro.fix.core.HostReaderFeatures.current).unit
+    private fun bookString(book: Any, role: String): String = host.field("book.$role").get(book) as? String ?: ""
+    private fun bookUid(book: Any): Long = host.field("book.uid").getLong(book)
 
     private fun isRemoteUrl(value: String): Boolean {
         val lower = value.trim().lowercase(Locale.ROOT)
@@ -950,6 +908,9 @@ class BookOverviewImageSelectionHook(
     private data class BookImageContext(
         val book: Any,
         val onUpdateCover: Any,
+        val activity: java.lang.ref.WeakReference<Activity>,
+        val identity: AccountHostRuntime.Identity,
+        val uuid: String,
     )
 
     private data class AppliedImage(
@@ -968,15 +929,8 @@ class BookOverviewImageSelectionHook(
 
     private companion object {
         private const val LOG_PREFIX = "ReaMicro LSP"
-        private const val BOOK_OVERVIEW_ITEMS_CLASS = HostClasses.Host.BOOK_OVERVIEW_ITEMS
-        private const val BOOK_CLASS = HostClasses.Host.BOOK
-        private const val BOOK_COVER_BANNER_ITEM_METHOD = "BookCoverBannerItem"
-        private const val COVER_BOTTOM_SHEET_METHOD = "CoverBottomSheet"
-        private const val BANNER_BOTTOM_SHEET_METHOD = "BannerBottomSheet"
-        private const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
-        private const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
-        private const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
-        private const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
+        private const val IMAGE_FRAME = "ReaMicro.image.context"
+        private const val IMAGE_SHEET_FRAME = "ReaMicro.image.sheet.render"
         private const val DEFAULT_COVER_FILE = "book.cover"
         private const val DEFAULT_IMAGE_SIZE = "2k"
         private const val USER_AGENT = "ReaMicro-Extend/book-image"
@@ -992,5 +946,5 @@ class BookOverviewImageSelectionHook(
 }
 
 private fun Activity.toast(message: String) {
-    runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
+    runOnModuleUiThread { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
 }

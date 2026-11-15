@@ -3,6 +3,7 @@ package com.reamicro.fix.ui.liquid
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
@@ -24,6 +25,7 @@ import androidx.compose.ui.node.requireGraphicsContext
 import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 
 @Immutable
@@ -91,23 +93,43 @@ private class InnerShadowNode(
     private val paint = Paint()
     private val clipPath = Path()
     private var prevRadius = Float.NaN
+    private var cachedOutline: Outline? = null
+    private var cachedShape: Shape? = null
+    private var cachedSize = Size.Unspecified
+    private var cachedLayoutDirection: LayoutDirection? = null
+    private var cachedDensity = Float.NaN
+    private var cachedFontScale = Float.NaN
 
     override fun ContentDrawScope.draw() {
         drawContent()
 
         val shadow = shadow() ?: return
+        // Still read alpha in draw so the next press invalidates this node, while idle frames
+        // avoid both the mask recording and its offscreen blur.
+        if (shadow.alpha <= 0f) return
         val layer = shadowLayer ?: return
 
         val radius = shadow.radius.toPx()
         val offsetX = shadow.offset.x.toPx()
         val offsetY = shadow.offset.y.toPx()
 
-        val outline = shape.createOutline(size, layoutDirection, this)
-        clipPath.reset()
-        when (outline) {
-            is Outline.Rectangle -> clipPath.addRect(outline.rect)
-            is Outline.Rounded -> clipPath.addRoundRect(outline.roundRect)
-            is Outline.Generic -> clipPath.addPath(outline.path)
+        val outline = cachedOutline?.takeIf {
+            cachedShape == shape && cachedSize == size &&
+                cachedLayoutDirection == layoutDirection &&
+                cachedDensity == density && cachedFontScale == fontScale
+        } ?: shape.createOutline(size, layoutDirection, this).also {
+            cachedOutline = it
+            cachedShape = shape
+            cachedSize = size
+            cachedLayoutDirection = layoutDirection
+            cachedDensity = density
+            cachedFontScale = fontScale
+            clipPath.reset()
+            when (it) {
+                is Outline.Rectangle -> clipPath.addRect(it.rect)
+                is Outline.Rounded -> clipPath.addRoundRect(it.roundRect)
+                is Outline.Generic -> clipPath.addPath(it.path)
+            }
         }
 
         paint.color = shadow.color

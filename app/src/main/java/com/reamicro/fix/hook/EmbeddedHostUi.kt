@@ -1,8 +1,7 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.HostTypographyMetrics
+import com.reamicro.fix.core.HostPackages
 
 import android.app.Activity
 import android.content.Context
@@ -14,15 +13,28 @@ import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
+import android.os.Build
+import android.util.TypedValue
 import android.widget.EditText
+import android.widget.TextView
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
+import com.reamicro.fix.reload.ModuleResources
 import java.util.WeakHashMap
 
 internal object EmbeddedHostUi {
-    const val PACKAGE = "app.zhendong.reamicro"
     const val FONT_ROOT = "composeResources/reamicro.composeapp.generated.resources/font/"
     data class TextMetrics(val bodyLarge: Float=16f,val bodySmall: Float=12f,val labelLarge: Float=14f,val titleSmall: Float=16f,val bodyLargePx:Float=0f,val labelLargePx:Float=0f,val bodyLinePx:Float=0f,val labelLinePx:Float=0f,val labelWeight:Int=500)
-    @Volatile var textMetrics=TextMetrics()
+    var textMetrics by mutableStateOf(TextMetrics())
+        private set
+    var typographyStyles by mutableStateOf<Map<String, HostTypographyMetrics.Style>>(emptyMap())
         private set
     private var lastTypography: Any?=null
     private var lastDensity: Pair<Float,Float>?=null
@@ -30,6 +42,21 @@ internal object EmbeddedHostUi {
     @Volatile private var uiFontResolver:(()->Typeface?)?=null
     @Volatile private var uiFontFamilyResolver:((Context)->FontFamily)?=null
     @Volatile private var materialFontFamilyResolver:((Context, FontFamily)->FontFamily)?=null
+    private var typographyWarningReported = false
+
+    init {
+        ModuleResources.cleanup {
+            uiFontResolver = null
+            uiFontFamilyResolver = null
+            materialFontFamilyResolver = null
+            synchronized(fontCache) { fontCache.clear() }
+            typographyStyles = emptyMap()
+            textMetrics = TextMetrics()
+            lastTypography = null
+            lastDensity = null
+            typographyWarningReported = false
+        }
+    }
     fun bindUiFontResolver(resolver:()->Typeface?){uiFontResolver=resolver}
     fun bindUiFontFamilyResolver(resolver:(Context)->FontFamily){uiFontFamilyResolver=resolver}
     fun bindMaterialFontFamilyResolver(resolver:(Context,FontFamily)->FontFamily){materialFontFamilyResolver=resolver}
@@ -39,23 +66,23 @@ internal object EmbeddedHostUi {
     }
     fun uiFontFamily(context:Context):FontFamily {
         val host=hostContext(context) ?: return FontFamily.Default
-        return uiFontFamilyResolver?.invoke(host) ?: StructureHome130Style.fonts(host).serif
+        return uiFontFamilyResolver?.invoke(host) ?: HostEmbeddedStyle.fonts(host).serif
     }
     fun uiTypeface(context:Context):Typeface? = if(hostContext(context)==null)null else
         uiFontResolver?.invoke() ?: nativeTypeface(context)
     fun hostContext(context: Context): Context? {
         var current=context
         repeat(16) {
-            if(current is Activity) return current.takeIf { it.packageName==PACKAGE }
+            if(current is Activity) return current.takeIf { HostPackages.contains(it.packageName) }
             val base=(current as? ContextWrapper)?.baseContext
-            if(base==null || base===current) return current.takeIf { it.packageName==PACKAGE }
+            if(base==null || base===current) return current.takeIf { HostPackages.contains(it.packageName) }
             current=base
         }
         return null
     }
-    fun snapshot(context: Context): StructureHost232Colors.Snapshot? {
+    fun snapshot(context: Context): HostThemeColors.Snapshot? {
         val host=hostContext(context) ?: return null
-        return StructureHost232Colors.snapshot(host,StructureHome130Style.isDark(host))
+        return HostThemeColors.snapshot(host,HostEmbeddedStyle.isDark(host))
     }
     fun scale(context: Context): Float = hostContext(context)?.let { StructureBookDetailDividerStyle.scale(it.classLoader) } ?: 1f
     fun dp(context: Context, value: Float): Float = value * scale(context) * context.resources.displayMetrics.density
@@ -72,61 +99,87 @@ internal object EmbeddedHostUi {
     }
 
     fun captureTypography(loader: ClassLoader, composer: Any?) {
-        if(composer==null)return
+        if (composer == null) return
         runCatching {
-            if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                val metrics = HostTypographyMetrics(loader, composer)
-                if (metrics.typography === lastTypography && metrics.densityKey == lastDensity) return
-                val body = metrics.style("BodyLarge")
-                val small = metrics.style("BodySmall")
-                val label = metrics.style("LabelLarge")
-                val title = metrics.style("TitleSmall")
-                fun size(value: HostTypographyMetrics.UnitValue?, fallback: Float) =
-                    value?.value?.takeIf { !value.em && it in 8f..64f } ?: fallback
-                textMetrics = TextMetrics(size(body.fontSize, 16f), size(small.fontSize, 12f),
-                    size(label.fontSize, 14f), size(title.fontSize, 16f),
-                    body.fontSizePx, label.fontSizePx, body.lineHeightPx, label.lineHeightPx, label.fontWeight ?: 500)
-                lastTypography = metrics.typography
-                lastDensity = metrics.densityKey
-                return
+            val metrics = HostTypographyMetrics(loader, composer)
+            if (metrics.typography === lastTypography && metrics.densityKey == lastDensity) return
+            val styles = listOf(
+                "DisplayLarge", "DisplayMedium", "DisplaySmall", "HeadlineLarge", "HeadlineMedium", "HeadlineSmall",
+                "TitleLarge", "TitleMedium", "TitleSmall", "BodyLarge", "BodyMedium", "BodySmall",
+                "LabelLarge", "LabelMedium", "LabelSmall",
+            ).associateWith(metrics::style)
+            val body = styles.getValue("BodyLarge")
+            val small = styles.getValue("BodySmall")
+            val label = styles.getValue("LabelLarge")
+            val title = styles.getValue("TitleSmall")
+            typographyStyles = styles
+            fun size(value: HostTypographyMetrics.UnitValue?, fallback: Float) =
+                value?.value?.takeIf { !value.em && it in 8f..64f } ?: fallback
+            textMetrics = TextMetrics(size(body.fontSize, 16f), size(small.fontSize, 12f),
+                size(label.fontSize, 14f), size(title.fontSize, 16f),
+                body.fontSizePx, label.fontSizePx, body.lineHeightPx, label.lineHeightPx, label.fontWeight ?: 500)
+            lastTypography = metrics.typography
+            lastDensity = metrics.densityKey
+            typographyWarningReported = false
+        }.onFailure {
+            if (!typographyWarningReported) {
+                typographyWarningReported = true
+                com.reamicro.fix.xposed.HookRuntime.logError("ReaMicro embedded typography unavailable", it)
             }
-            val composerType=loader.loadClass("androidx.compose.runtime.Composer")
-            if(!composerType.isInstance(composer))return
-            val material=loader.loadClass("androidx.compose.material3.MaterialTheme")
-            val typography=material.getMethod("getTypography",composerType,Int::class.javaPrimitiveType)
-                .invoke(material.hostField("INSTANCE").get(null),composer,6)
-            val local=loader.loadClass("androidx.compose.ui.platform.CompositionLocalsKt").getMethod("getLocalDensity").invoke(null)
-            val density=composerType.getMethod("consume",loader.loadClass("androidx.compose.runtime.CompositionLocal")).invoke(composer,local)
-            fun densityValue(name:String)=(density.javaClass.getMethod(name).apply {isAccessible=true}.invoke(density) as Number).toFloat()
-            val densityKey=densityValue("getDensity") to densityValue("getFontScale")
-            if(typography===lastTypography && lastDensity==densityKey)return
-            fun pixels(styleName:String,property:String):Float = runCatching {
-                val style=typography.javaClass.getMethod(styleName).invoke(typography)
-                val packed=style.javaClass.methods.first {it.name.startsWith(property+"-")&&it.parameterCount==0}.invoke(style)
-                val converter=density.javaClass.methods.first {it.name.startsWith("toPx-")&&it.parameterTypes.contentEquals(arrayOf(Long::class.javaPrimitiveType))}.apply {isAccessible=true}
-                (converter.invoke(density,packed) as Number).toFloat().takeIf {it.isFinite()&&it>0f}?:0f
-            }.getOrDefault(0f)
-            val unit=loader.loadClass("androidx.compose.ui.unit.TextUnit")
-            val getValue=unit.getDeclaredMethod("getValue-impl",Long::class.javaPrimitiveType)
-            fun size(name:String,fallback:Float):Float {
-                val style=typography.javaClass.getMethod(name).invoke(typography)
-                val getter=style.javaClass.methods.first {it.name.startsWith("getFontSize-")&&it.parameterCount==0}
-                val value=(getValue.invoke(null,getter.invoke(style)) as Number).toFloat()
-                return value.takeIf {it.isFinite()&&it in 8f..64f}?:fallback
+        }
+    }
+
+    /** Only primitive text metrics cross the host/module Compose ClassLoader boundary. */
+    fun textStyle(role: String, fallback: TextStyle): TextStyle {
+        val native = typographyStyles[role] ?: return fallback
+        fun HostTypographyMetrics.UnitValue.local(): TextUnit = if (em) value.em else value.sp
+        return fallback.copy(
+            fontSize = native.fontSize?.local() ?: fallback.fontSize,
+            lineHeight = native.lineHeight?.local() ?: fallback.lineHeight,
+            letterSpacing = native.letterSpacing?.local() ?: fallback.letterSpacing,
+            fontWeight = native.fontWeight?.let(::FontWeight) ?: fallback.fontWeight,
+        )
+    }
+    fun text(view: TextView, role: String) {
+        val context = view.context
+        if (hostContext(context) == null) return
+        val style = typographyStyles[role]
+        val fallback = when (role) {
+            "TitleLarge" -> 22f
+            "TitleSmall" -> textMetrics.titleSmall
+            "LabelLarge" -> textMetrics.labelLarge
+            "BodySmall" -> textMetrics.bodySmall
+            "BodyMedium" -> 14f
+            else -> textMetrics.bodyLarge
+        }
+        if (style != null && style.fontSizePx > 0f) {
+            view.setTextSize(TypedValue.COMPLEX_UNIT_PX, style.fontSizePx)
+        } else {
+            view.setTextSize(TypedValue.COMPLEX_UNIT_SP, fallback)
+        }
+        view.includeFontPadding = false
+        uiTypeface(context)?.let { face ->
+            val weight = style?.fontWeight ?: if (role.startsWith("Title") || role.startsWith("Label")) 500 else 400
+            view.typeface = if (Build.VERSION.SDK_INT >= 28) {
+                Typeface.create(face, weight, false)
+            } else {
+                Typeface.create(face, if (weight >= 600) Typeface.BOLD else Typeface.NORMAL)
             }
-            val labelStyle=typography.javaClass.getMethod("getLabelLarge").invoke(typography)
-            val weight=runCatching {val w=labelStyle.javaClass.getMethod("getFontWeight").invoke(labelStyle);(w.javaClass.getMethod("getWeight").invoke(w) as Number).toInt()}.getOrDefault(500)
-            textMetrics=TextMetrics(size("getBodyLarge",16f),size("getBodySmall",12f),size("getLabelLarge",14f),size("getTitleSmall",16f),
-                pixels("getBodyLarge","getFontSize"),pixels("getLabelLarge","getFontSize"),pixels("getBodyLarge","getLineHeight"),pixels("getLabelLarge","getLineHeight"),weight)
-            lastTypography=typography;lastDensity=densityKey
+        }
+        style?.letterSpacing?.let { spacing ->
+            view.letterSpacing = if (spacing.em) spacing.value else {
+                val size = style.fontSize?.takeIf { !it.em }?.value
+                if (size != null && size > 0f) spacing.value / size else 0f
+            }
+        }
+        style?.lineHeightPx?.takeIf { it > 0f }?.let { line ->
+            view.setLineSpacing(line - view.paint.fontSpacing, 1f)
         }
     }
     fun thoughtInput(input: EditText) {
         val context=input.context;val native=snapshot(context) ?: return
-        input.includeFontPadding=false
+        text(input, "BodyLarge")
         input.backgroundTintList=null
-        if(textMetrics.bodyLargePx>0f) input.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX,textMetrics.bodyLargePx) else input.textSize=textMetrics.bodyLarge
-        uiTypeface(context)?.let { input.typeface=it }
         input.setTextColor(native.roles.getValue("OnBackground"))
         input.setHintTextColor(native.captionArgb)
         val inset=dp(context,16f).toInt()

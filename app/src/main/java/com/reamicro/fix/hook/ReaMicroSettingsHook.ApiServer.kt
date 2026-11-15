@@ -1,8 +1,8 @@
 package com.reamicro.fix.hook
 
-import android.app.Dialog
+import com.reamicro.fix.reload.runOnModuleUiThread
+
 import android.graphics.Typeface
-import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.InputType
@@ -31,8 +31,7 @@ import com.reamicro.fix.cloud.api.normalizeApiBaseUrl
 import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 import com.reamicro.fix.hook.settings.*
-import com.reamicro.fix.xposed.XposedBridge
-import java.io.File
+import com.reamicro.fix.xposed.HookRuntime
 
 internal fun ReaMicroSettingsHook.apiServerSettingsSubtitle(): String {
     val current = ApiServerSettingsStore { activityProvider()?.applicationContext }.get()
@@ -45,13 +44,13 @@ internal fun ReaMicroSettingsHook.apiServerSettingsSubtitle(): String {
 
 internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val store = ApiServerSettingsStore { activity.applicationContext }
             val current = store.get()
             val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, "API 服务器", colors))
             val enabled = settingsDialogSwitchRow(activity, "启用 API 服务器", current.enabled, colors)
@@ -150,7 +149,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
                         com.reamicro.fix.reload.ModuleResources.thread {
                             val client = ApiServerClient(store)
                             val discovered = runCatching { client.discovery(base) }
-                            activity.runOnUiThread {
+                            activity.runOnModuleUiThread {
                                 discovered.onSuccess(::applyDiscovery)
                                     .onFailure { status.text = it.message ?: "服务器能力识别失败" }
                             }
@@ -161,7 +160,7 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
                             if (mode == ApiAuthMode.API_KEY && resolved.apiKey.isBlank()) return@thread
                             if (mode == ApiAuthMode.ACCOUNT && (resolved.accountName.isBlank() || resolved.accountPassword.isBlank())) return@thread
                             val result = client.probe(resolved)
-                            activity.runOnUiThread {
+                            activity.runOnModuleUiThread {
                                 if (result.success) {
                                     status.text = result.message
                                     onSuccess?.invoke(resolved.copy(authMode = result.resolvedAuthMode ?: mode))
@@ -221,14 +220,14 @@ internal fun ReaMicroSettingsHook.openApiServerSettingsDialog() {
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
             if (current.enabled && current.baseUrl.isNotBlank()) probe(showProgress = false)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX api server settings dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX api server settings dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
 
 internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val store = ApiServerSettingsStore { activity.applicationContext }
         val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
         currentCredential?.let { credential ->
@@ -240,7 +239,7 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
         }
         val client = ApiServerClient(store)
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "云端任务", colors))
         val credentialIds = mutableListOf<String>()
@@ -301,13 +300,13 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                     val manager = CloudTaskManager(client)
                     manager.credentials() to manager.list()
                 }.onSuccess { (credentials, tasks) ->
-                    activity.runOnUiThread {
+                    activity.runOnModuleUiThread {
                         applyCloudConfig(credentials, tasks)
                         status.text = notice?.let { "$it\n已读取 ${credentials.size} 个凭据、${tasks.size} 个任务。" }
                             ?: "已读取 ${credentials.size} 个凭据、${tasks.size} 个任务；保存时会自动刷新当前阅微登录密钥。"
                     }
                 }.onFailure { error ->
-                    activity.runOnUiThread {
+                    activity.runOnModuleUiThread {
                         status.text = notice?.let { "$it\n读取云端配置失败：${error.message.orEmpty()}" }
                             ?: (error.message ?: "读取云端配置失败")
                     }
@@ -344,9 +343,9 @@ internal fun ReaMicroSettingsHook.openCloudAutomationDialog() {
                         manager.saveAutomation("cloud_auto_read", read.isChecked, credentialId, time.text.toString(), readRequest)
                     }.onSuccess {
 
-                        activity.runOnUiThread { reloadCloudConfig("阅微凭据与任务配置已同步") }
+                        activity.runOnModuleUiThread { reloadCloudConfig("阅微凭据与任务配置已同步") }
                     }.onFailure { error ->
-                        activity.runOnUiThread {
+                        activity.runOnModuleUiThread {
                             status.text = error.message?.takeIf(String::isNotBlank) ?: "云端任务配置失败"
                         }
                     }
@@ -376,10 +375,10 @@ private fun parseCloudReadingBooks(raw: String): org.json.JSONArray {
 
 internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val store = ApiServerSettingsStore { activity.applicationContext }
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "已安装内容包", colors))
         val list = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
@@ -413,7 +412,7 @@ internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
                         status.text = "正在回滚 ${item.packageId}……"
                         com.reamicro.fix.reload.ModuleResources.thread {
                             val result = manager.rollback(item.kind, item.packageId)
-                            activity.runOnUiThread { status.text = result.message; reload() }
+                            activity.runOnModuleUiThread { status.text = result.message; reload() }
                         }.start()
                     }
                 }, settingsDialogButtonParams(activity))
@@ -439,10 +438,10 @@ internal fun ReaMicroSettingsHook.openApiPackageManagementDialog() {
 
 internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val store = ApiServerSettingsStore { activity.applicationContext }
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "上传内容库", colors))
         card.addView(
@@ -479,7 +478,7 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
                     val sync = com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
                     ApiServerClient(store).uploadPolicy() to sync.collect()
                 }
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     loaded.onSuccess { (loadedPolicy, items) ->
                         policy = loadedPolicy
                         val allowed = loadedPolicy.kinds
@@ -520,10 +519,10 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
                 val result = runCatching {
                     com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
                         .upload(targets, kinds) { index, total, name ->
-                            activity.runOnUiThread { status.text = "正在上传 $index/$total：$name" }
+                            activity.runOnModuleUiThread { status.text = "正在上传 $index/$total：$name" }
                         }
                 }
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     result.onSuccess(::renderSummary)
                         .onFailure { error -> status.text = error.message ?: "上传内容库失败" }
                     upload.isEnabled = true
@@ -542,10 +541,10 @@ internal fun ReaMicroSettingsHook.openApiLibraryUploadDialog() {
 
 internal fun ReaMicroSettingsHook.openApiLibraryLinkDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val store = ApiServerSettingsStore { activity.applicationContext }
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "关联内容库", colors))
         card.addView(
@@ -572,7 +571,7 @@ internal fun ReaMicroSettingsHook.openApiLibraryLinkDialog() {
                     val items = sync.collect()
                     Triple(items.size, sync.match(items), sync.linkedCount())
                 }
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     loaded.onSuccess { (total, matched, alreadyLinked) ->
                         pairs = matched
                         val online = matched.count { it.first.kind == ApiPackageKind.ONLINE_SOURCE }
@@ -603,10 +602,10 @@ internal fun ReaMicroSettingsHook.openApiLibraryLinkDialog() {
                 val result = runCatching {
                     com.reamicro.fix.cloud.api.ApiContentLibrarySync(activity.applicationContext, ApiServerClient(store), settings)
                         .link(targets) { index, total, name ->
-                            activity.runOnUiThread { status.text = "正在关联 $index/$total：$name" }
+                            activity.runOnModuleUiThread { status.text = "正在关联 $index/$total：$name" }
                         }
                 }
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     result.onSuccess { summary ->
                         status.text = buildString {
                             append("已关联 ${summary.linked} 个源")
@@ -650,7 +649,7 @@ internal fun ReaMicroSettingsHook.checkApiPackageUpdates() {
             ).flatMap(manager::check)
             candidates.map(manager::install)
         }
-        activity.runOnUiThread {
+        activity.runOnModuleUiThread {
             result.onSuccess { updates ->
                 val installed = updates.count { it.installed }
                 val failed = updates.count { !it.installed }
@@ -671,7 +670,7 @@ internal fun ReaMicroSettingsHook.checkApiModuleUpdate() {
     val store = ApiServerSettingsStore { activity.applicationContext }
     com.reamicro.fix.reload.ModuleResources.thread {
         val result = checkModuleUpdate(ApiServerClient(store))
-        activity.runOnUiThread { showToast(result.message) }
+        activity.runOnModuleUiThread { showToast(result.message) }
     }.start()
 }
 
@@ -684,12 +683,12 @@ internal fun ReaMicroSettingsHook.downloadApiModuleUpdate() {
             val client = ApiServerClient(store)
             val release = client.latestModuleRelease() ?: error("服务器没有可用模块版本")
             val file = client.downloadModuleReleaseToCache(activity.applicationContext, release)
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 showToast("下载完成：${release.versionName}")
                 ModuleApkInstaller.install(activity, file)
             }
         }.onFailure {
-            activity.runOnUiThread { showToast(it.message ?: "模块更新下载失败") }
+            activity.runOnModuleUiThread { showToast(it.message ?: "模块更新下载失败") }
         }
     }.start()
 }
@@ -703,9 +702,9 @@ internal fun ReaMicroSettingsHook.backupApiModuleSettings() {
             val bytes = ModuleSettingsBackup.create(activity.applicationContext)
             ApiServerClient(store).uploadModuleBackup(bytes)
         }.onSuccess {
-            activity.runOnUiThread { showToast("模块设置备份已上传") }
+            activity.runOnModuleUiThread { showToast("模块设置备份已上传") }
         }.onFailure {
-            activity.runOnUiThread { showToast(it.message ?: "上传备份失败") }
+            activity.runOnModuleUiThread { showToast(it.message ?: "上传备份失败") }
         }
     }.start()
 }
@@ -719,19 +718,19 @@ internal fun ReaMicroSettingsHook.restoreApiModuleSettings() {
             val bytes = ApiServerClient(store).downloadModuleBackup()
             ModuleSettingsBackup.restore(activity.applicationContext, bytes)
         }.onSuccess { count ->
-            activity.runOnUiThread { showToast("已恢复 $count 项模块设置，请重新打开设置页") }
+            activity.runOnModuleUiThread { showToast("已恢复 $count 项模块设置，请重新打开设置页") }
         }.onFailure {
-            activity.runOnUiThread { showToast(it.message ?: "恢复备份失败") }
+            activity.runOnModuleUiThread { showToast(it.message ?: "恢复备份失败") }
         }
     }.start()
 }
 
 internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val store = ApiServerSettingsStore { activity.applicationContext }
         val colors = SettingsDialogColors(activity)
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "账号密钥备份", colors))
         card.addView(TextView(activity).apply {
@@ -752,8 +751,8 @@ internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
                     runCatching {
                         val bytes = CredentialBackupCrypto.create(activity.applicationContext, password.text.toString().toCharArray())
                         ApiServerClient(store).uploadCredentialsBackup(bytes)
-                    }.onSuccess { activity.runOnUiThread { status.text = "账号密钥密文已上传" } }
-                        .onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "上传失败" } }
+                    }.onSuccess { activity.runOnModuleUiThread { status.text = "账号密钥密文已上传" } }
+                        .onFailure { error -> activity.runOnModuleUiThread { status.text = error.message ?: "上传失败" } }
                 }.start()
             }
         }, settingsDialogButtonParams(activity))
@@ -764,8 +763,8 @@ internal fun ReaMicroSettingsHook.openCredentialBackupDialog() {
                     runCatching {
                         val bytes = ApiServerClient(store).downloadCredentialsBackup()
                         CredentialBackupCrypto.restore(activity.applicationContext, password.text.toString().toCharArray(), bytes)
-                    }.onSuccess { count -> activity.runOnUiThread { status.text = "已恢复 $count 项账号密钥" } }
-                        .onFailure { error -> activity.runOnUiThread { status.text = error.message ?: "恢复失败" } }
+                    }.onSuccess { count -> activity.runOnModuleUiThread { status.text = "已恢复 $count 项账号密钥" } }
+                        .onFailure { error -> activity.runOnModuleUiThread { status.text = error.message ?: "恢复失败" } }
                 }.start()
             }
         }, settingsDialogButtonParams(activity))
@@ -839,11 +838,7 @@ private fun ReaMicroSettingsHook.apiServerTypeface(activity: android.app.Activit
     val selection = settings.fontSettings().globalFamily.trim()
     if (selection.isBlank() || selection == "system") return Typeface.DEFAULT
     if (selection == "serif") return Typeface.SERIF
-    val direct = File(selection)
-    val file = direct.takeIf(File::isFile) ?: fontDirectories(activity)
-        .asSequence()
-        .flatMap { it.listFiles()?.asSequence() ?: emptySequence() }
-        .firstOrNull { it.isFile && it.name == direct.name }
+    val file = resolveAccountFontFile(activity, selection)
     return file?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() } ?: Typeface.DEFAULT
 }
 
@@ -865,8 +860,8 @@ internal fun ReaMicroSettingsHook.moduleBuildInfo(): Pair<String, String> {
 
 internal fun ReaMicroSettingsHook.confirmApiDebugUnlock() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
-        val dialog = Dialog(activity)
+    activity.runOnModuleUiThread {
+        val dialog = settingsDialog(activity)
         val colors = SettingsDialogColors(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "测试配置", colors))

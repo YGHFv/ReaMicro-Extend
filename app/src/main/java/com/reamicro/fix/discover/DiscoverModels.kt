@@ -9,9 +9,13 @@ internal data class DiscoverKind(
     val url: String,
 
     val urls: List<String> = listOf(url),
+    val upstreamJson: String = "",
+    val control: com.reamicro.fix.online.EnhancedSourceControl? = null,
 ) {
 
-    val key: String get() = "$title|${urls.joinToString(",")}"
+    val key: String get() = control?.let { "${it.type}|${it.key}|$url" } ?: "$title|${urls.joinToString(",")}"
+    val isBookList: Boolean get() = (control == null || control.type == "url") && url.isNotBlank()
+    val displayTitle: String get() = control?.title ?: title
 }
 
 internal data class DiscoverBook(
@@ -28,6 +32,7 @@ internal data class DiscoverBook(
     val status: String = "",
 
     val chapterCount: String = "",
+    val parsingState: com.reamicro.fix.online.OnlineParsingState? = null,
 ) {
     val key: String get() = "$name|$author|$detailUrl"
 }
@@ -124,6 +129,7 @@ private fun encodeFilterValue(value: String): String =
 internal data class DiscoverSelection(
     val sourceId: String,
     val kindTitle: String,
+    val kindKey: String = "",
 ) {
     companion object {
         val NONE = DiscoverSelection("", "")

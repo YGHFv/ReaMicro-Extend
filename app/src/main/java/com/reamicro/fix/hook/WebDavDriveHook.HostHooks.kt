@@ -2,356 +2,50 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.cloud.webdav.webDavDownloadKey
 
-import com.reamicro.fix.cloud.webdav.webDavDownloadKey
-
 import com.reamicro.fix.core.hostNameMatches
-
-
+import com.reamicro.fix.core.HostRuntimeBindings
 import android.app.Activity
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
 import com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException
-import com.reamicro.fix.cloud.webdav.CloudBookRowExtendedDisplayContext
 import com.reamicro.fix.cloud.webdav.HomeSearchRenderContext
 import com.reamicro.fix.cloud.webdav.HomeSearchSection
-import com.reamicro.fix.cloud.webdav.ImportLocalLibraryRowContext
-import com.reamicro.fix.cloud.webdav.ImportUnauthRenderContext
-import com.reamicro.fix.cloud.webdav.SyncAuthCardRenderContext
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
-import com.reamicro.fix.xposed.callbacks.XCallback
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
+import io.github.libxposed.api.XposedInterface
 import java.lang.ref.WeakReference
-import java.lang.reflect.Modifier
+import java.lang.reflect.Method
 import java.net.URL
 import java.util.UUID
 import kotlin.math.max
 import com.reamicro.fix.hook.webdav.*
-import com.reamicro.fix.online.search.sanitizeHostCloudSearchResults
-import com.reamicro.fix.cloud.local.localLibraryPathArg
-import com.reamicro.fix.cloud.local.syntheticLocalLibraryBookEntry
-import com.reamicro.fix.cloud.webdav.webDavDisplayDir
-import com.reamicro.fix.cloud.webdav.hasWebDavLogin
-import com.reamicro.fix.cloud.webdav.webDavPathArg
-import com.reamicro.fix.cloud.webdav.childWebDavPath
-import com.reamicro.fix.cloud.webdav.normalizeWebDavPath
-import com.reamicro.fix.cloud.webdav.parentWebDavPath
 import com.reamicro.fix.cloud.webdav.syntheticWebDavBookEntry
 import com.reamicro.fix.logging.logWebDav
-import com.reamicro.fix.core.typeMatches
-
-internal fun WebDavDriveHook.hookOnlineCompletionBookRowDuration() {
-    runCatching {
-        val bookRowInfo = cls(BOOK_ROW_INFO_CLASS).declaredMethods.first {
-            it.hostNameMatches(BOOK_ROW_INFO_METHOD) &&
-                it.parameterTypes.size == 4 &&
-                typeMatches(it.parameterTypes[1], BOOK_CLASS)
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(bookRowInfo, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val book = param.args?.getOrNull(1) ?: return
-                if (!isOnlineCompletionLocalBook(book)) return
-                onlineCompletionBookRowInfoDepth.set((onlineCompletionBookRowInfoDepth.get() ?: 0) + 1)
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val next = (onlineCompletionBookRowInfoDepth.get() ?: 0) - 1
-                if (next <= 0) onlineCompletionBookRowInfoDepth.remove() else onlineCompletionBookRowInfoDepth.set(next)
-            }
-        })
-
-        val secondToHours = cls(TIME_EXT_KT_CLASS).declaredMethods.first {
-            it.hostNameMatches(SECOND_TO_HOURS_METHOD) &&
-                it.parameterTypes.size == 1 &&
-                it.parameterTypes[0] == java.lang.Long.TYPE
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(secondToHours, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((onlineCompletionBookRowInfoDepth.get() ?: 0) > 0) {
-                    param.result = ""
-                }
-            }
-        })
-        logWebDav("online completion book row duration hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook online completion book row duration: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
 
 internal fun WebDavDriveHook.hookOnlineCompletionBookLocalSheet() {
-    runCatching {
-        val sheetClass = cls(BOOK_LOCAL_SHEET_CLASS)
-        val localSheetContextMethods = sheetClass.declaredMethods
-            .filter { method -> isBookLocalSheetBookContextMethod(method) }
-        localSheetContextMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val book = param.args?.getOrNull(0) ?: return
-                        onlineCompletionLocalSheetDepth.set((onlineCompletionLocalSheetDepth.get() ?: 0) + 1)
-                        onlineCompletionLocalSheetBook.set(book)
-                        // B4 的 f 返回后才调用 g，ThreadLocal 会被清空；保留弱引用供同一菜单后续组合读取。
-                        onlineCompletionLastLocalSheetBookRef = WeakReference(book)
-                        logWebDav(
-                            "online completion local sheet book captured via=${method.name} " +
-                                "title=${book.callString("getTitle").orEmpty()}",
-                        )
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val nextDepth = ((onlineCompletionLocalSheetDepth.get() ?: 0) - 1).coerceAtLeast(0)
-                        onlineCompletionLocalSheetDepth.set(nextDepth)
-                        if (nextDepth == 0) onlineCompletionLocalSheetBook.remove()
-                    }
-                })
-            }
-
-        hookOnlineCompletionBookGroupRow(sheetClass)
-        val fileBackupMethods = sheetClass.declaredMethods.filter {
-            it.hostNameMatches(FILE_BACKUP_METHOD) && it.parameterTypes.size == 5
-        }
-        if (fileBackupMethods.isNotEmpty()) {
-            fileBackupMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        renderOnlineCompletionUpdateRowFromLocalSheet(param.args?.getOrNull(3))
-                    }
-                })
-            }
-        } else {
-            val communityMethods = sheetClass.declaredMethods.filter {
-                it.hostNameMatches(BOOK_COMMUNITY_METHOD) && it.parameterTypes.size == 4
-            }
-            communityMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        logWebDav(
-                            "online completion BookCommunity after composer=${param.args?.getOrNull(2)?.javaClass?.name.orEmpty()} " +
-                                "book=${onlineCompletionLocalSheetBook.get()?.callString("getTitle").orEmpty()}",
-                        )
-                        renderOnlineCompletionUpdateRowFromLocalSheet(param.args?.getOrNull(2))
-                    }
-                })
-            }
-        }
-        if (fileBackupMethods.isEmpty()) {
-            val publisherMethods = sheetClass.declaredMethods.filter {
-                it.hostNameMatches(BOOK_PUBLISHER_METHOD) &&
-                    it.parameterTypes.size == 4 &&
-                    it.parameterTypes.getOrNull(0) == String::class.java &&
-                    it.parameterTypes.getOrNull(1)?.name == FUNCTION0_CLASS &&
-                    it.parameterTypes.getOrNull(2)?.name == COMPOSER_CLASS
-            }
-            publisherMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        renderOnlineCompletionUpdateRowFromLocalSheet(param.args?.getOrNull(2))
-                    }
-                })
-            }
-            if (publisherMethods.isNotEmpty()) {
-                logWebDav("online completion update row hooked after BookPublisher count=${publisherMethods.size}")
-            }
-        }
-        hookOnlineCompletionBookSourceLabel()
-        logWebDav(
-            "online completion local sheet hook installed " +
-                "contexts=${localSheetContextMethods.size} backups=${fileBackupMethods.size}",
-        )
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook online completion local sheet: ${it.stackTraceToString()}")
-    }.getOrThrow()
+    LocalBookMenuBridge(this).install()
 }
-
-internal fun WebDavDriveHook.hookOnlineCompletionBookSourceLabel() {
-    if (onlineCompletionSourceLabelHooked) return
-    runCatching {
-        if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
-            val sheet = cls(BOOK_LOCAL_SHEET_CLASS)
-            val context = ThreadLocal<Any>()
-            val info = sheet.declaredMethods.single { it.hostNameMatches("BookInfo") && it.parameterCount == 3 }
-            val title = sheet.declaredMethods.single { it.hostNameMatches("BookInfoTitle") && it.parameterCount == 5 }
-            XposedBridge.hookMethod(info, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) { context.set(param.args[0]) }
-                override fun afterHookedMethod(param: MethodHookParam) { context.remove() }
-            })
-            XposedBridge.hookMethod(title, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val book = context.get() ?: return
-                    val source = onlineImportedBookSourceInfo(book)?.sourceName?.takeUnless {
-                        it.isBlank() || it == "未知源" || isPathLikeOnlineSourceName(it)
-                    } ?: when (bookBackupTypeOf(book)) {
-                        BACKUP_TYPE_BAIDU, BACKUP_TYPE_YUN115, BACKUP_TYPE_ALIYUN -> cloudTypeTitle(bookBackupTypeOf(book))
-                        BACKUP_TYPE_WEBDAV -> "WebDAV"
-                        else -> return
-                    }
-                    // 正式版已内联FileSource；仅替换菜单副标题参数，不改数据库或来源URI。
-                    param.args[1] = source
-                    param.args[4] = (param.args[4] as Int) and 0x70.inv()
-                }
-            })
-            XposedBridge.deoptimize(info)
-            onlineCompletionSourceLabelHooked = true
-            return
-        }
-        val fileSourceClass = runCatching { cls(FILE_SOURCE_CLASS) }.getOrElse {
-            logWebDav("online completion source label skipped: FileSource facade absent")
-            return
-        }
-        val methods = fileSourceClass.declaredMethods.filter {
-            it.hostNameMatches(FILE_SOURCE_QUERY_NAME_METHOD) &&
-                it.parameterTypes.size == 1 &&
-                it.parameterTypes.getOrNull(0) == String::class.java &&
-                it.returnType == String::class.java
-        }
-        methods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val book = onlineCompletionLocalSheetBook.get()
-                        ?: onlineCompletionLastLocalSheetBookRef?.get()
-                        ?: return
-                    val info = onlineImportedBookSourceInfo(book) ?: return
-                    val sourceName = info.sourceName.takeUnless { it.isBlank() || it == "未知源" } ?: return
-                    if (param.result == sourceName) return
-                    val previous = param.result
-                    param.result = sourceName
-                    logWebDav(
-                        "book source label rewritten to source name=$sourceName " +
-                            "from=${previous?.toString().orEmpty()} title=${book.callString("getTitle")}",
-                    )
-                }
-            })
-        }
-        onlineCompletionSourceLabelHooked = methods.isNotEmpty()
-        if (methods.isNotEmpty()) {
-            logWebDav("online completion source label hooked count=${methods.size}")
-        }
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook online completion source label: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookOnlineCompletionBookGroupRow(sheetClass: Class<*>) {
-    val actionRowMethods = sheetClass.declaredMethods.filter {
-        it.hostNameMatches(BOOK_META_ACTION_ROW_METHOD) &&
-            it.parameterTypes.size >= 5 &&
-            it.parameterTypes.getOrNull(2) == String::class.java &&
-            typeMatches(it.parameterTypes.getOrNull(3), FUNCTION0_CLASS) &&
-            typeMatches(it.parameterTypes.getOrNull(4), COMPOSER_CLASS)
-    }
-    // B4 的 BookMetaActionRow(a) 是通用参数化行，实际固定绘制“分组”的
-    // 5 参数 Composable(g) 不带 Modifier；按 ABI 识别，避免把逻辑名只映射到 a。
-    val groupRowMethods = sheetClass.declaredMethods.filter {
-        Modifier.isStatic(it.modifiers) &&
-            it.returnType == Void.TYPE &&
-            it.parameterTypes.size == 5 &&
-            it.parameterTypes.getOrNull(1) == String::class.java &&
-            typeMatches(it.parameterTypes.getOrNull(2), FUNCTION0_CLASS) &&
-            typeMatches(it.parameterTypes.getOrNull(3), COMPOSER_CLASS)
-    }
-    logWebDav(
-        "online completion action row candidates=" +
-            actionRowMethods.joinToString { candidate ->
-                "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
-            } +
-            " group=" +
-            groupRowMethods.joinToString { candidate ->
-                "${candidate.name}/${candidate.parameterTypes.joinToString { it.simpleName }}"
-            },
-    )
-    val updateRowMethod = actionRowMethods.firstOrNull()
-    groupRowMethods.forEach { method ->
+internal fun WebDavDriveHook.hookWebDavCleartextPolicy() {
+    val hooked = mutableListOf<String>()
+    fun hookPolicy(method: Method) {
         method.isAccessible = true
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (onlineCompletionUpdateRowInjecting.get() == true) return
-                // B4 的 g 已把“分组”写在方法体内，String 参数是分组名而不是行标题。
-                // 这里只按已识别的 ABI 触发，避免沿用旧版 args[1] == "分组" 判定。
-                val book = onlineCompletionLocalSheetBook.get()
-                    ?: onlineCompletionLastLocalSheetBookRef?.get()
-                logWebDav(
-                    "online completion group row invoked group=${param.args?.getOrNull(1)?.toString().orEmpty()} " +
-                        "book=${book?.callString("getTitle").orEmpty()}",
-                )
-                book ?: return
-                val info = onlineImportedBookSourceInfo(book) ?: return
-                val groupIcon = param.args?.getOrNull(0) ?: return
-                val composer = param.args?.getOrNull(3) ?: return
-                if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-                    val groupClick = param.args?.getOrNull(2) ?: return
-                    try {
-                        onlineCompletionUpdateRowInjecting.set(true)
-                        renderOnlineCompletionUpdateGroupActionRow(book, info, groupIcon, groupClick, composer)
-                        param.result = targetUnit()
-                    } finally {
-                        onlineCompletionUpdateRowInjecting.remove()
-                    }
-                    return
-                }
-                val hostUpdateRowMethod = updateRowMethod ?: return
-                val updateIcon = onlineCompletionUpdateImageVector() ?: groupIcon
-                val updateModifier = paddingModifier(
-                    modifierInstance(),
-                    start = 12,
-                    top = 0,
-                    end = 0,
-                    bottom = 0,
-                )
-                try {
-                    onlineCompletionUpdateRowInjecting.set(true)
-                    val updateClick = functionProxy("OnlineCompletionChapterUpdateActionRow", FUNCTION0_CLASS) {
-                        startOnlineCompletionChapterUpdate(book, info)
-                        targetUnit()
-                    }
-                    hostUpdateRowMethod.invoke(
-                        null,
-                        updateModifier,
-                        updateIcon,
-                        "更新",
-                        updateClick,
-                        composer,
-                        0,
-                    )
-                    logWebDav("online completion update/group row rendered title=${book.callString("getTitle")} source=${info.sourceName}")
-                } catch (error: Throwable) {
-                    XposedBridge.log("$LOG_PREFIX online completion update/group row render failed: ${error.stackTraceToString()}")
-                } finally {
-                    onlineCompletionUpdateRowInjecting.remove()
+        val label = "${method.declaringClass.name}/${method.name}/${method.parameterTypes.size}"
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                if (shouldAllowCleartext(param.args)) {
+                    logCleartextAllowed(param.args?.firstOrNull(), label)
+                    param.result = true
                 }
             }
         })
+        hooked += label
     }
-    onlineCompletionCombinedGroupRowHooked = groupRowMethods.isNotEmpty()
-    if (groupRowMethods.isNotEmpty()) {
-        logWebDav("online completion update/group row hook installed: ${groupRowMethods.size}")
-    }
-}
-
-internal fun WebDavDriveHook.hookWebDavCleartextPolicy() {
-    val hooked = mutableListOf<String>()
-    fun hookClass(className: String, loader: ClassLoader? = null) {
+    fun hookClass(className: String) {
         runCatching {
-            val policyClass = if (loader == null) Class.forName(className) else XposedHelpers.findClass(className, loader)
+            val policyClass = Class.forName(className)
             policyClass.declaredMethods.filter {
-                it.hostNameMatches("isCleartextTrafficPermitted") &&
+                it.name == "isCleartextTrafficPermitted" && it.returnType == Boolean::class.javaPrimitiveType &&
                     (it.parameterTypes.isEmpty() || (it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java))
-            }.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (shouldAllowCleartext(param.args)) {
-                            logCleartextAllowed(param.args?.firstOrNull(), "$className/${method.parameterTypes.size}")
-                            param.result = true
-                        }
-                    }
-                })
-                hooked += "$className/${method.parameterTypes.size}"
-            }
+            }.forEach(::hookPolicy)
         }.onFailure {
             logWebDav("cleartext policy class skipped $className: ${it.message}")
         }
@@ -365,8 +59,8 @@ internal fun WebDavDriveHook.hookWebDavCleartextPolicy() {
                     URL::class.java.isAssignableFrom(it.parameterTypes[0])
             }.forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                HookRuntime.hookMethod(method, object : HookCallback() {
+                    override fun before(param: Call) {
                         if (shouldAllowCleartext(param.args)) {
                             logCleartextAllowed(param.args?.firstOrNull(), "$ANDROID_OKHTTP_CLEARTEXT_FILTER_CLASS/checkURLPermitted")
                             param.result = null
@@ -382,19 +76,20 @@ internal fun WebDavDriveHook.hookWebDavCleartextPolicy() {
     hookClass(NETWORK_SECURITY_POLICY_CLASS)
     hookCleartextUrlFilter()
     hookClass(ANDROID_OKHTTP_PLATFORM_CLASS)
-    hookClass(OKHTTP_PLATFORM_CLASS, classLoader)
-    hookClass(OKHTTP_ANDROID_PLATFORM_CLASS, classLoader)
-    hookClass(OKHTTP_ANDROID10_PLATFORM_CLASS, classLoader)
+    HostRuntimeBindings.http?.cleartextPolicies.orEmpty().forEach { method ->
+        runCatching { hookPolicy(method) }.onFailure {
+            HookRuntime.logError("ReaMicro LSP WebDAV host cleartext policy hook failed", it)
+        }
+    }
     logWebDav("cleartext policy hook installed: ${hooked.joinToString().ifBlank { "none" }}")
 }
 
 internal fun WebDavDriveHook.hookBackupTypeName() {
     runCatching {
-        val method = cls(BACKUP_TYPE_CLASS).declaredMethods.first {
-            it.hostNameMatches(BACKUP_TYPE_NAME_METHOD) && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup)
+        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+        if (host.hasMethod("typeName")) HookRuntime.hookMethod(host.method("typeName"), object : HookCallback() {
+            override fun before(param: Call) {
                 val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
                 if (
                     type == BACKUP_TYPE_WEBDAV ||
@@ -422,12 +117,24 @@ internal fun WebDavDriveHook.hookBackupTypeName() {
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val types = syncAvailableTypes.get() ?: return
-                val current = syncAvailableRowIndex.get() ?: 0
-                if (current < types.size) {
-                    syncAvailableRowIndex.set(current + 1)
+        })
+        // R8 also embeds provider labels directly in composables. The scope identifies
+        // module rows; exact native labels prevent changing book titles or arbitrary text.
+        HookRuntime.hookMethod(ui.method("text"), object : HookCallback() {
+            override fun before(param: Call) {
+                val label = param.args[0] as? String ?: return
+                val local = (localLibraryIconDepth.get() ?: 0) > 0 || (localLibraryAccountScreenDepth.get() ?: 0) > 0
+                val webdav = (webDavIconDepth.get() ?: 0) > 0 || (webDavAccountScreenDepth.get() ?: 0) > 0 ||
+                    (webDavBackupCardDepth.get() ?: 0) > 0 || (webDavRunningSyncAuthCardDepth.get() ?: 0) > 0
+                val replacement = when {
+                    (onlineCompletionCloudTitleDepth.get() ?: 0) > 0 -> onlineCompletionTitleForType(BACKUP_TYPE_WEBDAV)
+                    local -> LOCAL_LIBRARY_TITLE
+                    webdav -> WEBDAV_TITLE
+                    else -> return
                 }
+                if (label in setOf("百度网盘", "阿里云盘", "115网盘", "本地存储")) param.args[0] = replacement
+                else if (label in setOf("上传到 百度网盘", "上传到 阿里云盘", "上传到 115网盘", "上传到 本地存储"))
+                    param.args[0] = "上传到 $replacement"
             }
         })
         logWebDav("backup type name hook installed")
@@ -438,12 +145,11 @@ internal fun WebDavDriveHook.hookBackupTypeName() {
 
 internal fun WebDavDriveHook.hookHomeCloudResultListRenderContext() {
     runCatching {
-        val method = cls(HOME_SEARCH_BAR_CLASS).declaredMethods.first {
-            it.hostNameMatches(HOME_CLOUD_RESULT_LIST_METHOD) && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
+        val native = requireNotNull(com.reamicro.fix.core.HostHomeSearchBindings.current)
+        val method = native.method("results")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                val type = (param.args?.getOrNull(native.slot("results.type")) as? Number)?.toInt() ?: return
 
                 when {
                     isOnlineCompletionRenderType(type) -> {
@@ -455,8 +161,8 @@ internal fun WebDavDriveHook.hookHomeCloudResultListRenderContext() {
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
+            override fun after(param: Call) {
+                val type = (param.args?.getOrNull(native.slot("results.type")) as? Number)?.toInt() ?: return
                 when {
                     isOnlineCompletionRenderType(type) -> {
                         popWebDavIcon()
@@ -469,42 +175,37 @@ internal fun WebDavDriveHook.hookHomeCloudResultListRenderContext() {
         })
         logWebDav("home cloud result render context hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook home cloud result render context: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook home cloud result render context: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookOnlineCompletionHomeCloudBookRow() {
     runCatching {
-        val method = cls(HOME_SEARCH_BAR_CLASS).declaredMethods.first {
-            it.hostNameMatches(HOME_CLOUD_BOOK_ROW_METHOD) &&
-                it.parameterTypes.size in setOf(6, 7)
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                // B4 CloudBookRow 签名仍是 (scope, book, enabled, tap, composer, changed)。
-                val book = param.args?.getOrNull(1) ?: return
+        val native = requireNotNull(com.reamicro.fix.core.HostHomeSearchBindings.current)
+        val method = native.method("row")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                val book = param.args?.getOrNull(native.slot("row.book")) ?: return
                 val path = cloudPathOf(book)
                 val target = onlineCompletionSearchTargets[path] ?: return
-                val composer = param.args?.getOrNull(4) ?: return
-                // 保留模块卡片样式；B4 的 Compose 点击语义由 AndroidView 外层 Modifier 提供。
+                val composer = param.args?.getOrNull(native.slot("row.composer")) ?: return
+                // 卡片的 Compose 点击语义由 AndroidView 外层 Modifier 提供。
                 renderOnlineCompletionCloudBookSearchRow(book, target, composer)
                 param.result = targetUnit()
             }
         })
         logWebDav("online completion home CloudBookRow hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook online completion home CloudBookRow: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook online completion home CloudBookRow: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavRowIcon() {
     runCatching {
-        val method = iconVectorMethod(BAIDU_ICON_CLASS, BAIDU_ICON_METHOD)
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val syncTypes = syncAvailableTypes.get()
-                val syncIndex = syncAvailableRowIndex.get() ?: 0
-                val isSyncWebDavRow = syncTypes?.getOrNull(syncIndex) == BACKUP_TYPE_WEBDAV
+        val method = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.metadata).method("baidu")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                val isSyncWebDavRow = syncAvailableProvider.get() == BACKUP_TYPE_WEBDAV
                 if ((localLibraryIconDepth.get() ?: 0) > 0) {
                     getNativeAndroidOsVector()?.let { param.result = it }
                     return
@@ -513,17 +214,17 @@ internal fun WebDavDriveHook.hookWebDavRowIcon() {
                 getComposeWebDavVector()?.let { param.result = it }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV row icon hook installed")
+        HookRuntime.log("$LOG_PREFIX WebDAV row icon hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV row icon: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV row icon: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavYun115Icon() {
     runCatching {
-        val method = iconVectorMethod(YUN115_ICON_CLASS, YUN115_ICON_METHOD)
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.metadata).method("yun115")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 if (
                     (webDavIconDepth.get() ?: 0) <= 0 &&
                     (onlineCompletionCloudTitleDepth.get() ?: 0) <= 0 &&
@@ -538,194 +239,13 @@ internal fun WebDavDriveHook.hookWebDavYun115Icon() {
                 getComposeWebDavVector()?.let { param.result = it }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV 115 icon replacement hook installed")
+        HookRuntime.log("$LOG_PREFIX WebDAV 115 icon replacement hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV 115 icon replacement: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV 115 icon replacement: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
-internal fun WebDavDriveHook.hookWebDavCloudTreeIcon() {
-    runCatching {
-        val cloudTreeMethod = cls(CLOUD_TREE_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_TREE_METHOD) &&
-                it.parameterTypes.size == 5 &&
-                it.parameterTypes[0] == java.lang.Integer.TYPE
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(cloudTreeMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
-                when (type) {
-                    BACKUP_TYPE_WEBDAV -> webDavCloudTreeDepth.set((webDavCloudTreeDepth.get() ?: 0) + 1)
-                    BACKUP_TYPE_LOCAL_LIBRARY -> localLibraryCloudTreeDepth.set((localLibraryCloudTreeDepth.get() ?: 0) + 1)
-                }
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
-                when (type) {
-                    BACKUP_TYPE_WEBDAV -> {
-                        val next = (webDavCloudTreeDepth.get() ?: 0) - 1
-                        if (next <= 0) webDavCloudTreeDepth.remove() else webDavCloudTreeDepth.set(next)
-                    }
-                    BACKUP_TYPE_LOCAL_LIBRARY -> {
-                        val next = (localLibraryCloudTreeDepth.get() ?: 0) - 1
-                        if (next <= 0) localLibraryCloudTreeDepth.remove() else localLibraryCloudTreeDepth.set(next)
-                    }
-                }
-            }
-        })
-
-        val androidOsMethod = cls(ANDROID_OS_ICON_CLASS).declaredMethods.first {
-            it.hostNameMatches(ANDROID_OS_ICON_METHOD) && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(androidOsMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((localLibraryCloudTreeDepth.get() ?: 0) > 0) return
-                if ((webDavCloudTreeDepth.get() ?: 0) <= 0) return
-                getComposeWebDavVector()?.let { param.result = it }
-            }
-        })
-        logWebDav("cloud tree icon hook installed")
-    }.onFailure {
-        logWebDav("failed to hook cloud tree icon: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookImportCloudRowLabels() {
-    listOf(CLOUD_UNAUTH_LABEL_METHOD, CLOUD_AUTHORIZED_LABEL_METHOD).forEach { labelMethod ->
-        runCatching {
-            val method = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-                it.name == labelMethod &&
-                    it.parameterTypes.size == 3 &&
-                    it.parameterTypes[0] == String::class.java
-            }.apply { isAccessible = true }
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if ((localLibraryIconDepth.get() ?: 0) > 0) {
-                        param.args?.set(0, LOCAL_LIBRARY_TITLE)
-                        return
-                    }
-                    if ((webDavIconDepth.get() ?: 0) <= 0) return
-                    param.args?.set(0, WEBDAV_TITLE)
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX WebDAV import row label hook installed: $labelMethod")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook WebDAV import row label $labelMethod: ${it.stackTraceToString()}")
-        }
-    }
-}
-
-internal fun WebDavDriveHook.hookSyncAuthCard() {
-    runCatching {
-        val method = cls(AUTH_CARD_CLASS).declaredMethods.first {
-            it.hostNameMatches(AUTH_CARD_METHOD) && it.parameterTypes.size == 6
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                syncAuthCardRender.set(
-                    SyncAuthCardRenderContext(
-                        bookId = (param.args?.getOrNull(0) as? Number)?.toLong(),
-                        onSetupDefaultDir = param.args?.getOrNull(2),
-                        onPick = param.args?.getOrNull(3),
-                    ),
-                )
-                syncWebDavAuthRenderedBeforeAvailable.remove()
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                syncAuthCardRender.remove()
-                syncWebDavAuthRenderedBeforeAvailable.remove()
-            }
-        })
-        hookRc3SyncAuthContent()
-        XposedBridge.log("$LOG_PREFIX WebDAV sync AuthCard hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV sync AuthCard: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookImportCloudRowDetail() {
-    runCatching {
-        val detail = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_AUTHORIZED_DETAIL_METHOD) &&
-                it.parameterTypes.size == 4 &&
-                it.parameterTypes[0] == String::class.java &&
-                it.parameterTypes[1] == String::class.java
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(detail, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((localLibraryIconDepth.get() ?: 0) <= 0) return
-                param.args?.set(0, LOCAL_LIBRARY_BROWSE_TEXT)
-                param.args?.set(1, "")
-                localLibraryAuthorizedDetailDepth.set((localLibraryAuthorizedDetailDepth.get() ?: 0) + 1)
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val next = (localLibraryAuthorizedDetailDepth.get() ?: 0) - 1
-                if (next <= 0) localLibraryAuthorizedDetailDepth.remove() else localLibraryAuthorizedDetailDepth.set(next)
-            }
-        })
-
-        cls(MATERIAL3_TEXT_CLASS).declaredMethods.filter {
-            it.parameterTypes.isNotEmpty() && it.parameterTypes[0] == String::class.java
-        }.forEach { textMethod ->
-            textMethod.isAccessible = true
-            XposedBridge.hookMethod(textMethod, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    applyCloudBookExtendedDisplayText(param)
-                    if ((localLibraryDefaultFolderDepth.get() ?: 0) > 0 &&
-                        param.args?.getOrNull(0)?.toString().isNullOrEmpty()
-                    ) {
-                        param.result = null
-                        return
-                    }
-                    if ((localLibraryAuthorizedDetailDepth.get() ?: 0) > 0 &&
-                        param.args?.getOrNull(0)?.toString() == "$LOCAL_LIBRARY_BROWSE_TEXT / "
-                    ) {
-                        param.args?.set(0, LOCAL_LIBRARY_BROWSE_TEXT)
-                    }
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX local library import row detail hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook local library import row detail: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookCloudBookRowExtendedDisplay() {
-    runCatching {
-        val method = cls(CLOUD_BOOK_LIST_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_BOOK_ROW_METHOD) &&
-                it.parameterTypes.size == 7 &&
-                typeMatches(it.parameterTypes[1], CLOUD_BOOK_CLASS)
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!canUseCloudExtendedDisplay()) return
-                val book = param.args?.getOrNull(1) ?: return
-                if (isOnlineCompletionPath(cloudPathOf(book))) return
-                val updatedAt = book.callLong("getUpdatedAt")
-                if (updatedAt <= 0L) return
-                cloudBookRowExtendedDisplay.set(
-                    CloudBookRowExtendedDisplayContext(
-                        updatedAt = updatedAt,
-                        extensionLabel = cloudBookExtensionLabel(book.callString("getExtension")),
-                    ),
-                )
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                cloudBookRowExtendedDisplay.remove()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX cloud book row extended display hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook cloud book row extended display: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
+internal fun WebDavDriveHook.hookSyncAuthCard() = SyncAuthUiBridge(this).install()
 internal fun WebDavDriveHook.hookLocalLibraryFolderPickerResult() {
     runCatching {
         Activity::class.java.declaredMethods.filter {
@@ -736,8 +256,8 @@ internal fun WebDavDriveHook.hookLocalLibraryFolderPickerResult() {
                 it.parameterTypes[2] == Intent::class.java
         }.forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     val requestCode = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
                     if (requestCode != REQUEST_LOCAL_LIBRARY_DIR) return
                     val resultCode = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
@@ -745,17 +265,14 @@ internal fun WebDavDriveHook.hookLocalLibraryFolderPickerResult() {
                     val uri = data?.data
                     if (resultCode == Activity.RESULT_OK && uri != null) {
                         val activity = param.thisObject as? Activity ?: activityProvider()
-                        val flags = data.flags and (
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                                Intent.FLAG_GRANT_PREFIX_URI_PERMISSION or
-                                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
-                            )
+                        val readPermission = if ((data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        } else 0
+                        val writePermission = if ((data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0) {
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        } else 0
                         runCatching {
-                            activity?.contentResolver?.takePersistableUriPermission(
-                                uri,
-                                flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION),
-                            )
+                            activity?.contentResolver?.takePersistableUriPermission(uri, readPermission or writePermission)
                         }
                         addLocalLibraryFolder(uri)
                         activity?.toast("已添加书库文件夹")
@@ -764,335 +281,17 @@ internal fun WebDavDriveHook.hookLocalLibraryFolderPickerResult() {
                 }
             })
         }
-        XposedBridge.log("$LOG_PREFIX local library folder picker hook installed")
+        HookRuntime.log("$LOG_PREFIX local library folder picker hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook local library folder picker: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookSyncAuthCardContent() {
-    runCatching {
-        val method = cls(AUTH_CARD_CLASS).declaredMethods.first {
-            it.hostNameMatches(AUTH_CARD_CONTENT_METHOD) && it.parameterTypes.size == 11
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: return
-                val hasOuterContext = syncAuthCardRender.get() != null
-                syncAuthCardContentOwnsContext.set(!hasOuterContext)
-                if (!hasOuterContext) {
-                    syncAuthCardRender.set(
-                        SyncAuthCardRenderContext(
-                            onSetupDefaultDir = args.getOrNull(6),
-                            onPick = args.getOrNull(5),
-                        ),
-                    )
-                    syncWebDavAuthRenderedBeforeAvailable.remove()
-                }
-                val backupType = (args.getOrNull(0) as? Number)?.toInt()
-                val isRunning = args.getOrNull(8) as? Boolean == true
-                val isWebDavBookRunning = syncAuthCardRender.get()?.bookId
-                    ?.let { webDavRunningBackupBookIds.containsKey(it) } == true
-                val isWebDavRunning = isRunning && (
-                    (backupType == BACKUP_TYPE_YUN115 && (webDavRunningBackupPending.get() == true || isWebDavBookRunning)) ||
-                        backupType == BACKUP_TYPE_WEBDAV
-                    )
-                if (isWebDavRunning) {
-                    args[0] = BACKUP_TYPE_YUN115
-                    webDavRunningBackupPending.set(true)
-                    webDavRunningSyncAuthCardDepth.set((webDavRunningSyncAuthCardDepth.get() ?: 0) + 1)
-                }
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if ((webDavRunningSyncAuthCardDepth.get() ?: 0) > 0) {
-                    val next = (webDavRunningSyncAuthCardDepth.get() ?: 0) - 1
-                    if (next <= 0) {
-                        webDavRunningSyncAuthCardDepth.remove()
-                    } else {
-                        webDavRunningSyncAuthCardDepth.set(next)
-                    }
-                }
-                webDavRunningBackupPending.remove()
-                if (syncAuthCardContentOwnsContext.get() == true) {
-                    syncAuthCardRender.remove()
-                    syncWebDavAuthRenderedBeforeAvailable.remove()
-                }
-                syncAuthCardContentOwnsContext.remove()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV sync AuthCard content hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV sync AuthCard content: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookDriveAuthCard() {
-    runCatching {
-        val method = cls(AUTH_CARD_CLASS).declaredMethods.first {
-            it.hostNameMatches(DRIVE_AUTH_CARD_METHOD) && it.parameterTypes.size == 8
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((webDavRunningSyncAuthCardDepth.get() ?: 0) <= 0) return
-                val args = param.args ?: return
-                val backupDir = currentWebDavBackupDir()
-                getComposeWebDavVector()?.let { args[0] = it }
-                args[1] = "上传到 $WEBDAV_TITLE"
-                args[2] = webDavDisplayDir(backupDir)
-                args[3] = true
-                val context = syncAuthCardRender.get()
-                args[4] = functionProxy("WebDavRunningDefaultDir", FUNCTION0_CLASS) {
-                    if (backupDir.isBlank()) {
-                        context?.onSetupDefaultDir?.let { invokeFunction1(it, BACKUP_TYPE_WEBDAV) }
-                    } else {
-                        context?.onPick?.let { invokeFunction2(it, BACKUP_TYPE_WEBDAV, backupDir) }
-                    }
-                    targetUnit()
-                }
-                args[5] = functionProxy("WebDavRunningPickDir", FUNCTION0_CLASS) {
-                    context?.onPick?.let { invokeFunction2(it, BACKUP_TYPE_WEBDAV, null) }
-                    targetUnit()
-                }
-                logWebDav("sync running DriveAuthCard mapped dir=$backupDir")
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if (webDavRenderingSyncAuthCard.get() == true) return
-                if (param.args?.getOrNull(3) as? Boolean == true) return
-                val context = syncAuthCardRender.get() ?: return
-                context.nativeAuthRowsSeen += 1
-                if (context.bookId?.let { webDavRunningBackupBookIds.containsKey(it) } == true) return
-                if (context.webDavRendered || !canShowWebDavEntry() || !hasWebDavLogin(currentContext())) return
-                val composer = param.args?.getOrNull(6) ?: return
-                context.webDavRendered = renderSyncWebDavAuthorizedCard(
-                    composer = composer,
-                    onSetupDefaultDir = context.onSetupDefaultDir,
-                    onPick = context.onPick,
-                )
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV sync auth drive card hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV sync auth drive card: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookWebDavSyncUploadRunningCard() {
-    runCatching {
-        val getBackupType = cls(AUTH_CARD_CLASS).declaredMethods.first {
-            it.hostNameMatches("getBackupType") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(getBackupType, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val snapshot = param.args?.getOrNull(0) ?: return
-                val kind = snapshot.callString("getKind")
-                if (kind == "backup:$BACKUP_TYPE_WEBDAV") {
-                    webDavRunningBackupPending.set(true)
-                    param.result = BACKUP_TYPE_YUN115
-                    logWebDav("sync running backup type mapped kind=$kind")
-                }
-            }
-        })
-
-        val yun115StateValue = cls(AUTH_CARD_CLASS).declaredMethods.first {
-            it.hostNameMatches("AuthCard\$lambda\$4") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(yun115StateValue, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if ((webDavRunningSyncAuthCardDepth.get() ?: 0) <= 0) return
-                param.result = webDavYun115Auth()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV sync running upload card hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV sync running upload card: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookDriveOtherAvailableCard() {
-    runCatching {
-        val method = cls(AUTH_CARD_CLASS).declaredMethods.first {
-            it.hostNameMatches(DRIVE_OTHER_AVAILABLE_CARD_METHOD) && it.parameterTypes.size == 4
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: return
-                val context = syncAuthCardRender.get()
-                if (
-                    hasWebDavLogin(currentContext()) &&
-                    canShowWebDavEntry() &&
-                    context != null &&
-                    !context.webDavRendered &&
-                    context.nativeAuthRowsSeen == 0 &&
-                    context.bookId?.let { webDavRunningBackupBookIds.containsKey(it) } != true &&
-                    syncWebDavAuthRenderedBeforeAvailable.get() != true &&
-                    (webDavIconDepth.get() ?: 0) <= 0
-                ) {
-                    val rendered = renderSyncWebDavAuthorizedCard(
-                        composer = args.getOrNull(2) ?: return,
-                        onSetupDefaultDir = context.onSetupDefaultDir,
-                        onPick = context.onPick,
-                    )
-                    if (rendered) {
-                        context.webDavRendered = true
-                        syncWebDavAuthRenderedBeforeAvailable.set(true)
-                    }
-                }
-                val types = (args.getOrNull(0) as? Iterable<*>)?.mapNotNull {
-                    (it as? Number)?.toInt()
-                }.orEmpty()
-                if ((webDavIconDepth.get() ?: 0) <= 0 && types.isNotEmpty()) {
-                    val nativeTypes = types.filter { it != BACKUP_TYPE_WEBDAV }
-                    val renderTypes = if (hasWebDavLogin(currentContext()) || !canShowWebDavEntry()) {
-                        nativeTypes
-                    } else {
-                        nativeTypes + BACKUP_TYPE_WEBDAV
-                    }
-                    args[0] = renderTypes
-                    syncAvailableTypes.set(renderTypes)
-                    syncAvailableRowIndex.set(0)
-                    if (BACKUP_TYPE_WEBDAV in renderTypes) {
-                        syncAuthCardRender.get()?.webDavRendered = true
-                    }
-                }
-                args[1]?.let { args[1] = wrapAuthorizeCallback(it) }
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if ((webDavIconDepth.get() ?: 0) <= 0) {
-                    syncAvailableTypes.remove()
-                    syncAvailableRowIndex.remove()
-                }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV sync available drive hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV sync available drive: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookImportAuthorizedList() {
-    runCatching {
-        val method = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-            it.hostNameMatches(BOOK_LIBRARY_AUTH_LIST_METHOD) && it.parameterTypes.size == 9
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: return
-                val rows = (args.getOrNull(1) as? Iterable<*>)?.toList().orEmpty()
-                val rowTypes = rows.mapNotNull { row ->
-                    runCatching {
-                        val first = row?.javaClass?.methods?.firstOrNull {
-                            it.hostNameMatches("component1") && it.parameterTypes.isEmpty()
-                        }?.apply { isAccessible = true }?.invoke(row) as? Number
-                        first?.toInt()
-                    }.getOrNull()
-                }
-                val additions = mutableListOf<Any>()
-                if (canShowWebDavEntry() && hasWebDavLogin(currentContext()) && BACKUP_TYPE_WEBDAV !in rowTypes) {
-                    additions.add(newKotlinPair(BACKUP_TYPE_WEBDAV, webDavAuth()))
-                }
-                if (additions.isNotEmpty()) {
-                    args[1] = rows + additions
-                }
-                if (canShowLocalLibraryEntry()) {
-                    importLocalLibraryRow.set(
-                        ImportLocalLibraryRowContext(
-                            navGraphScope = args.getOrNull(2),
-                            coroutineScope = args.getOrNull(3),
-                            sheetState = args.getOrNull(4),
-                            intentReceiver = args.getOrNull(5),
-                        ),
-                    )
-                } else {
-                    importLocalLibraryRow.remove()
-                }
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                importLocalLibraryRow.remove()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV import authorized list hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV import authorized list: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookImportLocalLibraryRow() {
-    runCatching {
-        val method = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-            it.hostNameMatches(BOOK_LIBRARY_LOCAL_METHOD) && it.parameterTypes.size == 3
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val composer = param.args?.getOrNull(1) ?: return
-                if (!canShowLocalLibraryEntry()) return
-                renderImportLocalLibraryRow(composer)
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX local library import row hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook local library import row: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookImportUnauthList() {
-    runCatching {
-        val method = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-            it.hostNameMatches(BOOK_LIBRARY_UNAUTH_LIST_METHOD) && it.parameterTypes.size == 8
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: return
-                val types = (args.getOrNull(0) as? Iterable<*>)?.mapNotNull {
-                    (it as? Number)?.toInt()
-                }.orEmpty()
-                val loggedIn = hasWebDavLogin(currentContext())
-                val webDavInNativeList = BACKUP_TYPE_WEBDAV in types
-                val shouldAppendWebDav = canShowWebDavEntry() && !loggedIn && !webDavInNativeList && types.isNotEmpty()
-                val renderTypes = if (loggedIn) {
-                    types.filter {
-                        (it != BACKUP_TYPE_WEBDAV || canShowWebDavEntry()) &&
-                            (it != BACKUP_TYPE_LOCAL_LIBRARY || canShowLocalLibraryEntry())
-                    }
-                } else {
-                    types.filter {
-                        (it != BACKUP_TYPE_WEBDAV || canShowWebDavEntry()) &&
-                            (it != BACKUP_TYPE_LOCAL_LIBRARY || canShowLocalLibraryEntry())
-                    }
-                }
-                if (shouldAppendWebDav) {
-                    args[0] = renderTypes + BACKUP_TYPE_WEBDAV
-                } else if (renderTypes.size != types.size) {
-                    args[0] = renderTypes
-                }
-                importUnauthRender.set(
-                    ImportUnauthRenderContext(
-                        expectedNativeRows = renderTypes.count { it != BACKUP_TYPE_WEBDAV },
-                        webDavRendered = loggedIn || webDavInNativeList || shouldAppendWebDav,
-                    ),
-                )
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                importUnauthRender.remove()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV import unauth list hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV import unauth list: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook local library folder picker: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookImportCloudAuthorizedRow() {
     runCatching {
-        val method = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_AUTHORIZED_ROW_METHOD) && it.parameterTypes.size == 5
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostStorageBindings.ui).method("authorized")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
                 when (type) {
                     BACKUP_TYPE_WEBDAV -> pushWebDavIcon()
@@ -1100,7 +299,7 @@ internal fun WebDavDriveHook.hookImportCloudAuthorizedRow() {
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun after(param: Call) {
                 val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
                 when (type) {
                     BACKUP_TYPE_WEBDAV -> popWebDavIcon()
@@ -1108,19 +307,17 @@ internal fun WebDavDriveHook.hookImportCloudAuthorizedRow() {
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV import authorized row hook installed")
+        HookRuntime.log("$LOG_PREFIX WebDAV import authorized row hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV import authorized row: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV import authorized row: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookImportCloudUnauthRow() {
     runCatching {
-        val method = cls(BOOK_LIBRARY_SHEET_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_UNAUTH_ROW_METHOD) && it.parameterTypes.size == 4
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostStorageBindings.ui).method("unauthorized")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val args = param.args ?: return
                 val type = (args.getOrNull(0) as? Number)?.toInt() ?: return
                 when (type) {
@@ -1129,7 +326,7 @@ internal fun WebDavDriveHook.hookImportCloudUnauthRow() {
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun after(param: Call) {
                 val args = param.args ?: return
                 val type = (args.getOrNull(0) as? Number)?.toInt() ?: return
                 when (type) {
@@ -1151,369 +348,82 @@ internal fun WebDavDriveHook.hookImportCloudUnauthRow() {
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV import cloud row hook installed")
+        HookRuntime.log("$LOG_PREFIX WebDAV import cloud row hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV import cloud row: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookWebDavStorageNavigate() {
-    runCatching {
-        val method = cls(NAV_GRAPH_SCOPE_CLASS).declaredMethods.first {
-            it.hostNameMatches(NAVIGATE_METHOD) && it.parameterTypes.size == 3
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val route = param.args?.getOrNull(0) ?: return
-                if (route.javaClass.name != ROUTE_STORAGE_CLASS) return
-                val type = route.javaClass.methods.firstOrNull { it.hostNameMatches("getType") && it.parameterTypes.isEmpty() }
-                    ?.invoke(route) as? Number ?: return
-                if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) return
-                if (type.toInt() != BACKUP_TYPE_WEBDAV && type.toInt() != BACKUP_TYPE_LOCAL_LIBRARY) return
-                if (hasWebDavLogin(currentContext())) return
-                param.args?.set(0, newThirdLoginRoute())
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV storage navigate hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV storage navigate: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV import cloud row: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavData() {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        B4StorageDataBridge(this).install()
-        return
-    }
-    runCatching {
-        val repositoryClass = cls(CLOUD_STORAGE_REPOSITORY_CLASS)
-        repositoryClass.declaredMethods.filter {
-            it.parameterTypes.size == 1 &&
-                it.parameterTypes[0] == java.lang.Integer.TYPE &&
-                it.name in setOf(CLOUD_STORAGE_GET_AUTH, CLOUD_STORAGE_GET_USER_INFO, CLOUD_STORAGE_GET_LIBRARY)
-        }.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
-                    if (type != BACKUP_TYPE_WEBDAV && type != BACKUP_TYPE_LOCAL_LIBRARY) return
-                    rememberCloudStorageRepository(param.thisObject)
-                    param.result = when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
-                        CLOUD_STORAGE_GET_AUTH -> flowOf(if (type == BACKUP_TYPE_LOCAL_LIBRARY) localLibraryAuth() else webDavAuth())
-                        CLOUD_STORAGE_GET_USER_INFO -> flowOf(
-                            if (type == BACKUP_TYPE_LOCAL_LIBRARY) localLibraryCloudUserInfo() else webDavCloudUserInfo(),
-                        )
-                        CLOUD_STORAGE_GET_LIBRARY -> if (type == BACKUP_TYPE_LOCAL_LIBRARY) localLibraryFlow() else webDavLibraryFlow()
-                        else -> null
-                    }
-                }
-            })
-        }
-        repositoryClass.declaredMethods.filter {
-            it.parameterTypes.size >= 2 &&
-                it.parameterTypes[0] == java.lang.Integer.TYPE &&
-                (
-                    it.name.contains("openFolder") ||
-                        it.name.contains("getFolderList") ||
-                        it.name.contains("createFolder") ||
-                        it.name.contains("move") ||
-                        it.name.contains("rename") ||
-                        it.name.contains("delete") ||
-                        it.name.contains("getInfo") ||
-                        it.name.contains("search") ||
-                        it.name.contains("setupBackupDir")
-                )
-        }.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
-                    if (type != BACKUP_TYPE_WEBDAV && type != BACKUP_TYPE_LOCAL_LIBRARY) return
-                    rememberCloudStorageRepository(param.thisObject)
-                    param.result = webDavResult {
-                        if (type == BACKUP_TYPE_LOCAL_LIBRARY) {
-                            when {
-                                method.name.contains("openFolder") -> {
-                                    val path = localLibraryPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                                    saveLocalLibraryBrowseDir(path)
-                                    updateLocalLibraryStorageTrees(path)
-                                    refreshLocalLibrary(path)
-                                    targetUnit()
-                                }
-                                method.name.contains("getFolderList") -> {
-                                    val path = localLibraryPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                                    listLocalLibrary(path)
-                                        .filter { it.isDirectory }
-                                        .map { newLocalLibraryCloudFolder(it) }
-                                }
-                                method.name.contains("createFolder") -> {
-                                    val parentPath = localLibraryPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                                    val name = param.args?.getOrNull(2)?.toString().orEmpty()
-                                    createLocalLibraryFolder(parentPath, name)
-                                    refreshLocalLibrary(parentPath)
-                                    targetUnit()
-                                }
-                                method.name.contains("move") -> {
-                                    val path = localLibraryPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                                    val dest = localLibraryPathArg(param.args?.getOrNull(2)?.toString().orEmpty())
-                                    moveLocalLibraryEntry(path, dest)
-                                    refreshLocalLibrary(dest)
-                                    targetUnit()
-                                }
-                                method.name.contains("rename") -> {
-                                    val book = param.args?.getOrNull(1)
-                                    val path = localLibraryPathArg(cloudPathOf(book))
-                                    val newName = param.args?.getOrNull(2)?.toString().orEmpty()
-                                    renameLocalLibraryEntry(path, newName)
-                                    refreshLocalLibrary(parentLocalLibraryPath(path))
-                                    targetUnit()
-                                }
-                                method.name.contains("delete") -> {
-                                    val target = param.args?.getOrNull(1)
-                                    val path = localLibraryPathArg(cloudPathOf(target).ifBlank { target?.toString().orEmpty() })
-                                    deleteLocalLibraryEntry(path)
-                                    refreshLocalLibrary(parentLocalLibraryPath(path))
-                                    targetUnit()
-                                }
-                                method.name.contains("getInfo") -> {
-                                    val path = localLibraryPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                                    val entry = localLibraryEntry(path) ?: syntheticLocalLibraryBookEntry(path)
-                                    newLocalLibraryCloudBook(entry)
-                                }
-                                method.name.contains("search") -> {
-                                    val query = param.args?.getOrNull(1)?.toString().orEmpty()
-                                    searchLocalLibraryBooks(query)
-                                }
-                                method.name.contains("setupBackupDir") -> {
-                                    launchLocalLibraryFolderPicker()
-                                    targetUnit()
-                                }
-                                else -> null
-                            }
-                        } else when {
-                        method.name.contains("openFolder") -> {
-                            val path = webDavPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                            saveWebDavBrowseDir(path)
-                            updateWebDavStorageTrees(path)
-                            refreshWebDavLibrary(path)
-                            targetUnit()
-                        }
-                        method.name.contains("getFolderList") -> {
-                            val path = webDavPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                            listWebDav(path)
-                                .filter { it.isDirectory }
-                                .map { newCloudFolder(it) }
-                        }
-                        method.name.contains("createFolder") -> {
-                            val parentPath = webDavPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                            val name = param.args?.getOrNull(2)?.toString().orEmpty()
-                            webDavMkcol(childWebDavPath(parentPath, name))
-                            refreshWebDavLibrary(parentPath)
-                            targetUnit()
-                        }
-                        method.name.contains("move") -> {
-                            val path = param.args?.getOrNull(1)?.toString().orEmpty()
-                            val dest = param.args?.getOrNull(2)?.toString().orEmpty()
-                            webDavMove(path, childWebDavPath(dest, normalizeWebDavPath(path).substringAfterLast('/')))
-                            refreshWebDavLibrary(parentWebDavPath(dest))
-                            targetUnit()
-                        }
-                        method.name.contains("rename") -> {
-                            val book = param.args?.getOrNull(1)
-                            val path = cloudPathOf(book)
-                            val newName = param.args?.getOrNull(2)?.toString().orEmpty()
-                            webDavMove(path, childWebDavPath(parentWebDavPath(path), newName))
-                            refreshWebDavLibrary(parentWebDavPath(path))
-                            targetUnit()
-                        }
-                        method.name.contains("delete") -> {
-                            val path = webDavPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                            webDavDelete(path)
-                            refreshWebDavLibrary(parentWebDavPath(path))
-                            targetUnit()
-                        }
-                        method.name.contains("getInfo") -> {
-                            val path = webDavPathArg(param.args?.getOrNull(1)?.toString().orEmpty())
-                            val entry = listWebDav(parentWebDavPath(path))
-                                .firstOrNull {
-                                    normalizeWebDavPath(it.path) == normalizeWebDavPath(path) &&
-                                        !it.isDirectory &&
-                                        isSupportedBookFile(it.name)
-                                }
-                                ?: syntheticWebDavBookEntry(path)
-                            logWebDav("getInfo path=$path found=${entry.path}")
-                            newCloudBook(entry)
-                        }
-                        method.name.contains("search") -> {
-                            val query = param.args?.getOrNull(1)?.toString().orEmpty()
-                            searchWebDavBooks(query)
-                        }
-                        method.name.contains("setupBackupDir") -> {
-                            val folders = (param.args?.getOrNull(1) as? List<*>).orEmpty()
-                            val path = folders.lastOrNull()?.let { folder ->
-                                folder.javaClass.methods.firstOrNull {
-                                    it.hostNameMatches("getPath") && it.parameterTypes.isEmpty()
-                                }?.apply { isAccessible = true }?.invoke(folder)?.toString()
-                            }.orEmpty()
-                            if (path.isNotBlank()) {
-                                saveWebDavBackupDir(path)
-                            }
-                            targetUnit()
-                        }
-                        else -> null
-                        }
-                    }
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage data hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage data: ${it.stackTraceToString()}")
-    }.getOrThrow()
+    HostStorageDataBridge(this).install()
 }
-
 internal fun WebDavDriveHook.hookHomeViewModelDependencies() {
-    runCatching {
-        cls(HOME_VIEW_MODEL_CLASS).declaredConstructors.forEach { constructor ->
-            constructor.isAccessible = true
-            XposedBridge.hookMethod(constructor, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    rememberHomeViewModelDependencies(param.thisObject)
+    val work = com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+    val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+    try {
+        for (role in listOf("home", "storage", "manager", "tracker")) {
+            handles += HookRuntime.hookMethod(work.constructor(role), object : HookCallback() {
+                override fun after(param: Call) {
+                    if (param.throwable != null) return
+                    val instance = param.thisObject ?: return
+                    when (role) {
+                        "home" -> rememberHomeViewModelDependencies(instance)
+                        "storage" -> rememberCloudStorageRepository(instance)
+                        "manager" -> rememberWorkerManager(instance)
+                        "tracker" -> workTrackerRef = WeakReference(instance)
+                    }
                 }
             })
         }
-        XposedBridge.log("$LOG_PREFIX home viewModel dependency hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook home viewModel dependencies: ${it.stackTraceToString()}")
-    }.getOrThrow()
+        // Recomposition supplies the existing view model after a module reload.
+        val home = requireNotNull(com.reamicro.fix.core.HostHomeBindings.bookshelf)
+        val page = home.method("page")
+        val index = page.parameterTypes.indices.single { page.parameterTypes[it] == work.type("home") }
+        handles += HookRuntime.hookMethod(page, object : HookCallback() {
+            override fun before(param: Call) {
+                rememberHomeViewModelDependencies(param.args?.getOrNull(index))
+            }
+        })
+        HookRuntime.deoptimize(page)
+    } catch (error: Throwable) {
+        handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+        throw error
+    }
+    com.reamicro.fix.reload.ModuleResources.cleanup {
+        workTrackerRef = null; workerManagerRef = null
+        cloudStorageRepositoryRef = null; bookshelfRepositoryRef = null
+    }
+    HookRuntime.log("$LOG_PREFIX native task dependencies installed")
 }
 
 internal fun WebDavDriveHook.hookHomeWebDavSearch() {
     runCatching {
-        val b4Events = if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4")
-            B4HomeSearchEvents(this) else null
-        val method = b4Events?.method ?: cls(HOME_VIEW_MODEL_CLASS).declaredMethods.first {
-            it.hostNameMatches(HOME_SEARCH_METHOD) &&
-                it.parameterTypes.size == 1 &&
-                it.parameterTypes[0] == String::class.java
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+        val events = HostHomeSearchEvents(this)
+        val method = events.method
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun after(param: Call) {
                 if (param.throwable != null) return
-                val query = if (b4Events != null) b4Events.query(param.args?.getOrNull(0)) ?: return
-                    else param.args?.getOrNull(0)?.toString().orEmpty()
+                val query = events.query(param.args?.getOrNull(0)) ?: return
                 rememberHomeViewModelDependencies(param.thisObject)
-                val seq = webDavHomeSearchSeq.incrementAndGet()
-                val localSeq = localLibraryHomeSearchSeq.incrementAndGet()
-                val onlineSeq = onlineCompletionHomeSearchSeq.incrementAndGet()
-                rememberHomeSearchSnapshot(emptyList(), emptyList())
-                updateHomeWebDavSearchResults(param.thisObject, emptyList(), emptyList(), emptyList())
-                if (query.isBlank()) return
-                updateHomeOnlineCompletionSearchResults(
-                    param.thisObject,
-                    onlineCompletionPendingSearchGroups(query),
-                )
-                com.reamicro.fix.reload.ModuleResources.thread({
-                    runCatching {
-                        if (query.isNotBlank()) {
-                            Thread.sleep(HOME_SEARCH_DEBOUNCE_MS)
-                            if (onlineCompletionHomeSearchSeq.get() != onlineSeq) return@runCatching
-                        }
-                        if (query.isBlank()) {
-                            if (onlineCompletionHomeSearchSeq.get() != onlineSeq) return@runCatching
-                            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                                if (onlineCompletionHomeSearchSeq.get() == onlineSeq) {
-                                    updateHomeOnlineCompletionSearchResults(param.thisObject, emptyList())
-                                }
-                            }
-                            return@runCatching
-                        }
-                        val onlineResults = searchOnlineCompletionSourcesProgressively(query) { snapshot ->
-                            if (onlineCompletionHomeSearchSeq.get() != onlineSeq) return@searchOnlineCompletionSourcesProgressively
-                            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                                if (onlineCompletionHomeSearchSeq.get() == onlineSeq) {
-                                    updateHomeOnlineCompletionSearchResults(param.thisObject, snapshot)
-                                }
-                            }
-                        }
-                        logWebDav("home online search query=$query sources=${onlineResults.size}")
-                    }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX online completion home search failed: ${it.stackTraceToString()}")
-                    }
-                }, "ReaMicroOnlineCompletionHomeSearch").start()
-                com.reamicro.fix.reload.ModuleResources.thread({
-                    runCatching {
-                        if (query.isNotBlank()) {
-                            Thread.sleep(HOME_SEARCH_DEBOUNCE_MS)
-                            if (webDavHomeSearchSeq.get() != seq) return@runCatching
-                        }
-                        val webDavResults = if (query.isBlank() || !hasWebDavLogin(currentContext())) {
-                            emptyList()
-                        } else {
-                            searchWebDavBooks(query)
-                        }
-                        if (webDavHomeSearchSeq.get() != seq) return@runCatching
-                        val localSnapshot = lastHomeSearchLocalResults
-                        rememberHomeSearchSnapshot(webDavResults, localSnapshot)
-                        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                            if (webDavHomeSearchSeq.get() == seq) {
-                                updateHomeWebDavSearchResults(param.thisObject, webDavResults, localSnapshot, null)
-                            }
-                        }
-                        scheduleLocalLibrarySearchRefresh(param.thisObject, query, webDavResults, seq, localSeq, LOCAL_LIBRARY_SEARCH_REFRESH_DELAY_MS)
-                        scheduleLocalLibrarySearchRefresh(param.thisObject, query, webDavResults, seq, localSeq, LOCAL_LIBRARY_SEARCH_LATE_REFRESH_DELAY_MS)
-                        logWebDav("home WebDAV search query=$query results=${webDavResults.size}")
-                    }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX WebDAV home search failed: ${it.stackTraceToString()}")
-                    }
-                }, "ReaMicroWebDavHomeSearch").start()
-                com.reamicro.fix.reload.ModuleResources.thread({
-                    runCatching {
-                        if (query.isNotBlank()) {
-                            Thread.sleep(HOME_SEARCH_DEBOUNCE_MS)
-                            if (localLibraryHomeSearchSeq.get() != localSeq) return@runCatching
-                        }
-                        val localResults = if (query.isBlank() || !canShowLocalLibraryEntry()) {
-                            emptyList()
-                        } else {
-                            searchLocalLibraryBooks(query)
-                        }
-                        if (localLibraryHomeSearchSeq.get() != localSeq) return@runCatching
-                        val webDavSnapshot = lastHomeSearchWebDavResults
-                        rememberHomeSearchSnapshot(webDavSnapshot, localResults)
-                        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                            if (
-                                webDavHomeSearchSeq.get() == seq &&
-                                localLibraryHomeSearchSeq.get() == localSeq
-                            ) {
-                                updateHomeWebDavSearchResults(param.thisObject, webDavSnapshot, localResults, null)
-                            }
-                        }
-                        logWebDav("home local search query=$query results=${localResults.size}")
-                    }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX local library home search failed: ${it.stackTraceToString()}")
-                    }
-                }, "ReaMicroLocalLibraryHomeSearch").start()
+                param.thisObject?.let { homeSearch.request(it, query) }
             }
         })
-        b4Events?.deoptimize()
-        XposedBridge.log("$LOG_PREFIX WebDAV home search hook installed")
+        events.deoptimize()
+        HookRuntime.log("$LOG_PREFIX WebDAV home search hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV home search: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV home search: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
     runCatching {
-        val b4 = com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4"
-        val method = cls(HOME_SEARCH_BAR_CLASS).declaredMethods.first {
-            (it.hostNameMatches(HOME_SEARCH_RESULT_LAZY_METHOD) ||
-                (b4 && it.hostNameMatches("SearchResult"))) &&
-                it.parameterTypes.size == if (b4) 6 else 5
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val map = param.args?.getOrNull(if (b4) 3 else 2) as? Map<*, *> ?: return
+        val host = com.reamicro.fix.core.HostHomeSearchBindings.requireCurrent()
+        val method = host.method("root")
+        val handle = HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                param.setObjectExtra("reamicro.search.previous", homeWebDavSearchRender.get())
+                homeWebDavSearchRender.remove()
+                val map = param.args[host.slot("root.results")] as? Map<*, *> ?: return
                 val sections = buildList {
                     (map[BACKUP_TYPE_WEBDAV] as? List<*>)?.takeIf { it.isNotEmpty() }?.let {
                         add(HomeSearchSection(type = BACKUP_TYPE_WEBDAV, results = it))
@@ -1525,6 +435,7 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
                     }
                     (map[BACKUP_TYPE_ONLINE_COMPLETION] as? List<*>)?.forEach { item ->
                         val group = item as? OnlineSearchGroup ?: return@forEach
+                        if (!homeSearch.isCurrent(group.sequence)) return@forEach
                         runCatching {
                             val title = onlineCompletionGroupTitle(group)
                             val renderType = onlineCompletionRenderTypeForSource(group.source, title)
@@ -1536,7 +447,7 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
                                 ),
                             )
                         }.onFailure { error ->
-                            XposedBridge.log(
+                            HookRuntime.log(
                                 "$LOG_PREFIX online completion render section failed source=${group.source.name} " +
                                     "results=${group.results.size} first=${group.results.firstOrNull()?.name.orEmpty()} " +
                                     "error=${error.stackTraceToString()}",
@@ -1545,83 +456,37 @@ internal fun WebDavDriveHook.hookHomeSearchResultWebDavSection() {
                     }
                 }
 
-                if (!b4) {
-                    sanitizeHostCloudSearchResults(param, map)
-                }
-                if (sections.isEmpty()) return
-                val intentReceiver = param.args?.getOrNull(if (b4) 1 else 3) ?: return
+                val intentReceiver = param.args[host.slot("root.receiver")] ?: return
                 homeWebDavSearchRender.set(
                     HomeSearchRenderContext(
                         sections = sections,
                         intentReceiver = intentReceiver,
                         generation = webDavHomeSearchSeq.get(),
-                        navGraphScope = if (b4) param.args[0] else null,
+                        navGraphScope = param.args[host.slot("root.scope")],
                     ),
                 )
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                homeWebDavSearchRender.remove()
+            override fun after(param: Call) {
+                val previous = param.getObjectExtra("reamicro.search.previous") as? HomeSearchRenderContext
+                if (previous == null) homeWebDavSearchRender.remove() else homeWebDavSearchRender.set(previous)
             }
         })
 
-        if (b4) {
-            B4HomeSearchUiBridge(this).install()
-            XposedBridge.deoptimize(method)
-            return@runCatching
+        try {
+            HostHomeSearchUiBridge(this).install()
+        } catch (error: Throwable) {
+            runCatching { handle.unhook() }.onFailure(error::addSuppressed)
+            throw error
         }
-        val footer = cls(FOOTER_CLASS).declaredMethods.first {
-            it.hostNameMatches(FOOTER_METHOD) && it.parameterTypes.size == 2
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(footer, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val context = homeWebDavSearchRender.get() ?: return
-                if (context.rendered) return
-                val lazyListScope = param.args?.getOrNull(0) ?: return
-                context.rendered = true
-                context.sections.forEach { section ->
-                    addHomeWebDavSearchSection(
-                        lazyListScope = lazyListScope,
-                        type = section.type,
-                        title = section.title,
-                        results = section.results,
-                        intentReceiver = context.intentReceiver,
-                        generation = context.generation,
-                    )
-                }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV home search result hook installed")
+        HookRuntime.log("$LOG_PREFIX WebDAV home search result hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV home search result: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV home search result: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookHomeSearchTapCancellation() {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        B4HomeSearchEvents(this).installTapGuard()
-        return
-    }
-    runCatching {
-        val method = homeSearchTapMethod()
-        XposedBridge.hookMethod(method, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val book = param.args?.getOrNull(1) ?: return
-                val type = book.callInt("getType")
-                if (isOnlineCompletionPath(cloudPathOf(book))) {
-                    handleOnlineCompletionSearchTap(book)
-                    param.result = targetUnit()
-                    return
-                }
-                if (tryHandleRunningCloudDownloadTap(book, type)) {
-                    param.result = targetUnit()
-                }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX home search download cancellation hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook home search download cancellation: ${it.stackTraceToString()}")
-    }.getOrThrow()
+    HostHomeSearchEvents(this).installTapGuard()
 }
 
 internal fun WebDavDriveHook.hookWebDavCloudDownload() {
@@ -1629,14 +494,15 @@ internal fun WebDavDriveHook.hookWebDavCloudDownload() {
         val methods = workerEnqueueDownloadMethods()
         check(methods.isNotEmpty()) { "$WORKER_MANAGER_CLASS.$WORKER_ENQUEUE_DOWNLOAD_METHOD not found" }
         methods.forEach { method ->
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     val book = param.args?.getOrNull(0) ?: return
                     val type = book.invokeNoArg("getType") as? Number ?: return
                     if (type.toInt() != BACKUP_TYPE_WEBDAV && type.toInt() != BACKUP_TYPE_LOCAL_LIBRARY) return
                     if (type.toInt() == BACKUP_TYPE_WEBDAV) {
-                        val key = webDavDownloadKey(cloudPathOf(book), book.callString("getName"))
-                        runningWebDavDownloads[key]?.let { running ->
+                        val identity = AccountHostRuntime.storageSnapshot(activityProvider())
+                        val key = identity?.let { webDavDownloadKey(it, cloudPathOf(book), book.callString("getName")) }
+                        key?.let(runningWebDavDownloads::get)?.let { running ->
                             tryHandleRunningWebDavDownloadTap(book)
                             // 同一路径的重复点击不能再启动请求；取消确认仍返回原任务句柄。
                             param.result = running.handle
@@ -1651,13 +517,13 @@ internal fun WebDavDriveHook.hookWebDavCloudDownload() {
                             enqueueWebDavDownload(param.thisObject, book)
                         }
                     }.getOrElse {
-                        XposedBridge.log("$LOG_PREFIX cloud download/import failed: ${it.stackTraceToString()}")
+                        HookRuntime.log("$LOG_PREFIX cloud download/import failed: ${it.stackTraceToString()}")
                         val title = if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) LOCAL_LIBRARY_TITLE else WEBDAV_TITLE
                         newWorkHandle(UUID.randomUUID().toString(), newWorkState("Error", 100, it.message ?: "import failed", null, title))
                     }
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun after(param: Call) {
                     val book = param.args?.getOrNull(0) ?: return
                     val type = book.callInt("getType")
                     if (type !in NATIVE_CLOUD_DOWNLOAD_TYPES) return
@@ -1666,102 +532,62 @@ internal fun WebDavDriveHook.hookWebDavCloudDownload() {
                 }
             })
         }
-        methods.forEach { XposedBridge.deoptimize(it) }
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud download hook installed")
+        methods.forEach { HookRuntime.deoptimize(it) }
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud download hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud download: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud download: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookNativeCloudDownloadCancellation() {
     runCatching {
-        val method = cls(WORK_TRACKER_CLASS).declaredMethods.first {
-            it.hostNameMatches("setState") && it.parameterTypes.size == 2
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val work = com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+        val method = work.method("update")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val id = param.args?.getOrNull(0)?.toString().orEmpty()
                 val token = runningNativeCloudDownloadsById[id] ?: return
                 val state = param.args?.getOrNull(1) ?: return
                 val status = workStateStatusName(state)
-                if (token.cancelRequested && (status == "Running" || status == "Success")) {
-                    throw CloudDownloadCancelledException()
+                // Native Success follows import completion. A late cancel must not manufacture
+                // an import failure or remove files still owned by the native worker.
+                if (status == "Success") return
+                val previous = work.currentState(token.tracker, token.id)?.let(work::stateName)
+                if (previous == "Success") {
+                    param.result = null
+                    return
                 }
-                if (token.cancelRequested && status == "Error") {
+                if (token.cancelRequested && status == "Running") {
+                    param.throwable = CloudDownloadCancelledException()
+                } else if (token.cancelRequested && status == "Error" && previous == "Cancelled") {
                     param.args?.set(1, newWorkState("Cancelled", 100, null, null, token.name))
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun after(param: Call) {
                 val id = param.args?.getOrNull(0)?.toString().orEmpty()
                 val token = runningNativeCloudDownloadsById[id] ?: return
-                val state = param.args?.getOrNull(1) ?: return
+                if (param.throwable != null) return
+                val state = work.currentState(token.tracker, token.id) ?: return
                 when (workStateStatusName(state)) {
                     "Success", "Error", "Cancelled" -> unregisterNativeCloudDownload(token)
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX native cloud download cancellation hook installed")
+        HookRuntime.log("$LOG_PREFIX native cloud download cancellation hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook native cloud download cancellation: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook native cloud download cancellation: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavImportBookSource() {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        B4ImportSourceBridge(this).install()
-        return
-    }
-    runCatching {
-        val repositoryClass = cls(BOOKSHELF_REPOSITORY_CLASS)
-
-        (repositoryClass.methods.asSequence() + repositoryClass.declaredMethods.asSequence())
-            .distinct()
-            .filter {
-            it.hostNameMatches(BOOKSHELF_IMPORT_BOOK_METHOD) &&
-                it.parameterTypes.size >= 6 &&
-                typeMatches(it.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS)
-            }
-            .forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    rememberBookshelfRepository(param.thisObject)
-                    val platformFile = param.args?.getOrNull(0) ?: return
-                    val keys = platformFileKeys(platformFile)
-                    val source = keys.firstNotNullOfOrNull { pendingWebDavImports[it] } ?: return
-                    if (source.sourceUrl.isNotBlank()) {
-                        param.args?.set(3, source.sourceUrl)
-                    }
-                    source.sourceSize?.takeIf { it > 0L }?.let {
-                        param.args?.set(4, java.lang.Long.valueOf(it))
-                    }
-                    logWebDav("importBook source override url=${source.sourceUrl.redactWebDavUrl()} size=${source.sourceSize ?: 0}")
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val platformFile = param.args?.getOrNull(0) ?: return
-                    platformFileKeys(platformFile).forEach { pendingWebDavImports.remove(it) }
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX WebDAV import source hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV import source: ${it.stackTraceToString()}")
-    }.getOrThrow()
+    HostImportSourceBridge(this).install()
 }
-
 internal fun WebDavDriveHook.hookWebDavCloudBackup() {
     runCatching {
-        val method = cls(WORKER_MANAGER_CLASS).declaredMethods.first {
-            it.hostNameMatches(WORKER_ENQUEUE_BACKUP_METHOD) &&
-                it.parameterTypes.size == 3 &&
-                it.parameterTypes[0] == java.lang.Long.TYPE &&
-                it.parameterTypes[1] == java.lang.Integer.TYPE &&
-                it.parameterTypes[2] == String::class.java
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = com.reamicro.fix.core.HostWorkBindings.requireCurrent().method("backup")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val bookId = (param.args?.getOrNull(0) as? Number)?.toLong() ?: return
                 val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
                 if (type != BACKUP_TYPE_WEBDAV) return
@@ -1770,53 +596,72 @@ internal fun WebDavDriveHook.hookWebDavCloudBackup() {
                 param.result = runCatching {
                     enqueueWebDavBackup(param.thisObject, bookId, dir)
                 }.getOrElse {
-                    XposedBridge.log("$LOG_PREFIX WebDAV backup failed: ${it.stackTraceToString()}")
+                    HookRuntime.log("$LOG_PREFIX WebDAV backup failed: ${it.stackTraceToString()}")
                     newWorkHandle(UUID.randomUUID().toString(), newWorkState("Error", 100, it.message ?: "WebDAV backup failed", null, WEBDAV_TITLE))
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud backup hook installed")
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud backup hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud backup: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud backup: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
+internal fun WebDavDriveHook.rememberBookBackupViewModel(viewModel: Any) {
+    val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup)
+    check(host.type("vm").isInstance(viewModel))
+    rememberWebDavBackupViewModelIdentity(viewModel)
+    rememberCloudStorageRepository(host.field("vm.storage").get(viewModel))
+    synchronized(webDavBackupViewModels) {
+        webDavBackupViewModels.removeAll { it.get() == null || it.get() === viewModel }
+        webDavBackupViewModels.add(WeakReference(viewModel))
+    }
+}
 internal fun WebDavDriveHook.hookBookBackupViewModelState() {
-    runCatching {
-        cls(BOOK_BACKUP_VIEW_MODEL_CLASS).declaredConstructors
-            .filter { it.parameterTypes.size == 3 && it.parameterTypes[0] == java.lang.Long.TYPE }
-            .forEach { constructor ->
-                constructor.isAccessible = true
-                XposedBridge.hookMethod(constructor, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        rememberCloudStorageRepository(param.args?.getOrNull(2))
-                        val viewModel = param.thisObject ?: return
-                        synchronized(webDavBackupViewModels) {
-                            webDavBackupViewModels.removeAll { it.get() == null || it.get() === viewModel }
-                            webDavBackupViewModels.add(WeakReference(viewModel))
-                        }
-                        logWebDav("BookBackupViewModel registered bookId=${param.args?.getOrNull(0)}")
-                    }
-                })
+    val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup)
+    val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+    try {
+        handles += HookRuntime.hookMethod(host.constructor("vm"), object : HookCallback() {
+            override fun after(param: Call) {
+                if (param.throwable == null) param.thisObject?.let(::rememberBookBackupViewModel)
             }
-        XposedBridge.log("$LOG_PREFIX WebDAV book backup viewModel hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV book backup viewModel: ${it.stackTraceToString()}")
-    }.getOrThrow()
+        })
+        // Recomposition also restores VMs created before a module reload.
+        handles += HookRuntime.hookMethod(host.method("screen"), object : HookCallback() {
+            override fun before(param: Call) {
+                val callback = param.thisObject ?: return
+                val vm = host.field("screen.vm").get(callback)?.takeIf(host.type("vm")::isInstance) ?: return
+                rememberBookBackupViewModel(vm)
+            }
+        })
+        HookRuntime.deoptimize(host.method("screen"))
+        com.reamicro.fix.reload.ModuleResources.cleanup {
+            synchronized(webDavBackupViewModels) { webDavBackupViewModels.clear() }
+            clearWebDavBackupViewModelIdentities()
+        }
+    } catch (error: Throwable) {
+        handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+        throw error
+    }
 }
 
 internal fun WebDavDriveHook.hookBookBackupWebDavCard() {
     runCatching {
-        val method = method(BOOK_BACKUP_SCREEN_CLASS, BOOK_BACKUP_CONTENT_METHOD, 9)
-        XposedBridge.hookMethod(method, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup)
+        val method = host.method("content")
+        HookRuntime.hookMethod(method, object : HookCallback(XposedInterface.PRIORITY_HIGHEST) {
+            override fun before(param: Call) {
                 val book = param.args?.getOrNull(0)
                 val cloudBook = param.args?.getOrNull(1)
-                val type = cloudBook?.callInt("getType") ?: 0
+                val type = cloudBook?.let { (host.field("cloud.type").get(it) as Number).toInt() } ?: 0
                 val bookBackupType = bookBackupTypeOf(book)
                 val backupId = bookBackupIdOf(book)
-                val bookId = book?.callLong("getId") ?: 0L
-                val recent = webDavRecentBackups[bookId]
+                val bookId = book?.let { host.field("book.id").getLong(it) } ?: 0L
+                val recent = webDavRecentBackups[bookId]?.takeIf { snapshot ->
+                    AccountHostRuntime.isCurrentStorage(snapshot.storageIdentity, activityProvider()) &&
+                        book?.callLong("getUid") == snapshot.storageIdentity.accountId &&
+                        book.callString("getUuid") == snapshot.uuid
+                }
                 val seq = bookBackupContentLogSeq.incrementAndGet()
                 if (seq <= 12) {
                     logWebDav(
@@ -1827,9 +672,10 @@ internal fun WebDavDriveHook.hookBookBackupWebDavCard() {
                 }
                 if (recent != null && bookBackupType != BACKUP_TYPE_WEBDAV && type != BACKUP_TYPE_WEBDAV) {
                     param.args?.set(0, recent.book)
-                    param.args?.set(1, copyCloudBookWithType(recent.backup, BACKUP_TYPE_YUN115))
+                    param.args?.set(1, copyCloudBookWithType(recent.backup, host.number("provider.yun115")))
                     logWebDav("backup content recent WebDAV card path=${recent.backup.callString("getPath")}")
                     pushWebDavBackupCard()
+                    param.setObjectExtra("reamicro.backup.pushed", true)
                     return
                 }
                 if (bookBackupType == BACKUP_TYPE_WEBDAV || type == BACKUP_TYPE_WEBDAV) {
@@ -1841,64 +687,73 @@ internal fun WebDavDriveHook.hookBookBackupWebDavCard() {
                 when {
                     type == BACKUP_TYPE_WEBDAV -> {
                         cloudBook ?: return
-                        param.args?.set(1, copyCloudBookWithType(cloudBook, BACKUP_TYPE_YUN115))
+                        param.args?.set(1, copyCloudBookWithType(cloudBook, host.number("provider.yun115")))
                         logWebDav("backup content mapped WebDAV card path=${cloudBook.callString("getPath")}")
                         pushWebDavBackupCard()
+                        param.setObjectExtra("reamicro.backup.pushed", true)
                     }
                     bookBackupType == BACKUP_TYPE_WEBDAV -> {
                         if (backupId.isBlank()) return
                         val fallbackBook = newCloudBook(syntheticWebDavBookEntry(backupId))
-                        param.args?.set(1, copyCloudBookWithType(fallbackBook, BACKUP_TYPE_YUN115))
+                        param.args?.set(1, copyCloudBookWithType(fallbackBook, host.number("provider.yun115")))
                         logWebDav("backup content synthesized WebDAV card path=$backupId")
                         pushWebDavBackupCard()
+                        param.setObjectExtra("reamicro.backup.pushed", true)
                     }
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if ((webDavBackupCardDepth.get() ?: 0) > 0) {
+            override fun after(param: Call) {
+                if (param.getObjectExtra("reamicro.backup.pushed") == true) {
                     popWebDavBackupCard()
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV backup card hook installed")
+        HookRuntime.deoptimize(method)
+        HookRuntime.deoptimize(host.method("screen"))
+        HookRuntime.log("$LOG_PREFIX WebDAV backup card hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV backup card: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV backup card: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavYun115BackupCard() {
     runCatching {
-        val method = method(DRIVE_CARD_CLASS, YUN115_NET_DISK_CARD_METHOD, 5)
-        XposedBridge.hookMethod(method, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup)
+        val method = host.method("yun115")
+        HookRuntime.hookMethod(method, object : HookCallback(XposedInterface.PRIORITY_HIGHEST) {
+            override fun before(param: Call) {
                 val cloudBook = param.args?.getOrNull(0) ?: return
-                if (cloudBook.callInt("getType") != BACKUP_TYPE_WEBDAV) return
-                param.args?.set(0, copyCloudBookWithType(cloudBook, BACKUP_TYPE_YUN115))
+                if ((host.field("cloud.type").get(cloudBook) as Number).toInt() != BACKUP_TYPE_WEBDAV) return
+                param.args?.set(0, copyCloudBookWithType(cloudBook, host.number("provider.yun115")))
                 pushWebDavBackupCard()
+                param.setObjectExtra("reamicro.backup.pushed", true)
                 logWebDav("Yun115 card mapped WebDAV path=${cloudBook.callString("getPath")}")
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if ((webDavBackupCardDepth.get() ?: 0) > 0) {
+            override fun after(param: Call) {
+                if (param.getObjectExtra("reamicro.backup.pushed") == true) {
                     popWebDavBackupCard()
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV Yun115 backup card hook installed")
+        HookRuntime.deoptimize(host.method("content"))
+        HookRuntime.log("$LOG_PREFIX WebDAV Yun115 backup card hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV Yun115 backup card: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV Yun115 backup card: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavStrings() {
+    val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+    val dynamic = requireNotNull(com.reamicro.fix.core.HostStorageBindings.ui) { "Storage UI contract unavailable" }
     runCatching {
-        cls(STRING_RESOURCES_KT_CLASS).declaredMethods.filter {
-            it.hostNameMatches(STRING_RESOURCE_METHOD) && it.returnType == String::class.java
-        }.forEach { method ->
+        val methods = listOf(dynamic.method("string"))
+        check(methods.isNotEmpty()) { "No native string resource methods" }
+        methods.forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            handles += HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     when {
                         (localLibraryDefaultFolderDepth.get() ?: 0) > 0 -> {
                             val index = localLibraryDefaultFolderStringIndex.get() ?: 0
@@ -1917,27 +772,28 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavStrings() {
                     }
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val key = param.args?.getOrNull(0)?.callString("getKey").orEmpty()
-                    if ((webDavRunningSyncAuthCardDepth.get() ?: 0) > 0 && key == STRING_KEY_UPLOAD_TO_115) {
+                override fun after(param: Call) {
+                    val resource = param.args.getOrNull(0)
+                    val key = resource?.let { dynamic.field("resourceKey").get(it) as String }.orEmpty()
+                    if ((webDavRunningSyncAuthCardDepth.get() ?: 0) > 0 && key.removePrefix("string:") == STRING_KEY_UPLOAD_TO_115) {
                         param.result = "上传到 $WEBDAV_TITLE"
                     }
                 }
             })
+            HookRuntime.deoptimize(method)
         }
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage string hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage strings: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud storage string hook installed")
+    }.onFailure { error ->
+        handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud storage strings: ${error.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavTitle() {
     runCatching {
-        val method = cls(CLOUD_STORAGE_SCREEN_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_STORAGE_BAR_METHOD) && it.parameterTypes.size == 5
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostStorageBindings.data).method("bar")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
                 when (type) {
                     BACKUP_TYPE_WEBDAV -> webDavCloudTitleDepth.set((webDavCloudTitleDepth.get() ?: 0) + 1)
@@ -1945,7 +801,7 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavTitle() {
                 }
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun after(param: Call) {
                 val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
                 when (type) {
                     BACKUP_TYPE_WEBDAV -> {
@@ -1959,50 +815,51 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavTitle() {
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage title hook installed")
+        HookRuntime.deoptimize(method)
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud storage title hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage title: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud storage title: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavRefresh() {
     runCatching {
-        val method = cls(CLOUD_STORAGE_SCREEN_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_STORAGE_SCREEN_METHOD) && it.parameterTypes.size == 4
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostStorageBindings.data).method("screen")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun after(param: Call) {
                 val type = (param.args?.getOrNull(1) as? Number)?.toInt() ?: return
                 if (type == BACKUP_TYPE_WEBDAV || type == BACKUP_TYPE_LOCAL_LIBRARY) {
                     refreshCloudStorageScreen(type)
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage refresh hook installed")
+        HookRuntime.deoptimize(method)
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud storage refresh hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage refresh: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud storage refresh: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavAuthTips() {
     runCatching {
-        val method = cls(NOT_AUTH_CLASS).declaredMethods.first {
-            it.hostNameMatches(NOT_AUTH_METHOD) && it.parameterTypes.size == 4
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostStorageBindings.ui).method("notAuth")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
                 if (type == BACKUP_TYPE_LOCAL_LIBRARY) {
-                    param.result = targetUnit()
+                    param.result = null
                     return
                 }
                 if (type != BACKUP_TYPE_WEBDAV) return
                 param.args?.set(0, BACKUP_TYPE_BAIDU)
+                param.args[3] = ((param.args[3] as Int) and 14.inv()) or 6
+                param.setObjectExtra("reamicro.storage.notAuth", true)
                 webDavNotAuthDepth.set((webDavNotAuthDepth.get() ?: 0) + 1)
                 webDavNotAuthTipPending.set(true)
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun after(param: Call) {
+                if (param.getObjectExtra("reamicro.storage.notAuth") != true) return
                 val next = (webDavNotAuthDepth.get() ?: 0) - 1
                 if (next <= 0) {
                     webDavNotAuthDepth.remove()
@@ -2012,19 +869,18 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavAuthTips() {
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud not-auth hook installed")
+        HookRuntime.deoptimize(method)
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud not-auth hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud not-auth: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud not-auth: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookCloudStorageWebDavViewModelState() {
     runCatching {
-        val constructor = cls(CLOUD_STORAGE_VIEW_MODEL_CLASS).declaredConstructors.first {
-            it.parameterTypes.isNotEmpty() && it.parameterTypes[0] == java.lang.Integer.TYPE
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(constructor, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+        val constructor = requireNotNull(com.reamicro.fix.core.HostStorageBindings.data).constructor("vm")
+        HookRuntime.hookMethod(constructor, object : HookCallback() {
+            override fun after(param: Call) {
                 val type = (param.args?.getOrNull(0) as? Number)?.toInt() ?: return
                 if (type != BACKUP_TYPE_WEBDAV && type != BACKUP_TYPE_LOCAL_LIBRARY) return
                 val viewModel = param.thisObject ?: return
@@ -2043,179 +899,60 @@ internal fun WebDavDriveHook.hookCloudStorageWebDavViewModelState() {
                 }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud storage state hook installed")
+        HookRuntime.deoptimize(constructor)
+        HookRuntime.log("$LOG_PREFIX WebDAV cloud storage state hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud storage state: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV cloud storage state: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavCloudTap() {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        B4StorageTapBridge(this).install()
-        return
-    }
-    runCatching {
-        val method = cls(CLOUD_STORAGE_VIEW_MODEL_CLASS).declaredMethods.first {
-            it.hostNameMatches(CLOUD_STORAGE_ON_INTENT_METHOD) &&
-                it.parameterTypes.size == 1 &&
-                typeMatches(it.parameterTypes[0], CLOUD_STORAGE_UI_EVENT_CLASS)
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val viewModel = param.thisObject ?: return
-                val type = viewModel.javaClass.methods.firstOrNull {
-                    it.hostNameMatches("getType") && it.parameterTypes.isEmpty()
-                }?.apply { isAccessible = true }?.invoke(viewModel) as? Number ?: return
-                val typeInt = type.toInt()
-
-                val intent = param.args?.getOrNull(0) ?: return
-                if (!typeMatches(intent.javaClass, CLOUD_STORAGE_UI_EVENT_TAP_CLASS)) return
-                val book = intent.javaClass.methods.firstOrNull {
-                    it.hostNameMatches("getBook") && it.parameterTypes.isEmpty()
-                }?.apply { isAccessible = true }?.invoke(intent) ?: return
-
-                if (tryHandleRunningCloudDownloadTap(book, typeInt)) {
-                    param.result = null
-                    return
-                }
-                if (typeInt != BACKUP_TYPE_WEBDAV) return
-
-                com.reamicro.fix.reload.ModuleResources.thread({
-                    runCatching {
-                        val workerManager = viewModel.javaClass.methods.first {
-                            it.hostNameMatches("getWorkerManager") && it.parameterTypes.isEmpty()
-                        }.apply { isAccessible = true }.invoke(viewModel)
-                            ?: error("CloudStorageViewModel.workerManager is null")
-                        invokeWorkerEnqueueDownload(workerManager, book)
-                        logWebDav("tap queued cloud import type=$typeInt path=${cloudPathOf(book)}")
-                    }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX cloud tap download failed: ${it.stackTraceToString()}")
-                    }
-                }, "ReaMicroWebDavTap").start()
-                param.result = null
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV cloud tap hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV cloud tap: ${it.stackTraceToString()}")
-    }.getOrThrow()
+    HostStorageTapBridge(this).install()
 }
-
 private fun WebDavDriveHook.workerEnqueueDownloadMethods(): List<java.lang.reflect.Method> =
-    (cls(WORKER_MANAGER_CLASS).methods.asSequence() + cls(WORKER_MANAGER_CLASS).declaredMethods.asSequence())
-        .distinct()
-        .filter { method ->
-            method.hostNameMatches(WORKER_ENQUEUE_DOWNLOAD_METHOD) &&
-                typeMatches(method.parameterTypes.firstOrNull(), CLOUD_BOOK_CLASS) &&
-                (method.parameterTypes.size == 1 ||
-                    (method.parameterTypes.size == 2 && method.parameterTypes[1] == String::class.java))
-        }
-        .onEach { it.isAccessible = true }
-        .sortedBy { it.parameterTypes.size }
-        .toList()
+    listOf(com.reamicro.fix.core.HostWorkBindings.requireCurrent().method("download"))
 
-private fun WebDavDriveHook.invokeWorkerEnqueueDownload(workerManager: Any, book: Any): Any? {
-    val method = workerEnqueueDownloadMethods().firstOrNull()
-        ?: error("$WORKER_MANAGER_CLASS.$WORKER_ENQUEUE_DOWNLOAD_METHOD not found")
-    val args = if (method.parameterTypes.size == 1) {
-        arrayOf(book)
-    } else {
-        arrayOf(book, null)
-    }
-    return method.invoke(workerManager, *args)
-}
-
-internal fun WebDavDriveHook.hookThirdAccountWebDavRoute() {
-    runCatching {
-        val methods = setupRouteMethods()
-        methods.forEach { method ->
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val backStackEntry = param.args?.getOrNull(2) ?: return
-                    if (!isRouteDestination(backStackEntry, ROUTE_THIRD_ACCOUNT_CLASS)) return
-                    val route = runCatching { navBackStackEntryToThirdAccount(backStackEntry) }.getOrNull() ?: return
-                    val type = route.javaClass.methods.firstOrNull { it.hostNameMatches("getType") && it.parameterTypes.isEmpty() }
-                        ?.invoke(route) as? Number ?: return
-                    val navGraphScope = param.args?.getOrNull(0) ?: return
-                    if (type.toInt() == BACKUP_TYPE_LOCAL_LIBRARY) {
-                        clearWebDavAccountContext()
-                        markLocalLibraryAccountContext(navGraphScope)
-                        val composer = param.args?.getOrNull(3) ?: return
-                        if (renderLocalLibraryAccountRoute(navGraphScope, composer)) {
-                            param.result = targetUnit()
-                        }
-                        return
-                    }
-                    if (type.toInt() != BACKUP_TYPE_WEBDAV) {
-                        clearWebDavAccountContext()
-                        clearLocalLibraryAccountContext()
-                        return
-                    }
-                    clearLocalLibraryAccountContext()
-                    markWebDavAccountContext(navGraphScope)
-                    val composer = param.args?.getOrNull(3) ?: return
-                    if (renderWebDavAccountRoute(navGraphScope, composer)) {
-                        param.result = targetUnit()
-                    }
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX WebDAV third account route hook installed: ${methods.size} setup lambdas")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV third account route: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
+private fun WebDavDriveHook.invokeWorkerEnqueueDownload(workerManager: Any, book: Any): Any? =
+    com.reamicro.fix.core.HostWorkBindings.requireCurrent().method("download").invoke(workerManager, book, null)
 
 internal fun WebDavDriveHook.hookWebDavAccountScreenReuse() {
-    runCatching {
-        val method = method(BAIDU_ACCOUNT_SCREEN_CLASS, BAIDU_ACCOUNT_SCREEN_METHOD, 3)
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (webDavAccountNavGraphScope.get() == null) return
-                webDavAccountScreenDepth.set((webDavAccountScreenDepth.get() ?: 0) + 1)
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val next = (webDavAccountScreenDepth.get() ?: 0) - 1
-                if (next <= 0) {
-                    webDavAccountScreenDepth.remove()
-                } else {
-                    webDavAccountScreenDepth.set(next)
+    val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+    try {
+        for ((owner, name, key) in listOf(
+            Triple(BAIDU_ACCOUNT_SCREEN_CLASS, BAIDU_ACCOUNT_SCREEN_METHOD, "webdav"),
+            Triple(Y115_ACCOUNT_SCREEN_CLASS, Y115_ACCOUNT_SCREEN_METHOD, "local"),
+        )) {
+            val screen = method(owner, name, 3)
+            val scope = if (key == "webdav") webDavAccountNavGraphScope else localLibraryAccountNavGraphScope
+            val depth = if (key == "webdav") webDavAccountScreenDepth else localLibraryAccountScreenDepth
+            handles += HookRuntime.hookMethod(screen, object : HookCallback() {
+                override fun before(param: Call) {
+                    if (scope.get() == null) return
+                    param.setObjectExtra("reamicro.storage.account.$key", true)
+                    depth.set((depth.get() ?: 0) + 1)
                 }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV account screen reuse hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV account screen reuse: ${it.stackTraceToString()}")
+                override fun after(param: Call) {
+                    if (param.getObjectExtra("reamicro.storage.account.$key") != true) return
+                    val next = (depth.get() ?: 0) - 1
+                    if (next <= 0) depth.remove() else depth.set(next)
+                }
+            })
+            HookRuntime.deoptimize(screen)
+        }
+    } catch (error: Throwable) {
+        handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+        throw error
     }
-    runCatching {
-        val method = method(Y115_ACCOUNT_SCREEN_CLASS, Y115_ACCOUNT_SCREEN_METHOD, 3)
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (localLibraryAccountNavGraphScope.get() == null) return
-                localLibraryAccountScreenDepth.set((localLibraryAccountScreenDepth.get() ?: 0) + 1)
-            }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val next = (localLibraryAccountScreenDepth.get() ?: 0) - 1
-                if (next <= 0) {
-                    localLibraryAccountScreenDepth.remove()
-                } else {
-                    localLibraryAccountScreenDepth.set(next)
-                }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX local library account screen reuse hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook local library account screen reuse: ${it.stackTraceToString()}")
-    }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
+    val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+    val methods = linkedSetOf<java.lang.reflect.Method>()
+    fun component(owner: String, name: String, count: Int): java.lang.reflect.Method = method(owner, name, count).also(methods::add)
     runCatching {
-        val defaultFolder = method(BAIDU_ACCOUNT_SCREEN_CLASS, BAIDU_ACCOUNT_DEFAULT_FOLDER_METHOD, 4)
-        XposedBridge.hookMethod(defaultFolder, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val defaultFolder = component(BAIDU_ACCOUNT_SCREEN_CLASS, BAIDU_ACCOUNT_DEFAULT_FOLDER_METHOD, 4)
+        handles += HookRuntime.hookMethod(defaultFolder, object : HookCallback() {
+            override fun before(param: Call) {
                 if (!isWebDavAccountContext()) return
                 val navGraphScope = webDavAccountNavGraphScope.get()
                     ?: webDavAccountNavGraphScopeStrong
@@ -2225,12 +962,13 @@ internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
                     navGraphScope?.let { navigateCloudFolder(it) }
                     targetUnit()
                 })
+                param.args[param.args.lastIndex] = ((param.args.last() as Int) and 126.inv()) or 54
             }
         })
 
-        val logout = method(BAIDU_ACCOUNT_SCREEN_CLASS, BAIDU_ACCOUNT_LOGOUT_METHOD, 3)
-        XposedBridge.hookMethod(logout, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val logout = component(BAIDU_ACCOUNT_SCREEN_CLASS, BAIDU_ACCOUNT_LOGOUT_METHOD, 3)
+        handles += HookRuntime.hookMethod(logout, object : HookCallback() {
+            override fun before(param: Call) {
                 if (!isWebDavAccountContext()) return
                 val navGraphScope = webDavAccountNavGraphScope.get()
                     ?: webDavAccountNavGraphScopeStrong
@@ -2245,13 +983,14 @@ internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
                     }
                     targetUnit()
                 })
+                param.args[2] = ((param.args[2] as Int) and 14.inv()) or 6
             }
         })
 
         listOf(BAIDU_ACCOUNT_QUERY_ORDER_BY_METHOD, BAIDU_ACCOUNT_QUERY_ORDER_DIRECTION_METHOD).forEach { methodName ->
-            val query = method(BAIDU_ACCOUNT_SCREEN_CLASS, methodName, 4)
-            XposedBridge.hookMethod(query, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val query = component(BAIDU_ACCOUNT_SCREEN_CLASS, methodName, 4)
+            handles += HookRuntime.hookMethod(query, object : HookCallback() {
+                override fun before(param: Call) {
                     if (!isWebDavAccountContext()) return
                     val isOrderBy = methodName == BAIDU_ACCOUNT_QUERY_ORDER_BY_METHOD
                     param.args?.set(0, if (isOrderBy) currentWebDavOrderBy() else currentWebDavOrderDirection())
@@ -2266,23 +1005,27 @@ internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
                         refreshWebDavLibraryAsync(currentWebDavBrowseDir())
                         targetUnit()
                     })
+                    param.args[3] = ((param.args[3] as Int) and 126.inv()) or 54
                 }
             })
         }
-        val y115DefaultFolder = method(Y115_ACCOUNT_SCREEN_CLASS, Y115_ACCOUNT_DEFAULT_FOLDER_METHOD, 4)
-        XposedBridge.hookMethod(y115DefaultFolder, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val y115DefaultFolder = component(Y115_ACCOUNT_SCREEN_CLASS, Y115_ACCOUNT_DEFAULT_FOLDER_METHOD, 4)
+        handles += HookRuntime.hookMethod(y115DefaultFolder, object : HookCallback() {
+            override fun before(param: Call) {
                 if (!isLocalLibraryAccountContext()) return
                 param.args?.set(0, localLibraryPickerDir())
                 param.args?.set(1, functionProxy("LocalLibraryDefaultFolder", FUNCTION0_CLASS) {
                     launchLocalLibraryFolderPicker()
                     targetUnit()
                 })
+                param.args[3] = ((param.args[3] as Int) and 126.inv()) or 54
+                param.setObjectExtra("reamicro.storage.localFolder", true)
                 localLibraryDefaultFolderDepth.set((localLibraryDefaultFolderDepth.get() ?: 0) + 1)
                 localLibraryDefaultFolderStringIndex.set(0)
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun after(param: Call) {
+                if (param.getObjectExtra("reamicro.storage.localFolder") != true) return
                 val next = (localLibraryDefaultFolderDepth.get() ?: 0) - 1
                 if (next <= 0) {
                     localLibraryDefaultFolderDepth.remove()
@@ -2290,22 +1033,27 @@ internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
                 } else {
                     localLibraryDefaultFolderDepth.set(next)
                 }
-                if (!isLocalLibraryAccountContext()) return
+                if (param.throwable != null || !isLocalLibraryAccountContext()) return
                 val composer = param.args?.getOrNull(2) ?: return
-                renderLocalLibraryFolderRows(composer)
+                val native = com.reamicro.fix.core.HostUiBindings.current
+                if (native != null) {
+                    native.instance("startGroup", composer, 0x524D7352)
+                    try { renderLocalLibraryFolderRows(composer) }
+                    finally { native.instance("endGroup", composer, false) }
+                } else renderLocalLibraryFolderRows(composer)
             }
         })
-        val y115Logout = method(Y115_ACCOUNT_SCREEN_CLASS, Y115_ACCOUNT_LOGOUT_METHOD, 3)
-        XposedBridge.hookMethod(y115Logout, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val y115Logout = component(Y115_ACCOUNT_SCREEN_CLASS, Y115_ACCOUNT_LOGOUT_METHOD, 3)
+        handles += HookRuntime.hookMethod(y115Logout, object : HookCallback() {
+            override fun before(param: Call) {
                 if (!isLocalLibraryAccountContext()) return
-                param.result = targetUnit()
+                param.result = null
             }
         })
         listOf(Y115_ACCOUNT_QUERY_ORDER_BY_METHOD, Y115_ACCOUNT_QUERY_ORDER_DIRECTION_METHOD).forEach { methodName ->
-            val query = method(Y115_ACCOUNT_SCREEN_CLASS, methodName, 4)
-            XposedBridge.hookMethod(query, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val query = component(Y115_ACCOUNT_SCREEN_CLASS, methodName, 4)
+            handles += HookRuntime.hookMethod(query, object : HookCallback() {
+                override fun before(param: Call) {
                     if (!isLocalLibraryAccountContext()) return
                     val isOrderBy = methodName == Y115_ACCOUNT_QUERY_ORDER_BY_METHOD
                     param.args?.set(0, if (isOrderBy) currentLocalLibraryOrderBy() else currentLocalLibraryOrderDirection())
@@ -2320,128 +1068,106 @@ internal fun WebDavDriveHook.hookWebDavAccountSettingComponents() {
                         refreshLocalLibraryAsync(currentLocalLibraryBrowseDir())
                         targetUnit()
                     })
+                    param.args[3] = ((param.args[3] as Int) and 126.inv()) or 54
                 }
             })
         }
-        XposedBridge.log("$LOG_PREFIX WebDAV account setting component hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV account setting components: ${it.stackTraceToString()}")
+        methods.forEach(HookRuntime::deoptimize)
+        HookRuntime.log("$LOG_PREFIX WebDAV account setting component hook installed")
+    }.onFailure { error ->
+        handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV account setting components: ${error.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavAccountAuthFlow() {
-    // B4 的账号 VM 只有 g/i/l，鉴权状态已由 native state/intent 链路承载。
-    // 旧版 getAuth 门面在 B4 不存在，不能把缺失 ABI 记成安装失败。
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        XposedBridge.log("$LOG_PREFIX B4 account auth flow uses native VM state/intent; legacy getAuth hooks skipped")
-        return
+    val c = requireNotNull(com.reamicro.fix.core.HostStorageBindings.account) { "Native account contract unavailable" }
+    requireNotNull(com.reamicro.fix.core.HostStorageBindings.records) { "Account records unavailable" }
+    val flows = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, String>())
+    val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+    fun capture(key: String, vm: Any?) {
+        if (vm == null || !c.type("$key.vm").isInstance(vm)) return
+        c.field("$key.auth").get(vm)?.let { flows[it] = key }
     }
-    runCatching {
-        val method = method(BAIDU_VIEW_MODEL_CLASS, BAIDU_VIEW_MODEL_GET_AUTH_METHOD, 0)
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!isWebDavAccountContext()) return
-                param.result = webDavAccountAuthFlow()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV account auth flow hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV account auth flow: ${it.stackTraceToString()}")
+    try {
+        for (key in listOf("webdav", "local")) {
+            val ctor = c.constructor("$key.vm")
+            handles += HookRuntime.hookMethod(ctor, object : HookCallback() {
+                override fun after(param: Call) {
+                    if (param.throwable != null) return
+                    capture(key, param.thisObject)
+                }
+            })
+            HookRuntime.deoptimize(ctor)
+        }
+        for ((acquire, keys) in listOf("webdav", "local").groupBy { c.method("$it.acquireVm") }) {
+            handles += HookRuntime.hookMethod(acquire, object : HookCallback() {
+                override fun after(param: Call) {
+                    if (param.throwable == null) keys.forEach { capture(it, param.result) }
+                }
+            })
+            HookRuntime.deoptimize(acquire)
+        }
+        for ((content, keys) in listOf("webdav", "local").groupBy { c.method("$it.content") }) {
+            handles += HookRuntime.hookMethod(content, object : HookCallback() {
+                override fun before(param: Call) {
+                    val callback = param.thisObject ?: return
+                    keys.forEach { capture(it, c.field("$it.contentVm").get(callback)) }
+                }
+            })
+            HookRuntime.deoptimize(content)
+        }
+        for (collect in listOf("webdav", "local").map { c.method("$it.collect") }.distinct()) {
+            handles += HookRuntime.hookMethod(collect, object : HookCallback() {
+                override fun before(param: Call) {
+                    val original = param.args[0] ?: return
+                    val key = flows[original] ?: return
+                    if (key == "webdav" && !isWebDavAccountContext() || key == "local" && !isLocalLibraryAccountContext()) return
+                    try {
+                        param.args[0] = if (key == "webdav") webDavAccountAuthFlow() else localLibraryAccountAuthFlow()
+                        param.args[1] = if (key == "webdav") webDavAuth() else localLibraryAuth()
+                        param.args[3] = ((param.args[3] as Int) and 126.inv()) or 54
+                    } catch (error: Throwable) { param.throwable = error }
+                }
+            })
+            HookRuntime.deoptimize(collect)
+        }
+        listOf("webdav", "local").map { c.method("$it.screen") }.distinct().forEach(HookRuntime::deoptimize)
+    } catch (error: Throwable) {
+        handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+        throw error
     }
-    runCatching {
-        val method = method(Y115_VIEW_MODEL_CLASS, Y115_VIEW_MODEL_GET_AUTH_METHOD, 0)
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!isLocalLibraryAccountContext()) return
-                param.result = localLibraryAccountAuthFlow()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX local library account auth flow hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook local library account auth flow: ${it.stackTraceToString()}")
-    }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavAccountTopBarTitle() {
     runCatching {
 
-        val candidates = cls(APP_TOP_BAR_CLASS).declaredMethods
-        val method = composeInterop.findComposableMethod(
-            candidates = candidates,
-            baseName = APP_TOP_BAR_METHOD,
-            composerClassName = COMPOSER_CLASS,
-            firstParameterType = String::class.java,
-        ) ?: error(
-            "$APP_TOP_BAR_CLASS.$APP_TOP_BAR_METHOD not found; candidates=" +
-                candidates.joinToString { "${it.name}/${it.parameterTypes.size}" },
-        )
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val method = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).method("topBar")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
                 val title = param.args?.getOrNull(0)?.toString().orEmpty()
-                if (isLocalLibraryAccountContext()) {
-                    param.args?.set(0, LOCAL_LIBRARY_TITLE)
-                    return
+                val replacement = when {
+                    isLocalLibraryAccountContext() -> LOCAL_LIBRARY_TITLE
+                    isWebDavAccountContext() && isBaiduTitle(title) -> WEBDAV_TITLE
+                    else -> return
                 }
-                if (!isWebDavAccountContext() || !isBaiduTitle(title)) return
-                param.args?.set(0, WEBDAV_TITLE)
+                param.args[0] = replacement
+                if (com.reamicro.fix.core.HostUiBindings.current?.method("topBar") == method) {
+                    param.args[9] = ((param.args[9] as Int) and 14.inv()) or 6
+                    param.args[10] = (param.args[10] as Int) and 1.inv()
+                }
             }
         })
-        XposedBridge.log("$LOG_PREFIX WebDAV account top bar title hook installed")
+        HookRuntime.deoptimize(method)
+        HookRuntime.log("$LOG_PREFIX WebDAV account top bar title hook installed")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV account top bar title: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to hook WebDAV account top bar title: ${it.stackTraceToString()}")
     }.getOrThrow()
 }
 
 internal fun WebDavDriveHook.hookWebDavAccountDefaultFolderLambda() {
-    // B4 已由 bid.b/l2e.a 的真实 DefaultFolder composable 处理回调，旧 lambda
-    // 在 R8 后不存在；避免用历史合成方法名制造假失败。
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        XposedBridge.log("$LOG_PREFIX B4 default-folder lambda uses native account screen methods; legacy lambda hook skipped")
-        return
-    }
-    runCatching {
-        val method = cls(BAIDU_ACCOUNT_SCREEN_CLASS).declaredMethods.first {
-            it.hostNameMatches(BAIDU_ACCOUNT_DEFAULT_FOLDER_LAMBDA_METHOD) && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val navGraphScope = param.args?.getOrNull(0) ?: return
-                if (
-                    (webDavAccountScreenDepth.get() ?: 0) <= 0 &&
-                    webDavAccountNavGraphScopeStrong !== navGraphScope &&
-                    webDavAccountNavGraphScopeRef?.get() !== navGraphScope
-                ) return
-                navigateCloudFolder(navGraphScope)
-                param.result = targetUnit()
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX WebDAV account default-folder lambda hook installed")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV account default-folder lambda: ${it.stackTraceToString()}")
-    }.getOrThrow()
-}
-
-internal fun WebDavDriveHook.hookThirdLoginWebDavRoute() {
-    runCatching {
-        val methods = setupRouteMethods()
-        methods.forEach { method ->
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val backStackEntry = param.args?.getOrNull(2) ?: return
-                    if (!isRouteDestination(backStackEntry, ROUTE_THIRD_LOGIN_CLASS)) return
-                    val route = runCatching { navBackStackEntryToThirdLogin(backStackEntry) }.getOrNull() ?: return
-                    val type = route.javaClass.methods.firstOrNull { it.hostNameMatches("getType") && it.parameterTypes.isEmpty() }
-                        ?.invoke(route) as? Number ?: return
-                    if (type.toInt() != BACKUP_TYPE_WEBDAV) return
-                    val navGraphScope = param.args?.getOrNull(0) ?: return
-                    val composer = param.args?.getOrNull(3) ?: return
-                    renderWebDavLoginRoute(navGraphScope, composer)
-                    param.result = targetUnit()
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX WebDAV third login route hook installed: ${methods.size} setup lambdas")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to hook WebDAV third login route: ${it.stackTraceToString()}")
-    }.getOrThrow()
+    requireNotNull(com.reamicro.fix.core.HostStorageBindings.account) { "Native account contract unavailable" }
+    check(com.reamicro.fix.core.HookInstallReport.snapshot().any {
+        it.feature == FEATURE_ID && it.name == "webDavAccountSettingComponents" && it.ok
+    }) { "Native account default-folder callback was not installed" }
 }

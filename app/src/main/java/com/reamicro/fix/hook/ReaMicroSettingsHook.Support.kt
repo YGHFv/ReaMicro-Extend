@@ -1,14 +1,8 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.hostMethodsNamed
-import com.reamicro.fix.core.hostNameStartsWith
-
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ContentValues
 import android.content.ClipData
@@ -26,8 +20,6 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -35,9 +27,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.webkit.CookieManager
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -45,18 +35,19 @@ import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiImagePresetTarget
-import com.reamicro.fix.association.provider.ExternalSourceLoader
 import com.reamicro.fix.association.provider.YouShuLoginCookies
 import com.reamicro.fix.association.provider.YouShuLoginState
+import com.reamicro.fix.association.provider.YouShuLoginStatus
+import com.reamicro.fix.association.provider.YouShuLoginPolicy
+import com.reamicro.fix.association.provider.YouShuWebSearchBridge
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.OnlineEpubStyleKind
 import com.reamicro.fix.settings.ReaderHighlightBookContext
 import com.reamicro.fix.settings.readerHighlightBookIdentityMatches
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookRuntime
+import com.reamicro.fix.core.hostClass
 import java.io.File
-import java.lang.reflect.Method
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -66,94 +57,10 @@ import org.json.JSONObject
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
-internal fun ReaMicroSettingsHook.resolveSettingsListBuilderMethod(): Method {
-    val settingsClass = cls(SETTINGS_SCREEN_CLASS)
-    val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
-    val navGraphScopeClass = cls(NAV_GRAPH_SCOPE_CLASS)
-    val exact = runCatching {
-        method(SETTINGS_SCREEN_CLASS, SETTINGS_LIST_BUILDER_METHOD, 4)
-    }.getOrNull()
-    if (exact != null) return exact
-    val candidates = settingsClass.declaredMethods.filter { candidate ->
-        val params = candidate.parameterTypes
-        candidate.name.startsWith("SettingsScreen") &&
-            params.isNotEmpty() &&
-            params.first() == navGraphScopeClass &&
-            params.last() == lazyListScopeClass
-    }
-    val resolved = candidates.firstOrNull { it.parameterTypes.size == 4 }
-        ?: candidates.firstOrNull()
-        ?: error("settings list builder lambda not found in $SETTINGS_SCREEN_CLASS")
-    resolved.isAccessible = true
-    XposedBridge.log("$LOG_PREFIX resolved settings list builder: ${resolved.name}")
-    return resolved
-}
-
-internal fun ReaMicroSettingsHook.handleNestedInjectedBack(): Boolean {
-    val currentRoute = currentInjectedRoute()
-    if (currentRoute !is InjectedRoute.FontPicker &&
-        currentRoute !is InjectedRoute.ReaderBookHighlightRules &&
-        currentRoute !is InjectedRoute.ReaderBookOnlyHighlightRules &&
-        currentRoute !is InjectedRoute.ReaderBookGlobalHighlightRules &&
-        currentRoute !is InjectedRoute.OnlineEpubStyleList &&
-        currentRoute != InjectedRoute.FontLibrary &&
-        currentRoute !in MODULE_CHILD_ROUTES &&
-        currentRoute !in READER_CHILD_ROUTES &&
-        currentRoute !in AI_CHILD_ROUTES
-    ) return false
-    if (currentRoute == InjectedRoute.FontLibrary) clearPendingDeleteFontSelection()
-    val nextStack = injectedRouteStack.dropLast(1)
-        .takeIf { it.isNotEmpty() }
-        ?: listOf(
-            when {
-                currentRoute is InjectedRoute.ReaderBookHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
-                currentRoute is InjectedRoute.ReaderBookOnlyHighlightRules -> InjectedRoute.ReaderHighlightTextSettings
-                currentRoute is InjectedRoute.ReaderBookGlobalHighlightRules -> InjectedRoute.ReaderBookHighlightRules(currentRoute.bookKey, currentRoute.bookTitle)
-                currentRoute is InjectedRoute.OnlineEpubStyleList -> InjectedRoute.OnlineDownloadStyleSettings
-                currentRoute in READER_CHILD_ROUTES -> InjectedRoute.ReaderCompletionSettings
-                currentRoute in MODULE_CHILD_ROUTES -> InjectedRoute.ModuleSettings
-                currentRoute in AI_CHILD_ROUTES -> InjectedRoute.AiConfigSettings
-                else -> InjectedRoute.FontSettings
-            },
-        )
-    injectedRouteStack = nextStack
-    setInjectedRouteState(nextStack.last())
-    XposedBridge.log("$LOG_PREFIX nested settings back: $currentRoute -> ${nextStack.last()}")
-    return true
-}
-
-internal fun ReaMicroSettingsHook.readerSheetWindowInsets(composer: Any): Any? =
-    runCatching {
-        val topAppBarDefaults = staticObject(TOP_APP_BAR_DEFAULTS_CLASS, "INSTANCE")
-        val topInsets = method(TOP_APP_BAR_DEFAULTS_CLASS, "getWindowInsets", 2).invoke(
-            topAppBarDefaults,
-            composer,
-            staticInt(TOP_APP_BAR_DEFAULTS_CLASS, "\$stable"),
-        )
-        val statusInsets = method(WINDOW_INSETS_EXT_ANDROID_KT_CLASS, "getStatusBarsIgnoringVisibilityCompat", 3).invoke(
-            null,
-            staticObject(WINDOW_INSETS_CLASS, "INSTANCE"),
-            composer,
-            6,
-        )
-        method(WINDOW_INSETS_KT_CLASS, "exclude", 2).invoke(null, topInsets, statusInsets)
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX reader sheet window insets fallback: ${it.stackTraceToString()}")
-    }.getOrNull()
-
-internal fun ReaMicroSettingsHook.closeImageVector(): Any? =
-    runCatching {
-        val evaIcons = staticObject(EVA_ICONS_CLASS, "INSTANCE")
-        val outline = cls(EVA_OUTLINE_KT_CLASS).declaredMethods.first {
-            it.hostNameMatches("getOutline") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(null, evaIcons)
-        cls(EVA_CLOSE_KT_CLASS).declaredMethods.first {
-            it.hostNameMatches("getClose") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(null, outline)
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX reader sheet close icon fallback: ${it.stackTraceToString()}")
-    }.getOrNull()
-
+internal fun ReaMicroSettingsHook.readerSheetWindowInsets(composer: Any): Any =
+    requireNotNull(com.reamicro.fix.core.HostHighlightUiBindings.current).sheetInsets(composer)
+internal fun ReaMicroSettingsHook.closeImageVector(): Any =
+    requireNotNull(requireNotNull(com.reamicro.fix.core.HostHighlightUiBindings.current).method("sheet.close").invoke(null))
 internal fun ReaMicroSettingsHook.exportModuleLog() {
     val activity = activityProvider() ?: return
     runCatching {
@@ -164,7 +71,7 @@ internal fun ReaMicroSettingsHook.exportModuleLog() {
         showToast("\u5df2\u5bfc\u51fa\u65e5\u5fd7\uff1a$fileName")
     }.onFailure {
         showToast("\u5bfc\u51fa\u65e5\u5fd7\u5931\u8d25")
-        XposedBridge.log("$LOG_PREFIX export module log failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX export module log failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -175,7 +82,7 @@ internal fun ReaMicroSettingsHook.openProjectUrl() {
         activity.startActivity(intent)
     }.onFailure {
         showToast("\u65e0\u6cd5\u6253\u5f00\u9879\u76ee\u5730\u5740")
-        XposedBridge.log("$LOG_PREFIX open project url failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX open project url failed: ${it.stackTraceToString()}")
     }
 }
 
@@ -201,9 +108,15 @@ internal fun ReaMicroSettingsHook.collectModuleLog(): String {
 }
 
 internal fun ReaMicroSettingsHook.schedulePreviewRefresh(preview: WebView, refresh: () -> Unit) {
-    preview.removeCallbacks(pendingOnlineEpubPreviewRefresh)
-    pendingOnlineEpubPreviewRefresh = Runnable { runCatching(refresh) }
-    preview.postDelayed(pendingOnlineEpubPreviewRefresh, ONLINE_EPUB_PREVIEW_DEBOUNCE_MS)
+    onlineEpubPreviewHandler.removeCallbacks(pendingOnlineEpubPreviewRefresh)
+    pendingOnlineEpubPreviewRefresh = object : Runnable {
+        override fun run() {
+            if (pendingOnlineEpubPreviewRefresh !== this) return
+            pendingOnlineEpubPreviewRefresh = Runnable {}
+            if (preview.isAttachedToWindow) runCatching(refresh)
+        }
+    }
+    onlineEpubPreviewHandler.postDelayed(pendingOnlineEpubPreviewRefresh, ONLINE_EPUB_PREVIEW_DEBOUNCE_MS)
 }
 
 internal fun ReaMicroSettingsHook.onlineDownloadStyleSummary(): String {
@@ -402,19 +315,19 @@ internal fun ReaMicroSettingsHook.exportCurrentAccountCredential() {
     com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { accountController.exportCurrentCredential() }
             .onSuccess { exported ->
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     runCatching {
                         bumpAccountListVersion()
                         copyTextToClipboard(activity, "\u9605\u5fae\u8d26\u53f7\u51ed\u8bc1", exported.credential)
                         showToast("\u5df2\u590d\u5236\u8d26\u53f7 ${exported.account.accountId} \u7684\u51ed\u8bc1")
                     }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX account credential copy failed: ${it.stackTraceToString()}")
+                        HookRuntime.log("$LOG_PREFIX account credential copy failed: ${it.stackTraceToString()}")
                         showToast(it.message ?: "\u590d\u5236\u51ed\u8bc1\u5931\u8d25")
                     }
                 }
             }
             .onFailure {
-                XposedBridge.log("$LOG_PREFIX account export failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX account export failed: ${it.stackTraceToString()}")
                 showToast(it.message ?: "\u5bfc\u51fa\u51ed\u8bc1\u5931\u8d25")
             }
     }.start()
@@ -440,7 +353,7 @@ internal fun ReaMicroSettingsHook.exportAccountData(accountId: Long) {
             exported
         }.onSuccess { exported ->
             exported.file.delete()
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 progress.dismiss()
                 bumpAccountListVersion()
                 showToast(
@@ -451,7 +364,7 @@ internal fun ReaMicroSettingsHook.exportAccountData(accountId: Long) {
             exportedFile?.delete()
             progress.dismiss()
             if (!progress.isCancelled) {
-                XposedBridge.log("$LOG_PREFIX account data export failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX account data export failed: ${it.stackTraceToString()}")
                 showToast(it.message ?: "\u5bfc\u51fa\u8d26\u53f7\u6570\u636e\u5931\u8d25")
             }
         }
@@ -480,7 +393,7 @@ internal fun ReaMicroSettingsHook.exportAllAccountData() {
             exported
         }.onSuccess { exported ->
             exported.forEach { it.file.delete() }
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 progress.dismiss()
                 bumpAccountListVersion()
                 showToast("\u5df2\u9010\u4e2a\u5bfc\u51fa ${exported.size} \u4e2a\u8d26\u53f7\u7684\u6570\u636e\u5305")
@@ -489,7 +402,7 @@ internal fun ReaMicroSettingsHook.exportAllAccountData() {
             exportedFiles.forEach { it.delete() }
             progress.dismiss()
             if (!progress.isCancelled) {
-                XposedBridge.log("$LOG_PREFIX all account data export failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX all account data export failed: ${it.stackTraceToString()}")
                 showToast(it.message ?: "\u5bfc\u51fa\u5168\u90e8\u8d26\u53f7\u6570\u636e\u5931\u8d25")
             }
         }
@@ -516,7 +429,7 @@ internal fun ReaMicroSettingsHook.exportAccountBooks(accountId: Long) {
             exported
         }.onSuccess { exported ->
             exported.file.delete()
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 progress.dismiss()
                 showToast(
                     "\u5df2\u5bfc\u51fa\u8d26\u53f7 ${exported.account.accountId} \u7684\u5168\u90e8\u56fe\u4e66\u5230\u4e0b\u8f7d\u76ee\u5f55\uff1a${exported.fileName}",
@@ -526,7 +439,7 @@ internal fun ReaMicroSettingsHook.exportAccountBooks(accountId: Long) {
             exportedFile?.delete()
             progress.dismiss()
             if (!progress.isCancelled) {
-                XposedBridge.log("$LOG_PREFIX account books export failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX account books export failed: ${it.stackTraceToString()}")
                 showToast(it.message ?: "\u5bfc\u51fa\u8d26\u53f7\u5168\u90e8\u56fe\u4e66\u5931\u8d25")
             }
         }
@@ -562,7 +475,7 @@ internal fun ReaMicroSettingsHook.importAccountDataFromUri(activity: Activity, u
                 showToast("\u6570\u636e\u5305\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9")
                 return@onSuccess
             }
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 confirmAccountDataImport(activity, preview, spooledFile) { confirmedFile ->
                     startAccountDataImport(activity, confirmedFile)
                 }
@@ -571,7 +484,7 @@ internal fun ReaMicroSettingsHook.importAccountDataFromUri(activity: Activity, u
             spooled?.delete()
             progress.dismiss()
             if (!progress.isCancelled) {
-                XposedBridge.log("$LOG_PREFIX account data import failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX account data import failed: ${it.stackTraceToString()}")
                 showToast(it.message ?: "\u5bfc\u5165\u8d26\u53f7\u6570\u636e\u5931\u8d25")
             }
         }
@@ -590,7 +503,7 @@ internal fun ReaMicroSettingsHook.confirmAccountDataImport(
             showToast("\u6570\u636e\u5305\u5df2\u5931\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9")
             return
         }
-        val dialog = Dialog(activity)
+        val dialog = settingsDialog(activity)
         val colors = SettingsDialogColors(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "\u786e\u8ba4\u5bfc\u5165\u8d26\u53f7\u6570\u636e", colors))
@@ -624,6 +537,7 @@ internal fun ReaMicroSettingsHook.confirmAccountDataImport(
                     )
                     append('\n')
                     append("\u5bfc\u5165\u5c06\u8986\u76d6\u672c\u673a\u540c\u4e00\u8d26\u53f7\u7684\u4e66\u5e93\u4e0e\u9605\u8bfb\u8bb0\u5f55\uff0c\u8bf7\u786e\u8ba4\u3002")
+                    if (preview.hasLocalTasks) append("\n同时恢复此账号的本地任务配置与记录。")
                 },
                 colors,
             ),
@@ -651,7 +565,7 @@ internal fun ReaMicroSettingsHook.confirmAccountDataImport(
         card.addView(actions)
         showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX account data import confirm failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX account data import confirm failed: ${it.stackTraceToString()}")
         showToast(it.message ?: "\u65e0\u6cd5\u786e\u8ba4\u5bfc\u5165")
     }
 }
@@ -667,7 +581,7 @@ internal fun ReaMicroSettingsHook.startAccountDataImport(activity: Activity, fil
             accountController.importAccountDataBundle(file) { message -> progress.update(message) }
         }.onSuccess { imported ->
             file.delete()
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 progress.dismiss()
                 bumpAccountListVersion()
                 restartHostAfterAccountSwitch(activity, imported.account.accountId)
@@ -676,7 +590,7 @@ internal fun ReaMicroSettingsHook.startAccountDataImport(activity: Activity, fil
             file.delete()
             progress.dismiss()
             if (!progress.isCancelled) {
-                XposedBridge.log("$LOG_PREFIX account data import failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX account data import failed: ${it.stackTraceToString()}")
                 showToast(it.message ?: "\u5bfc\u5165\u8d26\u53f7\u6570\u636e\u5931\u8d25")
             }
         }
@@ -708,12 +622,12 @@ internal fun ReaMicroSettingsHook.exportAllAccountCredentials() {
             writeTextToDownloads(activity, fileName, exported.content)
             fileName to exported.count
         }.onSuccess { (fileName, count) ->
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 bumpAccountListVersion()
                 showToast("\u5df2\u5bfc\u51fa $count \u4e2a\u8d26\u53f7\u51ed\u8bc1\u5230\u4e0b\u8f7d\u76ee\u5f55\uff1a$fileName")
             }
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX account bundle export failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX account bundle export failed: ${it.stackTraceToString()}")
             showToast(it.message ?: "\u5bfc\u51fa\u5168\u90e8\u8d26\u53f7\u51ed\u8bc1\u5931\u8d25")
         }
     }.start()
@@ -729,7 +643,7 @@ internal fun ReaMicroSettingsHook.importCredentialFromClipboard() {
     com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { accountController.importCredentials(raw) }
             .onSuccess { result ->
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     bumpAccountListVersion()
                     val firstAccountId = result.accounts.firstOrNull()?.accountId
                     val message = if (result.count <= 1 && firstAccountId != null) {
@@ -763,7 +677,7 @@ internal fun ReaMicroSettingsHook.importCredentialFromUri(activity: Activity, ur
             val result = accountController.importCredentials(raw)
             displayName to result
         }.onSuccess { (displayName, result) ->
-            activity.runOnUiThread {
+            activity.runOnModuleUiThread {
                 bumpAccountListVersion()
                 val firstAccountId = result.accounts.firstOrNull()?.accountId
                 val message = if (result.count <= 1 && firstAccountId != null) {
@@ -774,7 +688,7 @@ internal fun ReaMicroSettingsHook.importCredentialFromUri(activity: Activity, ur
                 showToast(message)
             }
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX account credential file import failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX account credential file import failed: ${it.stackTraceToString()}")
             showToast(it.message ?: "\u4ece\u6587\u4ef6\u5bfc\u5165\u51ed\u8bc1\u5931\u8d25")
         }
     }.start()
@@ -785,7 +699,7 @@ internal fun ReaMicroSettingsHook.switchToStoredAccount(accountId: Long) {
     com.reamicro.fix.reload.ModuleResources.thread {
         runCatching { accountController.switchToAccount(accountId) }
             .onSuccess { account ->
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
                     restartHostAfterAccountSwitch(activity, account.accountId)
                 }
             }
@@ -813,7 +727,7 @@ internal fun ReaMicroSettingsHook.restartHostAfterAccountSwitch(activity: Activi
     if (launchIntent == null) {
         runCatching { activity.recreate() }
             .onFailure {
-                XposedBridge.log("$LOG_PREFIX fallback recreate failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX fallback recreate failed: ${it.stackTraceToString()}")
             }
         return
     }
@@ -825,11 +739,11 @@ internal fun ReaMicroSettingsHook.restartHostAfterAccountSwitch(activity: Activi
         activity.startActivity(restartIntent)
         activity.overridePendingTransition(0, 0)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX host refresh after account switch failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX host refresh after account switch failed: ${it.stackTraceToString()}")
         runCatching {
             activity.recreate()
         }.onFailure { fallbackError ->
-            XposedBridge.log("$LOG_PREFIX fallback host refresh failed: ${fallbackError.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX fallback host refresh failed: ${fallbackError.stackTraceToString()}")
             showToast("\u8d26\u53f7\u5df2\u5207\u6362\uff0c\u8bf7\u624b\u52a8\u5237\u65b0\u6216\u91cd\u65b0\u8fdb\u5165\u9605\u5fae")
         }
     }
@@ -923,14 +837,14 @@ internal fun ReaMicroSettingsHook.writeBytesToDownloads(activity: Activity, disp
 
 internal fun ReaMicroSettingsHook.showToast(message: String) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
     }
 }
 
 internal fun ReaMicroSettingsHook.showExportProgress(activity: Activity, title: String, message: String): ExportProgress {
     val progress = ExportProgress()
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val dp = activity.resources.displayMetrics.density
             val colors = SettingsDialogColors(activity)
@@ -1012,7 +926,7 @@ internal fun ReaMicroSettingsHook.showExportProgress(activity: Activity, title: 
             )
             progress.attach(dialog, messageView)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to show export progress: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to show export progress: ${it.stackTraceToString()}")
         }
     }
     return progress
@@ -1179,14 +1093,13 @@ internal fun ReaMicroSettingsHook.applyCurrentRotation() {
 }
 
 internal fun ReaMicroSettingsHook.hasManualEditFeature(): Boolean =
-    ExternalSourceLoader.loadFeatures(activityProvider()?.applicationContext)
-        .any { feature -> "manual_edit" in feature.capabilities }
+    com.reamicro.fix.core.HostManualEditBindings.publisher != null
 
 internal fun ReaMicroSettingsHook.applyYouShuSourceEnabled(groupId: String, updateChecked: (Boolean) -> Unit) {
     settings.setAssociationSearchSourceEnabled(groupId, true)
     updateChecked(true)
     activityProvider()?.let { activity ->
-        activity.runOnUiThread {
+        activity.runOnModuleUiThread {
             Toast.makeText(activity, "优书网已登录并启用", Toast.LENGTH_SHORT).show()
         }
     }
@@ -1195,34 +1108,51 @@ internal fun ReaMicroSettingsHook.applyYouShuSourceEnabled(groupId: String, upda
 internal fun ReaMicroSettingsHook.verifyYouShuLoginAsync(
     attempts: Int = YOUSHU_LOGIN_VERIFY_ATTEMPTS,
     allowWebView: Boolean = true,
-    onResult: (Boolean) -> Unit,
+    cancellation: com.reamicro.fix.reload.TaskCancellation = com.reamicro.fix.reload.TaskCancellation(),
+    isCurrent: () -> Boolean = { true },
+    onResult: (YouShuLoginStatus) -> Unit,
 ) {
-    val activity = activityProvider()
+    val activity = activityProvider() ?: run { onResult(YouShuLoginStatus.UNKNOWN); return }
+    val identity = runCatching { AccountHostRuntime.storageSnapshot(activity) }.getOrNull()
+    val revision = YouShuWebSearchBridge.executionRevision
+    val current = {
+        !cancellation.isCancelled && YouShuWebSearchBridge.isExecutionCurrent(revision) &&
+            ReaMicroSettingsHook.activeInstanceOrNull() === this && activityProvider() === activity &&
+            !activity.isFinishing && !activity.isDestroyed && settings.snapshot().moduleEnabled &&
+            runCatching {
+                identity?.let { AccountHostRuntime.isCurrentStorage(it, activity) }
+                    ?: (AccountHostRuntime.storageSnapshot(activity) == null)
+            }.getOrDefault(false) && isCurrent()
+    }
     com.reamicro.fix.reload.ModuleResources.thread {
-        var loggedIn = false
-        var cookieNames = ""
+        var status = YouShuLoginStatus.UNKNOWN
+        val worker = Thread.currentThread()
+        val threadCancellation = cancellation.register(worker::interrupt)
         runCatching {
-            val maxAttempts = attempts.coerceAtLeast(1)
-            for (attempt in 0 until maxAttempts) {
-                CookieManager.getInstance().flush()
-                val cookieHeader = YouShuLoginCookies.cookieHeader()
-                cookieNames = YouShuLoginCookies.cookieNames(cookieHeader)
-                loggedIn = YouShuLoginState.canSearchWithCookie(cookieHeader) ||
-                    (allowWebView && YouShuLoginState.canSearchWithWebView())
-                if (loggedIn) break
-                if (attempt < maxAttempts - 1) {
-                    Thread.sleep(YOUSHU_LOGIN_VERIFY_DELAY_MS)
+            cancellation.run {
+                val maxAttempts = attempts.coerceAtLeast(1)
+                for (attempt in 0 until maxAttempts) {
+                    if (!current()) return@run
+                    YouShuLoginCookies.persistSession()
+                    val cookieState = YouShuLoginState.checkWithCookie()
+                    status = if (allowWebView && cookieState != YouShuLoginStatus.VALID) {
+                        YouShuLoginPolicy.combine(listOf(cookieState, YouShuLoginState.checkWithWebView()))
+                    } else cookieState
+                    if (status != YouShuLoginStatus.UNKNOWN) break
+                    if (attempt < maxAttempts - 1) Thread.sleep(YOUSHU_LOGIN_VERIFY_DELAY_MS)
                 }
             }
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX YouShu login verify failed: ${it.stackTraceToString()}")
-            loggedIn = false
+            if (!cancellation.isCancelled && !Thread.currentThread().isInterrupted) {
+                HookRuntime.log("$LOG_PREFIX YouShu login verify unavailable: ${it.javaClass.simpleName}")
+            }
+            status = YouShuLoginStatus.UNKNOWN
+        }.also {
+            threadCancellation.close()
         }
-        XposedBridge.log("$LOG_PREFIX YouShu login verify result=$loggedIn cookies=[$cookieNames]")
-        if (activity != null) {
-            activity.runOnUiThread { onResult(loggedIn) }
-        } else {
-            onResult(loggedIn)
+        if (current()) {
+            HookRuntime.log("$LOG_PREFIX YouShu login verify result=$status")
+            activity.runOnModuleUiThread { if (current()) onResult(status) }
         }
     }.apply {
         name = "ReaMicroYouShuLoginVerify"
@@ -1237,109 +1167,23 @@ internal fun ReaMicroSettingsHook.openYouShuLoginPage(onLoginStateResolved: (Boo
         onLoginStateResolved(false)
         return
     }
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
+        val resolved = java.util.concurrent.atomic.AtomicBoolean(false)
+        val resolve: (Boolean) -> Unit = { value ->
+            if (resolved.compareAndSet(false, true)) onLoginStateResolved(value)
+        }
         runCatching {
-            CookieManager.getInstance().setAcceptCookie(true)
-            val mainHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
-            var destroyed = false
-            var resolved = false
-            val webView = WebView(activity).apply {
-                isFocusable = true
-                isFocusableInTouchMode = true
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                setOnTouchListener { view, _ ->
-                    view.requestFocusFromTouch()
-                    false
-                }
-                webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        CookieManager.getInstance().flush()
-                    }
-                }
-                loadUrl(YOUSHU_LOGIN_URL)
-            }
-            fun resolveLoginState(loggedIn: Boolean) {
-                if (resolved) return
-                resolved = true
-                onLoginStateResolved(loggedIn)
-            }
-            fun destroyWebView() {
-                if (destroyed) return
-                destroyed = true
-                CookieManager.getInstance().flush()
-                runCatching { webView.destroy() }
-            }
-            fun checkCurrentWebViewLoginState(onResult: (Boolean) -> Unit) {
-                CookieManager.getInstance().flush()
-                if (YouShuLoginCookies.hasLoginCookie()) {
-                    onResult(true)
-                    return
-                }
-                var callbackReturned = false
-                webView.evaluateJavascript(YOUSHU_LOGIN_STATE_JS) { value ->
-                    if (callbackReturned) return@evaluateJavascript
-                    callbackReturned = true
-                    CookieManager.getInstance().flush()
-                    val hasCookie = YouShuLoginCookies.hasLoginCookie()
-                    XposedBridge.log("$LOG_PREFIX YouShu visible login state page=${value == "true"} cookies=[${YouShuLoginCookies.cookieNames()}] hasCookie=$hasCookie")
-                    onResult(hasCookie)
-                }
-                mainHandler.postDelayed({
-                    if (!callbackReturned) {
-                        callbackReturned = true
-                        onResult(YouShuLoginCookies.hasLoginCookie())
-                    }
-                }, YOUSHU_LOGIN_STATE_TIMEOUT_MS)
-            }
-            fun finishLoginCheck(dialog: AlertDialog) {
-                CookieManager.getInstance().flush()
-                val positiveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                positiveButton?.isEnabled = false
-                checkCurrentWebViewLoginState { loggedIn ->
-                    positiveButton?.isEnabled = true
-                    if (loggedIn) {
-                        resolveLoginState(true)
-                        dialog.dismiss()
-                    } else if (dialog.isShowing) {
-                        Toast.makeText(activity, "未读到优书网登录Cookie，请等待页面刷新后再点完成", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-            val dialog = AlertDialog.Builder(activity)
-                .setTitle("优书网登录")
-                .setView(webView)
-                .setPositiveButton("完成", null)
-                .setNegativeButton("取消", null)
-                .create()
-            dialog.setOnShowListener {
-                dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                webView.requestFocus()
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                    finishLoginCheck(dialog)
-                }
-                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-                    resolveLoginState(false)
-                    dialog.dismiss()
-                }
-            }
-            dialog.setOnDismissListener {
-                if (!resolved) resolveLoginState(false)
-                destroyWebView()
-            }
-            dialog.show()
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            HostYouShuLoginDialog(activity,
+                isCurrent = { activityProvider() === activity && settings.snapshot().moduleEnabled },
+                onResult = resolve).show()
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open YouShu login WebView: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open YouShu login WebView: ${it.stackTraceToString()}")
             runCatching {
                 activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(YOUSHU_LOGIN_URL)))
             }.onFailure { error ->
-                XposedBridge.log("$LOG_PREFIX failed to open YouShu login page: ${error.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX failed to open YouShu login page: ${error.stackTraceToString()}")
             }
-            onLoginStateResolved(false)
+            resolve(false)
         }
     }
 }
@@ -1452,130 +1296,21 @@ internal fun ReaMicroSettingsHook.queryDisplayName(activity: Activity, uri: Uri)
             if (cursor.moveToFirst()) cursor.getString(0) else null
         }
 
-@Volatile
-private var pageInsetsLogged = false
-
-private fun paddingValuesSideDp(paddings: Any, prefix: String): Double? =
-    runCatching {
-        paddings.javaClass.methods
-            .firstOrNull { it.parameterCount == 0 && it.hostNameStartsWith(prefix) }
-            ?.apply { isAccessible = true }
-            ?.invoke(paddings)
-            ?.let { it as? Float }
-            ?.toDouble()
-    }.getOrNull()
-
 internal fun ReaMicroSettingsHook.pageModifier(innerPaddings: Any, extendBottom: Boolean = false): Any {
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        val base = b2Ui.fillSize(modifierInstance())
-        val padded = if (extendBottom) {
-            b2Ui.padding(base, 0f, (paddingValuesSideDp(innerPaddings, "calculateTopPadding") ?: 0.0).toFloat(), 0f, 0f)
-        } else b2Ui.padding(base, innerPaddings)
-        return b2Ui.padding(padded, udp(16), 0f, udp(16), 0f)
-    }
-    val filled = method(SIZE_KT_CLASS, FILL_MAX_SIZE_DEFAULT_METHOD, 4).invoke(
-        null,
-        modifierInstance(),
-        0f,
-        1,
-        null,
-    )
-    val padded = if (extendBottom) {
-
-        val topDp = paddingValuesSideDp(innerPaddings, "calculateTopPadding")
-        if (!pageInsetsLogged) {
-            pageInsetsLogged = true
-            XposedBridge.logAlways(
-                "$LOG_PREFIX page insets: top=${topDp ?: -1.0} bottom=${paddingValuesSideDp(innerPaddings, "calculateBottomPadding")}",
-            )
-        }
-        method(PADDING_KT_CLASS, PADDING_SIDES_METHOD, PADDING_SIDES_PARAMETER_COUNT).invoke(
-            null,
-            filled,
-            udp(0.0),
-            (topDp ?: 0.0).toFloat(),
-            udp(0.0),
-            udp(0.0),
-        )
-    } else {
-        method(PADDING_KT_CLASS, PADDING_VALUES_METHOD, 2).invoke(null, filled, innerPaddings)
-    }
-    return method(PADDING_KT_CLASS, PADDING_HORIZONTAL_DEFAULT_METHOD, 5).invoke(
-        null,
-        padded,
-        udp(16),
-        0f,
-        2,
-        null,
-    )
+    val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+    val base = nativeUi.fillSize(modifierInstance())
+    val padded = if (extendBottom) nativeUi.padding(base, 0f,
+        (ui.instance("paddingTop", innerPaddings) as Number).toFloat(), 0f, 0f)
+    else nativeUi.padding(base, innerPaddings)
+    return nativeUi.padding(padded, udp(16), 0f, udp(16), 0f)
 }
-
 internal fun ReaMicroSettingsHook.clickableModifier(baseModifier: Any, name: String, onClick: () -> Unit): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.clickable(baseModifier, functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() })
-    } else method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, 9).invoke(
-        null,
-        baseModifier,
-        null,
-        null,
-        false,
-        null,
-        null,
-        functionProxy(name, FUNCTION0_CLASS) {
-            onClick()
-            targetUnit()
-        },
-        28,
-        null,
-    )
-
+    nativeUi.clickable(baseModifier, functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() })
 internal fun ReaMicroSettingsHook.combinedClickableModifier(
-    baseModifier: Any,
-    name: String,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
-): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        return b2Ui.combinedClickable(
-            baseModifier,
-            functionProxy("${name}LongClick", FUNCTION0_CLASS) {
-                onLongClick()
-                targetUnit()
-            },
-            functionProxy("${name}Click", FUNCTION0_CLASS) {
-                onClick()
-                targetUnit()
-            },
-        )
-    }
-    return runCatching {
-        method(CLICKABLE_KT_CLASS, COMBINED_CLICKABLE_DEFAULT_METHOD, 12).invoke(
-            null,
-            baseModifier,
-            false,
-            null,
-            null,
-            null,
-            functionProxy("${name}LongClick", FUNCTION0_CLASS) {
-                onLongClick()
-                targetUnit()
-            },
-            null,
-            false,
-            null,
-            functionProxy("${name}Click", FUNCTION0_CLASS) {
-                onClick()
-                targetUnit()
-            },
-            239,
-            null,
-        )
-    }.getOrElse {
-        XposedBridge.log("$LOG_PREFIX combined clickable fallback for $name: ${it.stackTraceToString()}")
-        clickableModifier(baseModifier, name, onClick)
-    }
-}
-
+    baseModifier: Any, name: String, onClick: () -> Unit, onLongClick: () -> Unit,
+): Any = nativeUi.combinedClickable(baseModifier,
+    functionProxy("${name}LongClick", FUNCTION0_CLASS) { onLongClick(); targetUnit() },
+    functionProxy("${name}Click", FUNCTION0_CLASS) { onClick(); targetUnit() })
 internal fun ReaMicroSettingsHook.listItemDefaultMask(hasSupporting: Boolean, hasTrailing: Boolean): Int {
     var mask = 4 or 16 or 128 or 256
     if (!hasSupporting) mask = mask or 8
@@ -1583,94 +1318,21 @@ internal fun ReaMicroSettingsHook.listItemDefaultMask(hasSupporting: Boolean, ha
     return mask
 }
 
-internal fun ReaMicroSettingsHook.switchModifier(): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) return b2Ui.height(modifierInstance(), udp(44))
-    val height = method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, modifierInstance(), udp(44))
-    val scaled = method(SCALE_KT_CLASS, SCALE_METHOD, 2).invoke(null, height, 0.62f)
-    return method(ALPHA_KT_CLASS, ALPHA_METHOD, 2).invoke(null, scaled, 1.0f)
-}
-
-internal fun ReaMicroSettingsHook.dividerModifier(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.padding(modifierInstance(), udp(16), 0f, 0f, 0f)
-    else method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
-        null,
-        modifierInstance(),
-        udp(16),
-        0f,
-        0f,
-        0f,
-        14,
-        null,
-    )
-
-internal fun ReaMicroSettingsHook.transparentListItemColors(composer: Any): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) return b2Ui.listColors(composer)
-    val colors = staticObject(LIST_ITEM_DEFAULTS_CLASS, "INSTANCE")
-    val transparent = staticObject(COLOR_CLASS, "INSTANCE").longMethod(COLOR_TRANSPARENT_METHOD)
-    val stable = staticInt(LIST_ITEM_DEFAULTS_CLASS, "\$stable")
-    return method(LIST_ITEM_DEFAULTS_CLASS, LIST_ITEM_COLORS_METHOD, 12).invoke(
-        colors,
-        transparent,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        composer,
-        (stable shl 27) or 6,
-        510,
-    )
-}
-
+internal fun ReaMicroSettingsHook.switchModifier(): Any = nativeUi.height(modifierInstance(), udp(44))
+internal fun ReaMicroSettingsHook.dividerModifier(): Any = nativeUi.padding(modifierInstance(), udp(16), 0f, 0f, 0f)
+internal fun ReaMicroSettingsHook.transparentListItemColors(composer: Any): Any = nativeUi.listColors(composer)
 internal fun ReaMicroSettingsHook.switchColors(composer: Any): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        val scheme = colorScheme(composer)
-        val thumb = scheme.longMethod("getSurfaceContainerHighest")
-        val track = method(THEME_KT_CLASS, BACKGROUND_DIM_METHOD, 1).invoke(null, scheme) as Long
-        return b2Ui.switchColors(thumb, track, thumb, composer)
-    }
-    val switchDefaults = staticObject(SWITCH_DEFAULTS_CLASS, "INSTANCE")
+    val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
     val scheme = colorScheme(composer)
-    val surfaceContainerHighest = scheme.longMethod("getSurfaceContainerHighest")
-    val backgroundDim = method(THEME_KT_CLASS, BACKGROUND_DIM_METHOD, 1).invoke(null, scheme) as Long
-    val stable = staticInt(SWITCH_DEFAULTS_CLASS, "\$stable")
-    return method(SWITCH_DEFAULTS_CLASS, SWITCH_COLORS_METHOD, 20).invoke(
-        switchDefaults,
-        0L,
-        0L,
-        0L,
-        0L,
-        surfaceContainerHighest,
-        backgroundDim,
-        surfaceContainerHighest,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        0L,
-        composer,
-        0,
-        stable shl 18,
-        65423,
-    )
+    val thumb = ui.field("color.surfaceContainerHighest").getLong(scheme)
+    return nativeUi.switchColors(thumb, ui.call("backgroundDim", scheme) as Long, thumb, composer)
 }
-
 internal fun ReaMicroSettingsHook.rememberBooleanState(composer: Any, initialValue: Boolean): Any {
-    val remembered = composer.method0("rememberedValue")
-    if (remembered !== composerEmpty()) return remembered
-    val state = mutableBooleanState(initialValue)
-    composer.javaClass.methods.firstOrNull { it.hostNameMatches("updateRememberedValue") && it.parameterTypes.size == 1 }
-        ?.invoke(composer, state)
-    return state
+    val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+    val remembered = ui.instance("remember", composer)
+    if (remembered !== ui.value("emptyRemembered")) return requireNotNull(remembered)
+    return mutableBooleanState(initialValue).also { ui.instance("updateRemember", composer, it) }
 }
-
 internal fun ReaMicroSettingsHook.associationExpandedState(initialValue: Boolean): Any {
     associationExpandedUiState?.let { return it }
     return mutableBooleanState(initialValue).also { associationExpandedUiState = it }
@@ -1712,14 +1374,12 @@ internal fun ReaMicroSettingsHook.accountListVersionState(): Any {
 }
 
 internal fun ReaMicroSettingsHook.accountListVersionValue(): Int =
-    (accountListVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+    (stateValue(accountListVersionState()) as? Number)?.toInt() ?: 0
 
 internal fun ReaMicroSettingsHook.bumpAccountListVersion() {
     val state = accountListVersionState()
-    val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    val value = (stateValue(state) as? Number)?.toInt() ?: 0
+    setStateValue(state, value + 1)
 }
 
 internal fun ReaMicroSettingsHook.aboutVersionState(): Any {
@@ -1728,14 +1388,12 @@ internal fun ReaMicroSettingsHook.aboutVersionState(): Any {
 }
 
 internal fun ReaMicroSettingsHook.aboutVersionValue(): Int =
-    (aboutVersionState().method0("getValue") as? Number)?.toInt() ?: 0
+    (stateValue(aboutVersionState()) as? Number)?.toInt() ?: 0
 
 internal fun ReaMicroSettingsHook.bumpAboutVersion() {
     val state = aboutVersionState()
-    val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    val value = (stateValue(state) as? Number)?.toInt() ?: 0
+    setStateValue(state, value + 1)
 }
 
 internal fun ReaMicroSettingsHook.moduleBuildVersionLine(): String {
@@ -1751,172 +1409,33 @@ internal fun ReaMicroSettingsHook.registerAboutVersionTap() {
     }
 }
 
-internal fun ReaMicroSettingsHook.mutableBooleanState(initialValue: Boolean): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.mutableState(initialValue)
-    else method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(
-        null,
-        initialValue,
-        null,
-        2,
-        null,
-    )
-
-internal fun ReaMicroSettingsHook.mutableState(initialValue: Any?): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.mutableState(initialValue)
-    else method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(
-        null,
-        initialValue,
-        null,
-        2,
-        null,
-    )
-
-internal fun ReaMicroSettingsHook.booleanStateValue(state: Any): Boolean =
-    state.method0("getValue") as? Boolean ?: false
-
-internal fun ReaMicroSettingsHook.setBooleanState(state: Any, value: Boolean) {
-    state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value)
-}
-
-internal fun ReaMicroSettingsHook.colorScheme(composer: Any): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) return b2Ui.theme(composer, "getColorScheme")
-    val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
-    val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
-    return method(MATERIAL_THEME_CLASS, "getColorScheme", 2).invoke(materialTheme, composer, stable)
-}
-
-internal fun ReaMicroSettingsHook.typography(composer: Any): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) return b2Ui.theme(composer, "getTypography")
-    val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
-    val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
-    return method(MATERIAL_THEME_CLASS, "getTypography", 2).invoke(materialTheme, composer, stable)
-}
-
-internal fun ReaMicroSettingsHook.spacedBy(value: Int): Any {
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) return b2Ui.spacedBy(udp(value))
-    val arrangement = staticObject(ARRANGEMENT_CLASS, "INSTANCE")
-    return arrangement.javaClass.methods.first {
-        it.hostNameMatches(SPACED_BY_METHOD) && it.parameterTypes.size == 1
-    }.invoke(arrangement, udp(value))
-}
-
-internal fun ReaMicroSettingsHook.arrangementStart(): Any =
-    staticObject(ARRANGEMENT_CLASS, "INSTANCE").method0("getStart")
-
-internal fun ReaMicroSettingsHook.arrangementTop(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.top()
-    else staticObject(ARRANGEMENT_CLASS, "INSTANCE").method0("getTop")
-
-internal fun ReaMicroSettingsHook.alignmentStart(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.start()
-    else staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getStart")
-
-internal fun ReaMicroSettingsHook.alignmentCenter(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.center()
-    else staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenter")
-
-internal fun ReaMicroSettingsHook.alignmentCenterVertically(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.centerVertically()
-    else staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenterVertically")
-
-internal fun ReaMicroSettingsHook.modifierInstance(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.modifier()
-    else staticObject(MODIFIER_CLASS, "INSTANCE")
-
-internal fun ReaMicroSettingsHook.composerEmpty(): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.emptySlot()
-    else staticObject(COMPOSER_CLASS, "INSTANCE").method0("getEmpty")
-
-internal fun ReaMicroSettingsHook.udp(value: Int): Float =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.dp(value)
-    else cls(UNIT_EXT_KT_CLASS).declaredMethods.first {
-        it.hostNameMatches(UDP_METHOD) && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
-    }.invoke(null, value) as Float
-
-internal fun ReaMicroSettingsHook.udp(value: Double): Float =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) b2Ui.dp(value)
-    else cls(UNIT_EXT_KT_CLASS).declaredMethods.first {
-        it.hostNameMatches(UDP_METHOD) && it.parameterTypes.contentEquals(arrayOf(Double::class.javaPrimitiveType))
-    }.invoke(null, value) as Float
-
+internal fun ReaMicroSettingsHook.mutableBooleanState(initialValue: Boolean): Any = nativeUi.mutableState(initialValue)
+internal fun ReaMicroSettingsHook.mutableState(initialValue: Any?): Any = nativeUi.mutableState(initialValue)
+internal fun ReaMicroSettingsHook.booleanStateValue(state: Any): Boolean = stateValue(state) as? Boolean ?: false
+internal fun ReaMicroSettingsHook.setBooleanState(state: Any, value: Boolean) { setStateValue(state, value) }
+internal fun ReaMicroSettingsHook.stateValue(state: Any): Any? = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).stateValue(state)
+internal fun ReaMicroSettingsHook.setStateValue(state: Any, value: Any?) { requireNotNull(com.reamicro.fix.core.HostUiBindings.current).setState(state, value) }
+internal fun ReaMicroSettingsHook.colorScheme(composer: Any): Any = nativeUi.theme(composer, "getColorScheme")
+internal fun ReaMicroSettingsHook.typography(composer: Any): Any = nativeUi.theme(composer, "getTypography")
+internal fun ReaMicroSettingsHook.spacedBy(value: Int): Any = nativeUi.spacedBy(udp(value))
+internal fun ReaMicroSettingsHook.arrangementStart(): Any = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).value("rowStart")
+internal fun ReaMicroSettingsHook.arrangementTop(): Any = nativeUi.top()
+internal fun ReaMicroSettingsHook.alignmentStart(): Any = nativeUi.start()
+internal fun ReaMicroSettingsHook.alignmentCenter(): Any = nativeUi.center()
+internal fun ReaMicroSettingsHook.alignmentCenterVertically(): Any = nativeUi.centerVertically()
+internal fun ReaMicroSettingsHook.modifierInstance(): Any = nativeUi.modifier()
+internal fun ReaMicroSettingsHook.composerEmpty(): Any = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).value("emptyRemembered")
+internal fun ReaMicroSettingsHook.udp(value: Int): Float = nativeUi.dp(value)
+internal fun ReaMicroSettingsHook.udp(value: Double): Float = nativeUi.dp(value)
 internal fun ReaMicroSettingsHook.composableLambda(key: Int, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
-    if (com.reamicro.fix.core.HostNativeUiAbi.supports(com.reamicro.fix.core.HostSymbols.profileId)) {
-        b2Ui.lambda(key, functionProxy("Composable$key", functionClassName, block))
-    } else method(COMPOSABLE_LAMBDA_KT_CLASS, COMPOSABLE_LAMBDA_METHOD, 3).invoke(
-        null,
-        key,
-        true,
-        functionProxy("Composable$key", functionClassName, block),
-    )
-
+    nativeUi.lambda(key, functionProxy("Composable$key", functionClassName, block))
 internal fun ReaMicroSettingsHook.functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
     composeInterop.functionProxy(name, functionClassName, block)
 
 internal fun ReaMicroSettingsHook.cls(className: String): Class<*> =
-    XposedHelpers.findClass(className, classLoader)
-
-internal fun ReaMicroSettingsHook.method(className: String, methodName: String, parameterCount: Int): Method {
-    val cacheKey = "$className#$methodName/$parameterCount"
-    return synchronized(methodCache) {
-        methodCache.getOrPut(cacheKey) {
-            cls(className).hostMethodsNamed(methodName).firstOrNull {
-                it.parameterTypes.size == parameterCount
-            }?.apply { isAccessible = true }
-                ?: error("$className.$methodName/$parameterCount not found")
-        }
-    }
-}
-
-internal fun ReaMicroSettingsHook.staticObject(className: String, fieldName: String): Any {
-    val clazz = cls(className)
-    val field = runCatching { clazz.hostField(fieldName) }
-        .recoverCatching { clazz.getField(fieldName) }
-        .recoverCatching { clazz.hostField("Companion") }
-        .recoverCatching {
-            clazz.declaredClasses.firstNotNullOfOrNull { inner ->
-                inner.declaredFields.firstOrNull { it.hostNameMatches("\$\$INSTANCE") }?.apply { isAccessible = true }?.get(null)
-            }?.let { companion ->
-                return companion
-            }
-            throw it
-        }
-        .getOrElse {
-            val fields = clazz.declaredFields.joinToString { field -> "${field.name}:${field.type.name}" }
-            error("$className.$fieldName not found; fields=[$fields]")
-        }
-    field.isAccessible = true
-    return field.get(null)
-}
-
-internal fun ReaMicroSettingsHook.fieldObjectOrNull(className: String, fieldName: String): Any? =
-    runCatching {
-        val clazz = cls(className)
-        val field = runCatching { clazz.hostField(fieldName) }
-            .recoverCatching { clazz.getField(fieldName) }
-            .getOrThrow()
-        field.isAccessible = true
-        field.get(null)
-    }.getOrNull()
-
-internal fun ReaMicroSettingsHook.callMethod(target: Any?, name: String): Any? {
-    if (target == null) return null
-    return target.javaClass.methods.firstOrNull {
-        it.hostNameMatches(name) && it.parameterTypes.isEmpty()
-    }?.invoke(target)
-}
-
-internal fun ReaMicroSettingsHook.staticMethod(className: String, name: String): Method? =
-    cls(className).methods.firstOrNull {
-        it.hostNameMatches(name) && it.parameterTypes.isEmpty()
-    }?.apply { isAccessible = true }
-
-internal fun ReaMicroSettingsHook.staticInt(className: String, fieldName: String): Int =
-    cls(className).hostField(fieldName).getInt(null)
+    classLoader.hostClass(className)
 
 internal fun ReaMicroSettingsHook.composeColorToArgb(color: Long): Int =
     composeInterop.colorToArgb(color)
 
-internal fun ReaMicroSettingsHook.targetUnit(): Any? = runCatching {
-    staticObject("kotlin.Unit", "INSTANCE")
-}.getOrNull()
+internal fun ReaMicroSettingsHook.targetUnit(): Any = com.reamicro.fix.core.HostCoroutines.unit(classLoader)

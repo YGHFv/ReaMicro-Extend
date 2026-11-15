@@ -8,6 +8,8 @@ internal data class OnlineChapterUpdateOutcome(
     val retried: Int = 0,
     val error: String? = null,
     val skipped: Boolean = false,
+    val paused: Boolean = false,
+    val pending: Int = 0,
 ) {
     val success: Boolean get() = error == null && failed == 0
 }

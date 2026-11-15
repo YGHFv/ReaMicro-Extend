@@ -4,13 +4,11 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import com.reamicro.fix.R
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogState
 
@@ -25,21 +23,30 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
                     }
                 } else postProgressNotification(context, intent)
             }
-            ACTION_ONLINE_COMPLETION_CANCEL -> handleCancel(context, intent)
+            ACTION_ONLINE_COMPLETION_CANCEL, OnlineCompletionNotificationActions.PAUSE -> handleStop(context, intent)
         }
     }
 
-    private fun handleCancel(context: Context, intent: Intent) {
+    private fun handleStop(context: Context, intent: Intent) {
         val id = intent.getIntExtra(EXTRA_ID, 0).takeIf { it > 0 } ?: return
         val key = intent.getStringExtra(EXTRA_KEY).orEmpty()
-        (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(id)
-        relayCancelToService(context, id, key)
-        relayCancelToHost(context, id, key)
-        ModuleAndroidLog.legacy(LOG_TAG, "module receiver cancel relayed id=$id")
+        if (!OnlineNotificationEventOrder.acceptsStopRequest(id, key)) return
+        if (intent.getBooleanExtra(OnlineCompletionNotificationActions.DISMISS_ONLY, false)) {
+            OnlineNotificationEventOrder.accept(id, android.os.SystemClock.elapsedRealtimeNanos(), key)
+            (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(id)
+            relayCancelToService(context, id, key)
+            return
+        }
+        // A button requests a stop; only the host's real terminal result dismisses foreground work.
+        relayStopToHost(context, id, key, intent.action ?: return)
+        ModuleAndroidLog.legacy(LOG_TAG, "module receiver stop relayed id=$id action=${intent.action}")
     }
 
     private fun postProgressNotification(context: Context, intent: Intent) {
         val id = intent.getIntExtra(EXTRA_ID, 0).takeIf { it > 0 } ?: return
+        if (!OnlineNotificationEventOrder.accept(id,
+                intent.getLongExtra(OnlineNotificationEventOrder.EXTRA_ISSUED_AT, 0L),
+                intent.getStringExtra(EXTRA_KEY).orEmpty())) return
         if (startForegroundNotificationService(context, intent)) return
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -80,14 +87,10 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
             .setAutoCancel(done)
             .setProgress(100, progress, false)
         if (!done && cancellable) {
-            builder.addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "\u53d6\u6d88",
-                cancelPendingIntent(context, id, key),
-            )
+            OnlineCompletionNotificationActions.addTo(builder, context, id, key)
         }
         manager.notify(id, builder.build())
-        cancelOnlineCompletionNotificationIfDone(manager, id, done)
+        cancelOnlineCompletionNotificationIfDone(manager, id, done, text)
         ModuleAndroidLog.legacy(LOG_TAG, "module receiver notification posted fallback id=$id progress=$progress done=$done title=$title")
     }
 
@@ -112,17 +115,6 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
             false
         }
 
-    private fun cancelPendingIntent(context: Context, id: Int, key: String): PendingIntent {
-        val intent = Intent(ACTION_ONLINE_COMPLETION_CANCEL).apply {
-            setClass(context, OnlineCompletionNotificationReceiver::class.java)
-            putExtra(EXTRA_ID, id)
-            putExtra(EXTRA_KEY, key)
-        }
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        return PendingIntent.getBroadcast(context, id, intent, flags)
-    }
-
     private fun relayCancelToService(context: Context, id: Int, key: String) {
         runCatching {
             val serviceIntent = Intent(ACTION_ONLINE_COMPLETION_CANCEL).apply {
@@ -136,10 +128,10 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun relayCancelToHost(context: Context, id: Int, key: String) {
+    private fun relayStopToHost(context: Context, id: Int, key: String, action: String) {
         HOST_PACKAGES.forEach { packageName ->
             runCatching {
-                val relay = Intent(ACTION_ONLINE_COMPLETION_CANCEL).apply {
+                val relay = Intent(action).apply {
                     setPackage(packageName)
                     addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
                     addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
@@ -166,6 +158,6 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
         const val EXTRA_DONE = "done"
         const val ONLINE_COMPLETION_TITLE = "\u5728\u7ebf\u8865\u5168"
         const val ONLINE_COMPLETION_NOTIFICATION_CHANNEL = "reamicro_online_completion_download"
-        val HOST_PACKAGES = arrayOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix")
+        val HOST_PACKAGES = com.reamicro.fix.core.HostPackages.all
     }
 }

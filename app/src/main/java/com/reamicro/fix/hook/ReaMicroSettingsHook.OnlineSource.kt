@@ -1,10 +1,8 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameMatches
-
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
-import android.app.Dialog
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.net.Uri
@@ -22,12 +20,15 @@ import android.widget.Toast
 import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.YouShuLoginCookies
+import com.reamicro.fix.association.provider.YouShuLoginStatus
 import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.online.OnlineSourceTrxsCompat
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.online.OnlineSourceTask
+import com.reamicro.fix.online.readOnlineSourceBytes
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
@@ -65,9 +66,10 @@ internal fun ReaMicroSettingsHook.onlineSourceSubtitle(source: OnlineSourceEntry
 }
 
 internal fun ReaMicroSettingsHook.listOnlineSources(): List<OnlineSourceEntry> =
-    OnlineSourceStore.list(activityProvider()?.applicationContext)
+    OnlineSourceSettingsLoads.list(this, activityProvider()?.applicationContext)
 
 internal fun ReaMicroSettingsHook.openOnlineSourceManagementDialog(source: OnlineSourceEntry) {
+    if (!OnlineSourceStore.isCurrent(source)) { showToast("在线源已变化，请重新打开"); return }
     if (source.hasLoginConfig || OnlineSourceAuth.supportsCredentialLogin(source)) {
         openOnlineSourceLoginDialog(source, enableFlow = false) { changed ->
             if (changed) bumpOnlineSourceVersion()
@@ -79,10 +81,10 @@ internal fun ReaMicroSettingsHook.openOnlineSourceManagementDialog(source: Onlin
 
 internal fun ReaMicroSettingsHook.openOnlineSourceDownloadConfigDialog(source: OnlineSourceEntry) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, "${source.name} 配置", colors))
             card.addView(settingsDialogHint(activity, "下载方式按书源独立保存。", colors))
@@ -115,7 +117,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceDownloadConfigDialog(source: O
             cancelButton.setOnClickListener { dialog.dismiss() }
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX online source config dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX online source config dialog failed: ${it.stackTraceToString()}")
             showToast("无法打开在线源配置")
         }
     }
@@ -127,7 +129,7 @@ internal fun ReaMicroSettingsHook.confirmOnlineSourceDeletion(
     onRemoved: () -> Unit,
 ) {
     val colors = SettingsDialogColors(activity)
-    val dialog = Dialog(activity)
+    val dialog = settingsDialog(activity)
     val card = settingsDialogCard(activity, colors)
     val deleteButton = settingsDialogButton(
         activity,
@@ -151,18 +153,27 @@ internal fun ReaMicroSettingsHook.confirmOnlineSourceDeletion(
     )
     card.addView(settingsDialogButtonRow(activity, listOf(deleteButton, cancelButton)))
     deleteButton.setOnClickListener {
-        settings.setOnlineSourceEnabled(source.id, false)
-        val removed = OnlineSourceStore.remove(activity.applicationContext, source.id)
-        if (removed) {
-            OnlineSourceAuth.clearSourceData(activity.applicationContext, source.id)
-            OnlineSourceDownloadPolicyStore.clear(activity.applicationContext, source.id)
-            bumpOnlineSourceVersion()
-            showToast("已移除在线源：${source.name}")
-            dialog.dismiss()
-            onRemoved()
-        } else {
-            showToast("在线源移除失败：${source.name}")
-        }
+        deleteButton.isEnabled = false
+        cancelButton.isEnabled = false
+        dialog.setCancelable(false)
+        OnlineSourceEnableRequests.begin(source.id)
+        com.reamicro.fix.reload.ModuleResources.thread({
+            val result = runCatching { OnlineSourceStore.remove(activity.applicationContext, source.id, source) }
+            activity.runOnModuleUiThread {
+                if (result.getOrDefault(false)) {
+                    settings.setOnlineSourceEnabled(source.id, false)
+                    bumpOnlineSourceVersion()
+                    showToast("已移除在线源：${source.name}")
+                    dialog.dismiss()
+                    onRemoved()
+                } else if (dialog.isShowing) {
+                    deleteButton.isEnabled = true
+                    cancelButton.isEnabled = true
+                    dialog.setCancelable(true)
+                    showToast(result.exceptionOrNull()?.message ?: "在线源移除失败：${source.name}")
+                }
+            }
+        }, "ReaMicroSourceRemove").start()
     }
     cancelButton.setOnClickListener { dialog.dismiss() }
     showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
@@ -172,8 +183,7 @@ internal fun ReaMicroSettingsHook.renderOnlineSourceSwitch(source: OnlineSourceE
     val targetChecked = settings.isOnlineSourceEnabled(source.id)
     val state = rememberBooleanState(composer, targetChecked)
     fun updateChecked(value: Boolean) {
-        state.javaClass.methods.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
+        setStateValue(state, value)
     }
     val rememberedChecked = state.method0("getValue") as? Boolean ?: targetChecked
     val checked = if (rememberedChecked != targetChecked) {
@@ -188,7 +198,7 @@ internal fun ReaMicroSettingsHook.renderOnlineSourceSwitch(source: OnlineSourceE
         updateChecked(applied)
         targetUnit()
     }
-    renderAbiSwitch(checked, onCheckedChange, composer)
+    nativeUi.settingsSwitch(checked, onCheckedChange, composer)
 }
 
 internal fun ReaMicroSettingsHook.setOnlineSourceEnabled(
@@ -196,19 +206,28 @@ internal fun ReaMicroSettingsHook.setOnlineSourceEnabled(
     enabled: Boolean,
     updateChecked: (Boolean) -> Unit,
 ): Boolean {
+    val request = OnlineSourceEnableRequests.begin(source.id)
     if (!enabled) {
         settings.setOnlineSourceEnabled(source.id, false)
         return false
     }
     val context = activityProvider()?.applicationContext
+    if (!OnlineSourceStore.isCurrent(source)) return false
     if (!source.hasLoginConfig || OnlineSourceAuth.hasSavedLogin(context, source)) {
-        settings.setOnlineSourceEnabled(source.id, true)
-        return true
+        return runCatching { OnlineSourceStore.withCurrent(source) {
+            settings.setOnlineSourceEnabled(source.id, true)
+            true
+        } }.getOrDefault(false)
     }
     settings.setOnlineSourceEnabled(source.id, false)
     openOnlineSourceLoginDialog(source) { confirmed ->
+        if (!OnlineSourceEnableRequests.current(source.id, request) ||
+            !OnlineSourceStore.isCurrent(source) || !settings.snapshot().moduleEnabled) return@openOnlineSourceLoginDialog
         if (confirmed) {
-            settings.setOnlineSourceEnabled(source.id, true)
+            val applied = runCatching { OnlineSourceStore.withCurrent(source) {
+                settings.setOnlineSourceEnabled(source.id, true)
+            } }.isSuccess
+            if (!applied) { updateChecked(false); return@openOnlineSourceLoginDialog }
             updateChecked(true)
             bumpOnlineSourceVersion()
             showToast("已启用在线源：${source.name}")
@@ -231,31 +250,8 @@ internal fun ReaMicroSettingsHook.importOnlineSourceFromClipboard() {
 }
 
 internal fun ReaMicroSettingsHook.importOnlineSourceFromUrl(activity: Activity, url: String) {
-    val token = "online_clipboard:$url"
-    val now = System.currentTimeMillis()
-    if (token == lastOnlineSourceImportToken && now - lastOnlineSourceImportAtMs < ONLINE_SOURCE_IMPORT_DEDUPE_WINDOW_MS) {
-        return
-    }
-    lastOnlineSourceImportToken = token
-    lastOnlineSourceImportAtMs = now
-    com.reamicro.fix.reload.ModuleResources.thread {
-        runCatching { OnlineSourceStore.importFromUrl(activity.applicationContext, url) }
-            .onSuccess { source ->
-                activity.runOnUiThread {
-                    bumpOnlineSourceVersion()
-                    showToast("\u5df2\u6dfb\u52a0\u5728\u7ebf\u6e90\uff1a${source.name}")
-                }
-            }
-            .onFailure {
-                XposedBridge.log("$LOG_PREFIX online source url import failed: ${it.stackTraceToString()}")
-                activity.runOnUiThread {
-                    showToast(it.message ?: "\u5bfc\u5165\u5728\u7ebf\u6e90\u5931\u8d25")
-                }
-            }
-    }.apply {
-        name = "ReaMicroOnlineSourceUrlImport"
-        isDaemon = true
-        start()
+    importOnlineSourceAsync(activity, "online_clipboard:$url") {
+        OnlineSourceStore.importFromUrl(activity.applicationContext, url)
     }
 }
 
@@ -279,7 +275,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceDocumentPicker() {
         activity.startActivityForResult(intent, ONLINE_SOURCE_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         Toast.makeText(activity, "无法打开在线源选择器", Toast.LENGTH_SHORT).show()
-        XposedBridge.log("$LOG_PREFIX failed to open online source picker: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to open online source picker: ${it.stackTraceToString()}")
     }
 }
 
@@ -294,15 +290,12 @@ internal fun ReaMicroSettingsHook.importOnlineSourceDocumentResult(activity: Act
         showToast("未选择在线源文件")
         return
     }
-    val bytes = activity.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: run {
-            showToast("\u65e0\u6cd5\u8bfb\u53d6\u6e90\u6587\u4ef6")
-            return
-        }
-    val displayName = queryDisplayName(activity, uri)
-        ?: uri.lastPathSegment?.substringAfterLast('/')
-        ?: "online_source.json"
     importOnlineSourceAsync(activity, "uri:$uri") {
+        val bytes = activity.contentResolver.openInputStream(uri)?.use(::readOnlineSourceBytes)
+            ?: error("无法读取源文件")
+        val displayName = queryDisplayName(activity, uri)
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+            ?: "online_source.json"
         OnlineSourceStore.importBytes(activity.applicationContext, bytes, displayName, uri.toString())
     }
 }
@@ -318,24 +311,30 @@ internal fun ReaMicroSettingsHook.importOnlineSourceAsync(
     }
     lastOnlineSourceImportToken = token
     lastOnlineSourceImportAtMs = now
-    com.reamicro.fix.reload.ModuleResources.thread {
+    val accepted = OnlineSourceImports.submit(token) {
         runCatching { importer() }
             .onSuccess { source ->
-                activity.runOnUiThread {
+                activity.runOnModuleUiThread {
+                    if (!OnlineSourceStore.isCurrent(source)) return@runOnModuleUiThread
                     bumpOnlineSourceVersion()
                     showToast("已添加在线源：${source.name}")
                 }
             }
             .onFailure {
-                XposedBridge.log("$LOG_PREFIX online source import failed: ${it.stackTraceToString()}")
-                activity.runOnUiThread {
+                HookRuntime.log("$LOG_PREFIX online source import failed: ${it.stackTraceToString()}")
+                activity.runOnModuleUiThread {
+                    if (lastOnlineSourceImportToken == token) {
+                        lastOnlineSourceImportToken = ""
+                        lastOnlineSourceImportAtMs = 0L
+                    }
                     showToast(it.message ?: "导入在线源失败")
                 }
             }
-    }.apply {
-        name = "ReaMicroOnlineSourceImport"
-        isDaemon = true
-        start()
+    }
+    if (!accepted) {
+        lastOnlineSourceImportToken = ""
+        lastOnlineSourceImportAtMs = 0L
+        showToast("已有在线源正在导入，请稍候")
     }
 }
 
@@ -347,6 +346,15 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginDialog(
     val activity = activityProvider()
     if (activity == null) {
         onResult(false)
+        return
+    }
+    if (!OnlineSourceStore.isCurrent(source)) {
+        showToast("在线源已变化，请重新打开")
+        onResult(false)
+        return
+    }
+    if (com.reamicro.fix.online.OnlineParserMode.isEnhanced) {
+        openEnhancedOnlineSourceLogin(source, enableFlow, onResult)
         return
     }
     val loginFields = OnlineSourceAuth.loginFields(source)
@@ -367,7 +375,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginDialog(
         openOnlineSourceCredentialDialog(activity, source, enableFlow, onResult)
         return
     }
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             CookieManager.getInstance().setAcceptCookie(true)
             var resolved = false
@@ -391,7 +399,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginDialog(
                 onResult(value)
             }
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val finishButton = settingsDialogButton(activity, "完成", colors)
             val deleteButton = settingsDialogButton(
@@ -445,7 +453,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginDialog(
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             webView.requestFocus()
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open online source login: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open online source login: ${it.stackTraceToString()}")
             onResult(false)
         }
     }
@@ -457,12 +465,14 @@ internal fun ReaMicroSettingsHook.openTrxsOnlineSourceLoginDialog(
     enableFlow: Boolean,
     onResult: (Boolean) -> Unit,
 ) {
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
+        var activeOperation: OnlineSourceTask? = null
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val savedToken = OnlineSourceAuth.sourceVariable(activity.applicationContext, source)
+            val operation = OnlineSourceTask(source).also { activeOperation = it }
             val tokenInput = settingsDialogInput(
                 activity,
                 source.variableComment.ifBlank { "共享Token" },
@@ -492,17 +502,26 @@ internal fun ReaMicroSettingsHook.openTrxsOnlineSourceLoginDialog(
             card.addView(status)
             val policyInputs = addOnlineSourceDownloadPolicyInputs(activity, source, card, colors)
             var resolved = false
+            var authBusy = false
             fun resolve(value: Boolean) {
                 if (resolved) return
                 resolved = true
                 onResult(value)
             }
             fun runAuthTask(button: TextView, task: () -> com.reamicro.fix.online.OnlineSourceAuthResult, onSuccess: (() -> Unit)? = null) {
+                if (!operation.isCurrent) { status.text = "在线源已变化，请重新打开"; return }
+                if (authBusy) return
+                authBusy = true
                 button.isEnabled = false
                 com.reamicro.fix.reload.ModuleResources.thread({
-                    val result = task()
-                    activity.runOnUiThread {
+                    val result = runCatching { operation.run(task) }.getOrElse {
+                        com.reamicro.fix.online.OnlineSourceAuthResult(false, it.message ?: "请求失败，请重试")
+                    }
+                    activity.runOnModuleUiThread {
+                        if (!dialog.isShowing) return@runOnModuleUiThread
+                        authBusy = false
                         button.isEnabled = true
+                        if (!operation.isCurrent) { status.text = "在线源已变化，请重新打开"; return@runOnModuleUiThread }
                         status.text = result.message
                         if (result.success) onSuccess?.invoke()
                     }
@@ -518,11 +537,12 @@ internal fun ReaMicroSettingsHook.openTrxsOnlineSourceLoginDialog(
                 status.text = result.message
             }
             inviteButton.setOnClickListener {
+                val inviteCode = inviteInput.text?.toString().orEmpty()
                 runAuthTask(inviteButton, {
                     OnlineSourceAuth.registerByInvite(
                         activity.applicationContext,
                         source,
-                        inviteInput.text?.toString().orEmpty(),
+                        inviteCode,
                     )
                 }) {
                     tokenInput.setText(OnlineSourceAuth.sourceVariable(activity.applicationContext, source))
@@ -585,11 +605,12 @@ internal fun ReaMicroSettingsHook.openTrxsOnlineSourceLoginDialog(
                 }
             }
             dialog.setOnCancelListener { resolve(false) }
-            dialog.setOnDismissListener { if (!resolved) resolve(false) }
+            dialog.setOnDismissListener { operation.close(); if (!resolved) resolve(false) }
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             tokenInput.requestFocus()
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open trxs source login: ${it.stackTraceToString()}")
+            activeOperation?.close()
+            HookRuntime.log("$LOG_PREFIX failed to open trxs source login: ${it.stackTraceToString()}")
             onResult(false)
         }
     }
@@ -601,12 +622,12 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginInfoDialog(
     enableFlow: Boolean,
     onResult: (Boolean) -> Unit,
 ) {
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val fields = OnlineSourceAuth.loginFields(source)
             val savedValues = OnlineSourceAuth.loginInfo(activity.applicationContext, source)
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val fieldNames = fields.joinToString("、") { it.name }
             card.addView(settingsDialogTitle(activity, "${source.name} 登录", colors))
@@ -690,7 +711,7 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginInfoDialog(
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             inputs.values.firstOrNull()?.requestFocus()
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open online source login info dialog: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open online source login info dialog: ${it.stackTraceToString()}")
             onResult(false)
         }
     }
@@ -702,10 +723,12 @@ internal fun ReaMicroSettingsHook.openOnlineSourceCredentialDialog(
     enableFlow: Boolean,
     onResult: (Boolean) -> Unit,
 ) {
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
+        var activeOperation: OnlineSourceTask? = null
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
+            val operation = OnlineSourceTask(source).also { activeOperation = it }
             val card = settingsDialogCard(activity, colors)
             val savedCredentials = OnlineSourceAuth.savedCredentials(activity.applicationContext, source)
             val userInput = settingsDialogInput(activity, "账号", singleLine = true, colors = colors).apply {
@@ -760,14 +783,18 @@ internal fun ReaMicroSettingsHook.openOnlineSourceCredentialDialog(
                 loginButton.isEnabled = false
                 Toast.makeText(activity, "正在登录 ${source.name}", Toast.LENGTH_SHORT).show()
                 com.reamicro.fix.reload.ModuleResources.thread({
-                    val result = OnlineSourceAuth.login(
-                        activity.applicationContext,
-                        source,
-                        username,
-                        password,
-                    )
-                    activity.runOnUiThread {
+                    val result = runCatching { operation.run {
+                        OnlineSourceAuth.login(activity.applicationContext, source, username, password)
+                    } }.getOrElse {
+                        com.reamicro.fix.online.OnlineSourceAuthResult(false, it.message ?: "登录失败，请重试")
+                    }
+                    activity.runOnModuleUiThread {
+                        if (!dialog.isShowing) return@runOnModuleUiThread
                         loginButton.isEnabled = true
+                        if (!operation.isCurrent) {
+                            Toast.makeText(activity, "在线源已变化，请重新打开", Toast.LENGTH_SHORT).show()
+                            return@runOnModuleUiThread
+                        }
                         Toast.makeText(activity, result.message, Toast.LENGTH_SHORT).show()
                         if (result.success) {
                             resolve(true)
@@ -787,11 +814,12 @@ internal fun ReaMicroSettingsHook.openOnlineSourceCredentialDialog(
                 }
             }
             dialog.setOnCancelListener { resolve(false) }
-            dialog.setOnDismissListener { if (!resolved) resolve(false) }
+            dialog.setOnDismissListener { operation.close(); if (!resolved) resolve(false) }
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
             userInput.requestFocus()
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open online source credential dialog: ${it.stackTraceToString()}")
+            activeOperation?.close()
+            HookRuntime.log("$LOG_PREFIX failed to open online source credential dialog: ${it.stackTraceToString()}")
             onResult(false)
         }
     }
@@ -887,14 +915,16 @@ internal fun ReaMicroSettingsHook.saveOnlineSourceDownloadPolicy(
     source: OnlineSourceEntry,
     inputs: OnlineSourcePolicyInputs,
 ): Boolean = runCatching {
-    OnlineSourceDownloadPolicyStore.save(
+    check(settings.snapshot().moduleEnabled) { "补全计划已关闭" }
+    OnlineSourceStore.withCurrent(source) { OnlineSourceDownloadPolicyStore.save(
         context = activity.applicationContext,
         sourceId = source.id,
         requestsPerSecond = inputs.requestsPerSecond.text?.toString().orEmpty(),
         dailyChapterLimit = inputs.dailyChapterLimit.text?.toString().orEmpty(),
         preferOnDemandLoading = inputs.preferOnDemandLoading.isChecked,
         paragraphCommentsEnabled = inputs.paragraphCommentsEnabled?.isChecked ?: false,
-    )
+    ) }
+    com.reamicro.fix.discover.DiscoverState.invalidate()
 }.onFailure { error ->
     Toast.makeText(activity, error.message ?: "下载配置不正确", Toast.LENGTH_SHORT).show()
 }.isSuccess
@@ -908,43 +938,60 @@ internal fun ReaMicroSettingsHook.setAssociationSearchSourceEnabled(
         settings.setAssociationSearchSourceEnabled(groupId, enabled)
         return enabled
     }
-    if (!enabled) {
+    val previous = settings.snapshot().isSearchSourceGroupEnabled(groupId)
+    val request = YouShuSourceRequests.begin(this)
+    fun current(): Boolean = YouShuSourceRequests.current(this, request)
+    fun openLogin() {
+        if (!current()) return
         settings.setAssociationSearchSourceEnabled(groupId, false)
-        return false
-    }
-
-    settings.setAssociationSearchSourceEnabled(groupId, false)
-    val cookieHeader = YouShuLoginCookies.cookieHeader()
-    if (!YouShuLoginCookies.hasLoginCookie(cookieHeader)) {
+        updateChecked(false)
         openYouShuLoginPage { loggedInAfterDialog ->
-            if (loggedInAfterDialog) {
-                applyYouShuSourceEnabled(groupId, updateChecked)
-            } else {
+            if (!current()) return@openYouShuLoginPage
+            if (loggedInAfterDialog) applyYouShuSourceEnabled(groupId, updateChecked)
+            else {
                 settings.setAssociationSearchSourceEnabled(groupId, false)
                 updateChecked(false)
             }
+            YouShuSourceRequests.complete(this, request)
         }
+    }
+    if (!enabled) {
+        settings.setAssociationSearchSourceEnabled(groupId, false)
+        YouShuSourceRequests.complete(this, request)
+        HostYouShuLoginDialog.dismissActive()
+        return false
+    }
+    if (!current()) { YouShuSourceRequests.complete(this, request); return previous }
+    val cookieHeader = YouShuLoginCookies.cookieHeader()
+    if (!YouShuLoginCookies.hasLoginCookie(cookieHeader)) {
+        openLogin()
         return false
     }
 
     verifyYouShuLoginAsync(
         attempts = YOUSHU_FAST_LOGIN_VERIFY_ATTEMPTS,
         allowWebView = false,
-    ) { loggedIn ->
-        if (loggedIn) {
-            applyYouShuSourceEnabled(groupId, updateChecked)
-        } else {
-            openYouShuLoginPage { loggedInAfterDialog ->
-                if (loggedInAfterDialog) {
-                    applyYouShuSourceEnabled(groupId, updateChecked)
-                } else {
-                    settings.setAssociationSearchSourceEnabled(groupId, false)
-                    updateChecked(false)
+        cancellation = request.cancellation,
+        isCurrent = ::current,
+    ) { status ->
+        if (!current()) return@verifyYouShuLoginAsync
+        when (status) {
+            YouShuLoginStatus.VALID -> {
+                applyYouShuSourceEnabled(groupId, updateChecked)
+                YouShuSourceRequests.complete(this, request)
+            }
+            YouShuLoginStatus.EXPIRED -> openLogin()
+            YouShuLoginStatus.UNKNOWN -> {
+                settings.setAssociationSearchSourceEnabled(groupId, previous)
+                updateChecked(previous)
+                activityProvider()?.let { activity ->
+                    Toast.makeText(activity, "暂时无法确认优书网登录状态，请稍后重试", Toast.LENGTH_SHORT).show()
                 }
+                YouShuSourceRequests.complete(this, request)
             }
         }
     }
-    return false
+    return previous
 }
 
 internal fun ReaMicroSettingsHook.visibleAssociationSearchSourceGroups() =
@@ -967,9 +1014,7 @@ internal fun ReaMicroSettingsHook.onlineSourceVersionValue(): Int =
 internal fun ReaMicroSettingsHook.bumpOnlineSourceVersion() {
     val state = onlineSourceVersionState()
     val value = (state.method0("getValue") as? Number)?.toInt() ?: 0
-    state.javaClass.methods
-        .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-        ?.invoke(state, value + 1)
+    setStateValue(state, value + 1)
 }
 
 @Volatile
@@ -1004,10 +1049,8 @@ internal fun ReaMicroSettingsHook.signalDiscoverRefresh() {
     runCatching {
         val state = discoverVersionState()
         val current = (state.method0("getValue") as? Number)?.toInt() ?: 0
-        state.javaClass.methods
-            .firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, current + 1)
+        setStateValue(state, current + 1)
     }.onFailure {
-        XposedBridge.logAlways("[ReaMicro] discover refresh failed: ${it.javaClass.simpleName}: ${it.message}")
+        HookRuntime.logAlways("[ReaMicro] discover refresh failed: ${it.javaClass.simpleName}: ${it.message}")
     }
 }

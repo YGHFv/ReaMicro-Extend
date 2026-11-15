@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import com.reamicro.fix.logging.ModuleLogBuffer
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 class LocalTaskMirrorReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -32,7 +32,7 @@ class LocalTaskMirrorReceiver : BroadcastReceiver() {
         val uid = runCatching { sentFromUid }.getOrDefault(-1)
         if (!LocalTaskBridgeRuntime.trustedUid(app, uid)) {
             setResult(Activity.RESULT_CANCELED, "unauthorized", null)
-            XposedBridge.logError("ReaMicro local task bridge rejected unauthenticated sender")
+            HookRuntime.logError("ReaMicro local task bridge rejected unauthenticated sender")
             return
         }
         val request = runCatching { intent.extras?.let(LocalTaskBridgeRuntime::request) }.getOrNull()

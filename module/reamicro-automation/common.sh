@@ -1,5 +1,5 @@
 #!/system/bin/sh
-REAMICRO_MODULE_VERSION=10
+REAMICRO_MODULE_VERSION=111
 
 find_busybox() {
   magisk_tmp="$MAGISKTMP"
@@ -27,7 +27,13 @@ reamicro_daemon_alive() {
   pid=$(cat "$STATE/daemon.pid" 2>/dev/null)
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -r "/proc/$pid/cmdline" ] || return 1
+  [ -r "/proc/$pid/status" ] || return 1
+  grep -Eq '^State:[[:space:]]+[XZ]' "/proc/$pid/status" && return 1
   tr '\000' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -Fxq "$MODDIR/watchdog.sh"
+}
+
+reamicro_safe_mode() {
+  [ "$(getprop persist.sys.safemode)" = 1 ] || [ "$(getprop ro.sys.safemode)" = 1 ]
 }
 
 # Only scheduling and execution hold this bounded lock; the alarm wait releases it.

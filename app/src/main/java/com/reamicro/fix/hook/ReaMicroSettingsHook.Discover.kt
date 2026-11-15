@@ -1,18 +1,12 @@
 package com.reamicro.fix.hook
-import com.reamicro.fix.core.hostAbiMethod
+import com.reamicro.fix.core.HostDiscoverBindings
+import com.reamicro.fix.core.HostUiBindings
 
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.typeMatches
-import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.core.HostAndroidViews
-import com.reamicro.fix.core.HostNativeUiAbi
-
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Handler
 import android.os.Looper
 import java.net.HttpURLConnection
 import java.net.URI
@@ -27,18 +21,19 @@ import com.reamicro.fix.discover.DiscoverSource
 import com.reamicro.fix.discover.DiscoverState
 import com.reamicro.fix.hook.discover.DiscoverUiIcons
 import com.reamicro.fix.hook.settings.*
-import com.reamicro.fix.hook.webdav.ANDROID_VIEW_KT_CLASS
-import com.reamicro.fix.hook.webdav.ANDROID_VIEW_METHOD
 import com.reamicro.fix.hook.webdav.OnlineBinaryPayload
 import com.reamicro.fix.hook.webdav.dp
 import com.reamicro.fix.hook.webdav.normalizedAssociationPlatformName
 import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
+import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.online.OnlineSourceTask
+import com.reamicro.fix.online.readOnlineSourceBytes
+import com.reamicro.fix.reload.TaskCancellation
 import com.reamicro.fix.online.search.formatOnlineUpdateTime
 import com.reamicro.fix.online.search.sourceBaseUrl
 import com.reamicro.fix.online.search.formatOnlineWordCount
-import com.reamicro.fix.xposed.XposedBridge
-import java.lang.reflect.Method
+import com.reamicro.fix.xposed.HookRuntime
 
 private const val DISCOVER_KIND_ROW_HEIGHT_DP = 42
 private const val DISCOVER_KIND_ROW_BOTTOM_DP = 2
@@ -54,9 +49,7 @@ internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, comp
 
         discoverVersionValue()
 
-        if (DiscoverState.sources.isEmpty()) {
-            DiscoverState.refreshSources(appContext)
-        }
+        DiscoverState.ensureSources(appContext)
         val sources = DiscoverState.sources
         if (sources.isEmpty()) {
             renderDiscoverEmptyState(lazyListScope)
@@ -70,10 +63,7 @@ internal fun ReaMicroSettingsHook.renderDiscoverContent(innerPaddings: Any, comp
     }
 
     val background = backgroundDim(composer)
-    val modifier = if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.background(pageModifier(innerPaddings, true), background)
-    } else method(BACKGROUND_KT_CLASS, BACKGROUND_DEFAULT_METHOD, 5).invoke(null,
-        pageModifier(innerPaddings, true), background, null, 2, null)
+    val modifier = nativeUi.background(pageModifier(innerPaddings, true), background)
     renderHostLazyColumn(innerPaddings, listContent, composer, extendBottom = true,
         itemSpacing = if (DiscoverState.layout == DiscoverLayout.GRID) DiscoverShelfStyle.GRID_GAP else 0, modifierOverride = modifier)
 }
@@ -82,7 +72,7 @@ internal fun ReaMicroSettingsHook.renderDiscoverTopBar(title: String, composer: 
     val actions = composableLambda(DISCOVER_TOP_BAR_ACTIONS_KEY, FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
         discoverVersionValue()
-        val tint = colorScheme(inner).longMethod("getOnBackground")
+        val tint = schemeColor(inner, "getOnBackground", "getOnBackground")
         renderDiscoverConfigButton(tint, inner)
         renderDiscoverLayoutToggle(tint, inner)
         targetUnit()
@@ -101,9 +91,7 @@ internal fun ReaMicroSettingsHook.renderDiscoverTopBar(title: String, composer: 
     }
     // 原生标题栏为 64 raw dp；收掉底部 12dp 空白，保持标题坐标、状态栏和分类行高度。
     // Arrangement 同步缩短 topBar 测量高度；负 Padding 会抛错，仅 offset 则会留下书籍前空白。
-    val arrangement = if (HostNativeUiAbi.supports(HostSymbols.profileId)) {
-        b2Ui.spacedBy(-DISCOVER_TITLE_CATEGORY_TRIM_DP.toFloat())
-    } else spacedBy(-DISCOVER_TITLE_CATEGORY_TRIM_DP)
+    val arrangement = nativeUi.spacedBy(-DISCOVER_TITLE_CATEGORY_TRIM_DP.toFloat())
     discoverColumn(discoverFillMaxWidth(modifierInstance()), content, composer, arrangement)
 }
 
@@ -111,23 +99,8 @@ private fun ReaMicroSettingsHook.renderDiscoverTopBarAction(
     icon: Any?, description: String, tint: Long, composer: Any, name: String, onClick: () -> Unit,
 ) {
     if (icon == null) return
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        val clickable = clickableModifier(modifierInstance(), name, onClick)
-        val padded = b2Ui.padding(clickable, 10f, 10f, 10f, 10f)
-        renderDiscoverIcon(icon, tint, composer, description, padded)
-        return
-    }
-    val shape = cls("androidx.compose.foundation.shape.RoundedCornerShapeKt")
-        .hostMethod("RoundedCornerShape", Integer.TYPE).invoke(null, 50)
-    val clipped = method(CLIP_KT_CLASS, "clip", 2).invoke(null, modifierInstance(), shape)
-    val ripple = method("androidx.compose.material3.RippleKt", "ripple-Ou1YvPQ\$default", 10)
-        .invoke(null, false, 0f, 0L, null, false, false, false, false, 0xff, null)
-    val clickable = method(CLICKABLE_KT_CLASS, CLICKABLE_DEFAULT_METHOD, 9).invoke(
-        null, clipped, null, ripple, false, null, null,
-        functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() }, 28, null,
-    )
-    // 与宿主 2.3.2 AppTopBar 按钮一致：10dp 原始内边距，不额外叠加 udp 缩放。
-    val padded = method(PADDING_KT_CLASS, "padding-3ABfNKs", 2).invoke(null, clickable, 10f)
+    val clickable = clickableModifier(modifierInstance(), name, onClick)
+    val padded = nativeUi.padding(clickable, 10f, 10f, 10f, 10f)
     renderDiscoverIcon(icon, tint, composer, description, padded)
 }
 
@@ -140,6 +113,14 @@ private fun ReaMicroSettingsHook.renderDiscoverConfigButton(tint: Long, composer
 
 private fun ReaMicroSettingsHook.renderDiscoverEmptyState(lazyListScope: Any) {
     addLazyItem(lazyListScope, DISCOVER_EMPTY_ITEM_KEY) { itemComposer ->
+        val failure = DiscoverState.state as? DiscoverLoadState.Failed
+        if (DiscoverState.refreshing || failure != null) {
+            renderDiscoverStatusCard(if (failure == null) "正在读取在线源…" else "读取在线源失败",
+                failure?.message.orEmpty(),
+                if (failure == null) null else { { DiscoverState.reload(activityProvider()?.applicationContext) } },
+                itemComposer)
+            return@addLazyItem
+        }
         renderHostActionCard(
             listOf(
                 ActionRow(
@@ -167,7 +148,7 @@ private fun ReaMicroSettingsHook.renderDiscoverLayoutToggle(tint: Long, composer
 private fun ReaMicroSettingsHook.renderDiscoverKindRow(
     source: DiscoverSource, selection: DiscoverSelection, composer: Any,
 ) {
-    val kinds = DiscoverState.kindsFor(source).distinctBy { it.title }
+    val kinds = DiscoverState.kindsFor(source).distinctBy { it.key }
     val row = composableLambda(DISCOVER_KIND_ROW_KEY, FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
         val scope = args[0]!!
@@ -175,7 +156,7 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
             val lazyScope = listArgs?.getOrNull(0) ?: return@functionProxy targetUnit()
             kinds.forEachIndexed { index, kind ->
                 addLazyItem(lazyScope, DISCOVER_KIND_ROW_KEY + index,
-                    "${source.source.id}|${kind.title}") { c ->
+                    "${source.source.id}|${kind.key}") { c ->
                     renderDiscoverKindChip(source, kind, selection, index == 0, c)
                 }
             }
@@ -183,31 +164,16 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
         }
         val mod = discoverWeight(scope, modifierInstance())
 
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            b2Ui.lazyRow(mod, list, inner)
-            renderDiscoverKindExpandButton(inner)
-            return@composableLambda targetUnit()
-        }
-        val composerClass = cls("androidx.compose.runtime.Composer")
-        composerClass.hostMethod("startMovableGroup", Int::class.javaPrimitiveType, Any::class.java)
-            .invoke(inner, 0x524D46B1, "${source.source.id}|${selection.kindTitle}")
-        try {
-            val index = kinds.indexOfFirst { it.title == selection.kindTitle }.coerceAtLeast(0)
-            val state = method("androidx.compose.foundation.lazy.LazyListStateKt", "rememberLazyListState", 5)
-                .invoke(null, index, 0, inner, 0, 0)
-            method(LAZY_DSL_KT_CLASS, "LazyRow", 13).invoke(null, mod, state, null, false,
-                null, null, null, false, null, list, inner, 0, 508)
-        } finally { composerClass.hostMethod("endMovableGroup").invoke(inner) }
+        val initialIndex = kinds.indexOfFirst { it.key == selection.kindKey }.coerceAtLeast(0)
+        val state = requireNotNull(requireNotNull(HostDiscoverBindings.current).call("lazyState", initialIndex, inner, 0, 0))
+        requireNotNull(HostUiBindings.current).call("lazyRow", mod, state, null, null, null, null, false, null, list, inner, 0, 252)
         renderDiscoverKindExpandButton(inner)
         targetUnit()
     }
     // 列表书目已有 10 UDP 顶部留白；仅宫格另加 8 raw dp，保持 42 UDP 分类点击区域。
     val gap = if (DiscoverState.layout == DiscoverLayout.GRID) DISCOVER_CATEGORY_BOOK_GAP_DP.toFloat() else 0f
     val width = discoverFillMaxWidth(modifierInstance())
-    val spaced = if (HostNativeUiAbi.supports(HostSymbols.profileId)) {
-        b2Ui.padding(width, 0f, 0f, 0f, gap)
-    } else method(PADDING_KT_CLASS, DISCOVER_PADDING_SIDES_METHOD, DISCOVER_PADDING_SIDES_PARAMETER_COUNT)
-        .invoke(null, width, 0f, 0f, 0f, gap)
+    val spaced = nativeUi.padding(width, 0f, 0f, 0f, gap)
     // 外间距在 height 前，原生分组栏的底部 2 UDP 仍包含在 42 UDP 内。
     val sized = discoverHeight(spaced, DISCOVER_KIND_ROW_HEIGHT_DP)
     val mod = paddingSides(sized, 20, 0, 8, DISCOVER_KIND_ROW_BOTTOM_DP)
@@ -216,65 +182,35 @@ private fun ReaMicroSettingsHook.renderDiscoverKindRow(
 
 private fun ReaMicroSettingsHook.renderDiscoverKindExpandButton(composer: Any) {
     val activity = activityProvider()
-    val content = composableLambda(DISCOVER_KIND_EXPAND_KEY, FUNCTION3_CLASS) { args ->
-        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
-        renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), colorScheme(inner).longMethod("getOnBackground"), inner)
-        targetUnit()
-    }
-    val width = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.width(modifierInstance(), udp(48))
-        else method(SIZE_KT_CLASS, WIDTH_METHOD, 2).invoke(null, modifierInstance(), udp(48))
+    val width = nativeUi.width(modifierInstance(), udp(48))
     val sized = discoverHeight(width, DISCOVER_KIND_CONTENT_HEIGHT_DP)
     val modifier = clickableModifier(sized, "DiscoverKindExpand") {
         if (activity != null) openDiscoverKindDialog(activity)
     }
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), colorScheme(composer).longMethod("getOnBackground"),
-            composer, "选择发现分类", b2Ui.padding(modifier, udp(12), udp(8), udp(12), udp(8)))
-        return
-    }
-    method(BOX_KT_CLASS, BOX_METHOD, 7).invoke(null, modifier, alignmentCenter(), false, content, composer, 0, 0)
+    renderDiscoverIcon(DiscoverUiIcons.chevronDown(classLoader), schemeColor(composer, "getOnBackground", "getOnBackground"),
+        composer, "选择发现分类", nativeUi.padding(modifier, udp(12), udp(8), udp(12), udp(8)))
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverKindChip(
     source: DiscoverSource, kind: DiscoverKind, selection: DiscoverSelection, first: Boolean, composer: Any,
 ) {
-    val selected = kind.title == selection.kindTitle
+    val selected = kind.key == selection.kindKey
     val activity = activityProvider()
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        val clickable = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
-            DiscoverState.select(source.source.id, kind.title, activity?.applicationContext)
-        }
-        val mod = paddingSides(discoverHeight(clickable, DISCOVER_KIND_CONTENT_HEIGHT_DP),
-            if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0,
-            DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0)
-        val weight = cls("androidx.compose.ui.text.font.FontWeight")
-            .getConstructor(Int::class.javaPrimitiveType).newInstance(if (selected) 700 else 400)
-        val color = colorScheme(composer).longMethod(if (selected) "getOnBackground" else "getOnSurfaceVariant")
-        val content = composableLambda(kind.title.hashCode(), FUNCTION3_CLASS) { args ->
-            val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
-            renderDiscoverText(kind.title, color, textStyle(inner, "getLabelLarge", "getBodyMedium"),
-                inner, fontWeight = weight)
-            targetUnit()
-        }
-        discoverRow(mod, content, composer)
-        return
+    val clickable = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
+        if (kind.control != null && !kind.isBookList) openEnhancedDiscoverControls(source, kind)
+        else DiscoverState.select(source.source.id, kind.title, activity?.applicationContext, kind.key)
     }
-    val content = composableLambda(kind.title.hashCode(), FUNCTION3_CLASS) { args ->
-        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
-        val weight = cls("androidx.compose.ui.text.font.FontWeight")
-            .getConstructor(Int::class.javaPrimitiveType).newInstance(if (selected) 700 else 400)
-        renderDiscoverText(kind.title, colorScheme(inner).longMethod("getOnBackground"),
-            textStyle(inner, "getLabelLarge", "getBodyMedium"), inner, fontWeight = weight)
-        targetUnit()
-    }
-    var mod = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
-        DiscoverState.select(source.source.id, kind.title, activity?.applicationContext)
-    }
-    mod = paddingSides(discoverHeight(mod, DISCOVER_KIND_CONTENT_HEIGHT_DP),
+    val mod = paddingSides(discoverHeight(clickable, DISCOVER_KIND_CONTENT_HEIGHT_DP),
         if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0,
         DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0)
-    if (!selected) mod = method("androidx.compose.ui.draw.AlphaKt", "alpha", 2).invoke(null, mod, .5f)
-    method(BOX_KT_CLASS, BOX_METHOD, 7).invoke(null, mod, alignmentCenter(), false, content, composer, 0, 0)
+    val weight = requireNotNull(HostDiscoverBindings.current).constructor("fontWeight").newInstance(if (selected) 700 else 400)
+    val color = schemeColor(composer, if (selected) "getOnBackground" else "getOnSurfaceVariant", "getOnBackground")
+    val content = composableLambda(kind.key.hashCode(), FUNCTION3_CLASS) { args ->
+        val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
+        renderDiscoverText(kind.displayTitle, color, textStyle(inner, "getLabelLarge", "getBodyMedium"), inner, fontWeight = weight)
+        targetUnit()
+    }
+    discoverRow(mod, content, composer)
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverBooks(
@@ -387,7 +323,7 @@ private fun ReaMicroSettingsHook.renderDiscoverListRow(
     book: DiscoverBook,
     composer: Any,
 ) {
-    val titleColor = colorScheme(composer).longMethod("getOnBackground")
+    val titleColor = schemeColor(composer, "getOnBackground", "getOnBackground")
     val metaColor = schemeColor(composer, "getOnSurfaceVariant", "getOnBackground")
     val info = discoverTagInfo(book, source)
     val titleStyle = textStyle(composer, "getTitleSmall", "getBodyMedium")
@@ -436,7 +372,7 @@ private fun ReaMicroSettingsHook.renderDiscoverGridRow(
     books: List<DiscoverBook>,
     composer: Any,
 ) {
-    val titleColor = colorScheme(composer).longMethod("getOnBackground")
+    val titleColor = schemeColor(composer, "getOnBackground", "getOnBackground")
 
     val content = composableLambda(DISCOVER_GRID_ROW_KEY + books.first().key.hashCode(), FUNCTION3_CLASS) { args ->
         val inner = args?.getOrNull(1) ?: return@composableLambda targetUnit()
@@ -488,30 +424,18 @@ private fun ReaMicroSettingsHook.renderDiscoverText(
     val mask = if (fontWeight == null) DiscoverTextSpec.DEFAULT_MASK
         else DiscoverTextSpec.DEFAULT_MASK and (1 shl 6).inv()
     val modifierMask = if (modifier == null) mask else mask and (1 shl 1).inv()
-    renderAbiText(
-        text, modifier, color, null, 0L, null, fontWeight, null, 0L, null, null, 0L,
+    requireNotNull(HostUiBindings.current).call("text",
+        text, modifier, color, 0L, fontWeight, null, 0L, null, null, 0L,
         DiscoverTextSpec.ELLIPSIS, spec.softWrap, spec.maxLines, spec.minLines, null,
         style, composer, 0, DISCOVER_TEXT_ELLIPSIS_CHANGED, modifierMask)
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverSpacer(composer: Any, widthDp: Int) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.spacer(b2Ui.width(modifierInstance(), udp(widthDp)), composer)
-        return
-    }
-    val modifier = method(SIZE_KT_CLASS, WIDTH_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
-        .invoke(null, modifierInstance(), udp(widthDp))
-    method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, modifier, composer, 0)
+    nativeUi.spacer(nativeUi.width(modifierInstance(), udp(widthDp)), composer)
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverVGap(composer: Any, heightDp: Int) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.spacer(b2Ui.height(modifierInstance(), udp(heightDp)), composer)
-        return
-    }
-    val modifier = method(SIZE_KT_CLASS, HEIGHT_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
-        .invoke(null, modifierInstance(), udp(heightDp))
-    method(SPACER_KT_CLASS, SPACER_METHOD, DISCOVER_SPACER_PARAMETER_COUNT).invoke(null, modifier, composer, 0)
+    nativeUi.spacer(nativeUi.height(modifierInstance(), udp(heightDp)), composer)
 }
 
 private fun ReaMicroSettingsHook.renderDiscoverIcon(
@@ -551,6 +475,10 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
             val inset = EmbeddedHostUi.dp(context, if (widthDp == null) 4f else 2f).toInt()
             setPadding(inset, inset, inset, inset)
             clipToOutline = true
+            addOnAttachStateChangeListener(object : android.view.View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(view: android.view.View) = Unit
+                override fun onViewDetachedFromWindow(view: android.view.View) { cancelDiscoverCover(this@apply) }
+            })
         }
     }
     val update = functionProxy("DiscoverCoverUpdate", FUNCTION1_CLASS) { args ->
@@ -563,7 +491,7 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
             val inset = EmbeddedHostUi.dp(view.context, if (widthDp == null) 4f else 2f).toInt()
             view.setPadding(inset, inset, inset, inset)
             if (book.coverUrl.isNotBlank()) loadDiscoverCover(view, source.source, book.coverUrl, book.detailUrl)
-            else { view.tag = null; view.setImageDrawable(null) }
+            else { cancelDiscoverCover(view); view.setImageDrawable(null); view.contentDescription = "暂无封面" }
         }
         targetUnit()
     }
@@ -572,81 +500,90 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
     var modifier = if (widthDp == null) {
         discoverFillMaxWidth(coverBase)
     } else {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.width(coverBase, udp(widthDp))
-        else method(SIZE_KT_CLASS, WIDTH_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
-            .invoke(null, coverBase, udp(widthDp))
+        nativeUi.width(coverBase, udp(widthDp))
     }
     if (heightDp == null) {
 
         modifier = discoverAspectRatio(modifier, DiscoverShelfStyle.COVER_RATIO)
     } else {
-        modifier = if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.height(modifier, udp(heightDp))
-            else method(SIZE_KT_CLASS, HEIGHT_METHOD, DISCOVER_SIZE_PARAMETER_COUNT)
-                .invoke(null, modifier, udp(heightDp))
+        modifier = nativeUi.height(modifier, udp(heightDp))
     }
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        HostAndroidViews(classLoader).render(factory, modifier, composer, update)
-    } else androidViewMethod().invoke(null, factory, modifier, update, composer, 0, 0)
+    HostAndroidViews(classLoader).render(factory, modifier, composer, update)
 }
 
 private val discoverCoverCache = object : android.util.LruCache<String, Bitmap>(DISCOVER_COVER_CACHE_SIZE_KB) {
-    override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
+    override fun sizeOf(key: String, value: Bitmap): Int = maxOf(1, (value.byteCount + 1023) / 1024)
+}
+private val discoverCoverMain = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
+
+private val discoverCoverPool = com.reamicro.fix.reload.ModuleResources.pool(
+    DISCOVER_COVER_THREADS, DISCOVER_COVER_THREADS, 30, java.util.concurrent.TimeUnit.SECONDS,
+    java.util.concurrent.ArrayBlockingQueue(48),
+) { runnable ->
+    Thread(runnable, "ReaMicroDiscoverCover").apply { isDaemon = true }
 }
 
-private val discoverCoverPool = com.reamicro.fix.reload.ModuleResources.pool(DISCOVER_COVER_THREADS) { runnable ->
-    Thread(runnable, "ReaMicroDiscoverCover").apply { isDaemon = true }
+private class DiscoverCoverRequest(val key: String, val operation: OnlineSourceTask) {
+    var task: java.util.concurrent.FutureTask<Unit>? = null
+    fun cancel() {
+        operation.close()
+        task?.cancel(true)
+        discoverCoverPool.purge()
+    }
+}
+
+private fun cancelDiscoverCover(view: ImageView) {
+    (view.tag as? DiscoverCoverRequest)?.cancel()
+    view.tag = null
 }
 
 internal fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String, detailUrl: String) {
     val hook = WebDavDriveHook.activeInstance ?: return
-    val url = runCatching { hook.normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl) }
-        .onFailure {
-            XposedBridge.logAlways(
-                "[ReaMicro] discover cover normalize failed raw=${coverUrl.take(200)} " +
-                    "error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
-            )
-        }
-        .getOrNull()
-        .orEmpty()
-        .trim()
-    if (url.isBlank()) return
-    if (imageView.tag == url) return
-    imageView.tag = url
-    discoverCoverCache.get(url)?.let {
+    if (!OnlineSourceStore.isCurrent(source)) { cancelDiscoverCover(imageView); return }
+    val parserMode = com.reamicro.fix.online.OnlineParserMode.capture()
+    val key = "${source.id}|${source.revision}|${parserMode.generation}|$coverUrl|$detailUrl"
+    val previous = imageView.tag as? DiscoverCoverRequest
+    if (previous?.key == key || imageView.tag == key) return
+    cancelDiscoverCover(imageView)
+    imageView.setImageDrawable(null)
+    discoverCoverCache.get(key)?.let {
+        imageView.tag = key
         imageView.setImageBitmap(it)
+        imageView.contentDescription = "封面"
         return
     }
-    discoverCoverPool.execute {
-        var cacheKey = url
-        val bitmap = runCatching { downloadDiscoverCover(hook, source, url) }
-            .onFailure {
-
-                XposedBridge.logAlways(
-                    "[ReaMicro] discover cover task failed url=${url.take(200)} " +
-                        "error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
+    val request = DiscoverCoverRequest(key, OnlineSourceTask(source))
+    imageView.tag = request
+    imageView.contentDescription = "正在加载封面"
+    val task = java.util.concurrent.FutureTask<Unit> {
+        val bitmap = runCatching { request.operation.run {
+            if (parserMode.enhanced) {
+                return@run decodeDiscoverCoverBytes(
+                    com.reamicro.fix.online.EnhancedOnlineParser.bytes(source, coverUrl, isCover = true).bytes,
                 )
             }
-            .getOrNull()
-            ?: run {
-
-                if (!isFanqieCoverUrl(url)) return@run null
-                runCatching { downloadDiscoverCoverViaWebPage(hook, detailUrl) }
-                    .onFailure {
-                        XposedBridge.logAlways(
-                            "[ReaMicro] discover cover web fallback failed detail=${detailUrl.take(160)} " +
-                                "error=${it.javaClass.simpleName}: ${it.message.orEmpty()}",
-                        )
-                    }
-                    .getOrNull()
-                    ?.also { cacheKey = it.first }
-                    ?.second?.bytes?.let(::decodeDiscoverCoverBytes)
-            }
-            ?: return@execute
-        discoverCoverCache.put(cacheKey, bitmap)
-        com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-
-            if (imageView.tag == url) imageView.setImageBitmap(bitmap)
+            val url = hook.normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl).trim()
+            if (url.isBlank()) null else downloadDiscoverCover(hook, source, url)
+                ?: if (isFanqieCoverUrl(url)) downloadDiscoverCoverViaWebPage(hook, detailUrl)
+                    ?.second?.bytes?.let(::decodeDiscoverCoverBytes) else null
+        } }.getOrNull()
+        if (request.operation.isCurrent && bitmap != null) discoverCoverCache.put(key, bitmap)
+        val current = request.operation.isCurrent
+        request.operation.close()
+        discoverCoverMain.post {
+            if (imageView.tag !== request) return@post
+            imageView.tag = key
+            if (current && bitmap != null && OnlineSourceStore.isCurrent(source)) {
+                imageView.setImageBitmap(bitmap)
+                imageView.contentDescription = "封面"
+            } else imageView.contentDescription = "封面加载失败"
         }
+    }
+    request.task = task
+    try { discoverCoverPool.execute(task) } catch (_: java.util.concurrent.RejectedExecutionException) {
+        request.cancel()
+        imageView.tag = null
+        imageView.contentDescription = "封面等待加载"
     }
 }
 
@@ -656,19 +593,23 @@ internal fun isFanqieCoverUrl(url: String): Boolean =
         url.contains("fanqienovel.com", ignoreCase = true)
 
 internal fun downloadDiscoverCoverViaWebPage(hook: WebDavDriveHook, detailUrl: String): Pair<String, OnlineBinaryPayload>? {
+    TaskCancellation.checkCurrent()
     val bookId = DISCOVER_FANQIE_BOOK_ID_REGEX.find(detailUrl)?.value.orEmpty()
     if (bookId.isBlank()) return null
     val html = hook.withOnlineCleartextAllowed(DISCOVER_FANQIE_WEB_BASE) {
         val connection = URL("$DISCOVER_FANQIE_WEB_BASE/page/$bookId").openConnection() as HttpURLConnection
+        val cancellation = TaskCancellation.current()?.register(connection::disconnect)
         try {
+            TaskCancellation.checkCurrent()
             connection.requestMethod = "GET"
             connection.connectTimeout = DISCOVER_COVER_CONNECT_TIMEOUT_MS
             connection.readTimeout = DISCOVER_COVER_READ_TIMEOUT_MS
             connection.setRequestProperty("User-Agent", DISCOVER_COVER_BROWSER_UA)
             connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
             if (connection.responseCode !in 200..299) return@withOnlineCleartextAllowed null
-            connection.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+            connection.inputStream.use(::readOnlineSourceBytes).toString(Charsets.UTF_8)
         } finally {
+            cancellation?.close()
             connection.disconnect()
         }
     } ?: return null
@@ -676,19 +617,21 @@ internal fun downloadDiscoverCoverViaWebPage(hook: WebDavDriveHook, detailUrl: S
     if (picId.isBlank()) return null
     val originUrl = "https://p6-novel.byteimg.com/origin/novel-pic/$picId"
     val connection = URL(originUrl).openConnection() as HttpURLConnection
+    val cancellation = TaskCancellation.current()?.register(connection::disconnect)
     try {
+        TaskCancellation.checkCurrent()
         connection.requestMethod = "GET"
         connection.connectTimeout = DISCOVER_COVER_CONNECT_TIMEOUT_MS
         connection.readTimeout = DISCOVER_COVER_READ_TIMEOUT_MS
         connection.setRequestProperty("User-Agent", DISCOVER_COVER_BROWSER_UA)
         connection.setRequestProperty("Accept", "image/*,*/*;q=0.8")
         if (connection.responseCode !in 200..299) {
-            XposedBridge.logAlways(
+            HookRuntime.logAlways(
                 "[ReaMicro] discover cover web fallback http ${connection.responseCode} url=${originUrl.take(200)}",
             )
             return null
         }
-        val bytes = connection.inputStream.use { it.readBytes() }
+        val bytes = connection.inputStream.use(::readOnlineSourceBytes)
         if (bytes.isEmpty()) return null
         return originUrl to OnlineBinaryPayload(
             bytes = bytes,
@@ -696,12 +639,22 @@ internal fun downloadDiscoverCoverViaWebPage(hook: WebDavDriveHook, detailUrl: S
             url = originUrl,
         )
     } finally {
+        cancellation?.close()
         connection.disconnect()
     }
 }
 
 private fun downloadDiscoverCover(hook: WebDavDriveHook, source: OnlineSourceEntry, url: String): Bitmap? {
-    decodeOnlineDataImage(url)?.let { return it }
+    TaskCancellation.checkCurrent()
+    if (url.startsWith("data:image/", true)) {
+        require(url.length <= 24 * 1024 * 1024) { "封面数据过大" }
+        val comma = url.indexOf(',')
+        if (comma < 0) return null
+        val bytes = if (url.substring(0, comma).contains(";base64", true))
+            android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT)
+        else java.net.URLDecoder.decode(url.substring(comma + 1), "UTF-8").toByteArray(Charsets.UTF_8)
+        return decodeDiscoverCoverBytes(bytes)
+    }
     val connection = hook.withOnlineCleartextAllowed(url) {
         (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -730,16 +683,18 @@ private fun downloadDiscoverCover(hook: WebDavDriveHook, source: OnlineSourceEnt
             }
         }
     }
+    val cancellation = TaskCancellation.current()?.register(connection::disconnect)
     return try {
+        TaskCancellation.checkCurrent()
         val code = connection.responseCode
         if (code !in 200..299) {
 
-            XposedBridge.logAlways("[ReaMicro] discover cover http $code url=${url.take(200)}")
+            HookRuntime.logAlways("[ReaMicro] discover cover http $code url=${url.take(200)}")
             null
         } else {
-            val bytes = connection.inputStream.use { it.readBytes() }
+            val bytes = connection.inputStream.use(::readOnlineSourceBytes)
             decodeDiscoverCoverBytes(bytes) ?: run {
-                XposedBridge.logAlways(
+                HookRuntime.logAlways(
                     "[ReaMicro] discover cover decode failed bytes=${bytes.size} " +
                         "head=${bytes.take(12).joinToString(" ") { "%02x".format(it) }} url=${url.take(200)}",
                 )
@@ -747,12 +702,14 @@ private fun downloadDiscoverCover(hook: WebDavDriveHook, source: OnlineSourceEnt
             }
         }
     } catch (t: Throwable) {
-        XposedBridge.logAlways(
+        TaskCancellation.rethrowIfCancelled(t)
+        HookRuntime.logAlways(
             "[ReaMicro] discover cover failed url=${url.take(200)} " +
                 "error=${t.javaClass.simpleName}: ${t.message.orEmpty()}",
         )
         null
     } finally {
+        cancellation?.close()
         connection.disconnect()
     }
 }
@@ -761,9 +718,10 @@ private fun decodeDiscoverCoverBytes(bytes: ByteArray): Bitmap? {
     if (bytes.isEmpty()) return null
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sample = 1
     while (
-        bounds.outWidth / (sample * 2) >= DISCOVER_COVER_TARGET_WIDTH_PX &&
+        bounds.outWidth / (sample * 2) >= DISCOVER_COVER_TARGET_WIDTH_PX ||
         bounds.outHeight / (sample * 2) >= DISCOVER_COVER_TARGET_HEIGHT_PX
     ) {
         sample *= 2
@@ -798,7 +756,7 @@ private val discoverTagInfoCache = java.util.concurrent.ConcurrentHashMap<String
 private val discoverTagLineCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
 private fun discoverCacheKey(book: DiscoverBook, source: DiscoverSource): String =
-    "${source.source.id}|${book.key}"
+    "${source.source.id}|${source.source.revision}|${book.hashCode()}"
 
 private fun <V> java.util.concurrent.ConcurrentHashMap<String, V>.putBounded(key: String, value: V) {
     if (size > DISCOVER_CACHE_MAX_ENTRIES) clear()
@@ -858,100 +816,53 @@ internal fun ReaMicroSettingsHook.openDiscoverBook(source: DiscoverSource, book:
 }
 
 private fun ReaMicroSettingsHook.logDiscover(message: String) {
-    XposedBridge.log("$LOG_PREFIX discover $message")
+    HookRuntime.log("$LOG_PREFIX discover $message")
 }
 
-private fun ReaMicroSettingsHook.schemeColor(composer: Any, name: String, fallback: String): Long =
-    runCatching { colorScheme(composer).longMethod(name) }
-        .getOrElse { colorScheme(composer).longMethod(fallback) }
+private fun ReaMicroSettingsHook.schemeColor(composer: Any, name: String, fallback: String): Long {
+    val ui = requireNotNull(HostUiBindings.current)
+    val colors = requireNotNull(ui.call("colorScheme", composer))
+    fun field(value: String) = ui.field("color." + value.removePrefix("get").replaceFirstChar { it.lowercase() })
+    return runCatching { field(name).getLong(colors) }.getOrElse { field(fallback).getLong(colors) }
+}
 
-private fun ReaMicroSettingsHook.textStyle(composer: Any, name: String, fallback: String): Any =
-    runCatching { typography(composer).method0(name) }
-        .getOrElse { typography(composer).method0(fallback) }
+private fun ReaMicroSettingsHook.textStyle(composer: Any, name: String, fallback: String): Any {
+    val ui = requireNotNull(HostUiBindings.current)
+    val typography = requireNotNull(ui.call("typography", composer))
+    fun field(value: String) = ui.field("typography." + value.removePrefix("get").replaceFirstChar { it.lowercase() })
+    return requireNotNull(runCatching { field(name).get(typography) }.getOrElse { field(fallback).get(typography) })
+}
 
-private fun ReaMicroSettingsHook.discoverFillMaxWidth(base: Any): Any =
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.fillWidth(base)
-    else
-    method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, DISCOVER_FILL_MAX_WIDTH_PARAMETER_COUNT)
-        .invoke(null, base, 0f, DISCOVER_FILL_MAX_WIDTH_DEFAULT_MASK, null)
+private fun ReaMicroSettingsHook.discoverFillMaxWidth(base: Any): Any = nativeUi.fillWidth(base)
 
-private fun ReaMicroSettingsHook.discoverHeight(base: Any, heightDp: Int): Any =
-    if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.height(base, udp(heightDp))
-    else method(SIZE_KT_CLASS, HEIGHT_METHOD, 2).invoke(null, base, udp(heightDp))
+private fun ReaMicroSettingsHook.discoverHeight(base: Any, heightDp: Int): Any = nativeUi.height(base, udp(heightDp))
 
 private fun ReaMicroSettingsHook.discoverAspectRatio(base: Any, ratio: Float): Any =
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        // B4 默认参数已内联，false 的高度优先槽不再出现在实际签名中。
-        cls("ReaMicroHost.AspectRatio").hostAbiMethod("a",
-            cls("androidx.compose.ui.Modifier"), Float::class.javaPrimitiveType)
-            .invoke(null, base, ratio)
-    } else method(DISCOVER_ASPECT_RATIO_CLASS, DISCOVER_ASPECT_RATIO_METHOD, DISCOVER_ASPECT_RATIO_PARAMETER_COUNT)
-        .invoke(null, base, ratio, false)
+    requireNotNull(requireNotNull(HostDiscoverBindings.current).call("aspectRatio", base, ratio))
 
 private fun ReaMicroSettingsHook.paddingSides(base: Any, start: Int, top: Int, end: Int, bottom: Int): Any =
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.padding(base, udp(start), udp(top), udp(end), udp(bottom))
-    } else
-    method(PADDING_KT_CLASS, DISCOVER_PADDING_SIDES_METHOD, DISCOVER_PADDING_SIDES_PARAMETER_COUNT)
-        .invoke(null, base, udp(start), udp(top), udp(end), udp(bottom))
+    nativeUi.padding(base, udp(start), udp(top), udp(end), udp(bottom))
 
 private fun ReaMicroSettingsHook.alignmentTop(): Any =
-    if (HostSymbols.abiProfileId == "2.3.3-b4") cls("ReaMicroHost.Alignment").getDeclaredField("k").get(null)
-    else staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getTop")
+    requireNotNull(HostDiscoverBindings.current).constructor("verticalAlignment").newInstance(-1f)
 
-private fun ReaMicroSettingsHook.discoverWeight(scope: Any, base: Any): Any =
-    if (HostSymbols.abiProfileId == "2.3.3-b4") b2Ui.weight(scope, base)
-    else method(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, DISCOVER_ROW_WEIGHT_METHOD, DISCOVER_ROW_WEIGHT_PARAMETER_COUNT)
-        .invoke(scope, base, 1f, true)
+private fun ReaMicroSettingsHook.discoverWeight(scope: Any, base: Any): Any = nativeUi.weight(scope, base)
 
 private fun ReaMicroSettingsHook.discoverColumn(
     modifier: Any, content: Any, composer: Any, arrangement: Any = arrangementTop(),
 ) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.column(modifier, arrangement, alignmentStart(), content, composer)
-    } else method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(null, modifier,
-        arrangement, alignmentStart(), content, composer, 0, 0)
+    nativeUi.column(modifier, arrangement, alignmentStart(), content, composer)
 }
 
 private fun ReaMicroSettingsHook.discoverRow(
     modifier: Any, content: Any, composer: Any, arrangement: Any? = null, alignment: Any? = null,
 ) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        b2Ui.row(modifier, content, composer, arrangement, alignment)
-    } else method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(null, modifier,
-        arrangement ?: arrangementStart(), alignment ?: alignmentCenterVertically(), content, composer, 0, 0)
+    nativeUi.row(modifier, content, composer, arrangement, alignment)
 }
 
-private fun ReaMicroSettingsHook.rowScopeInstance(): Any =
-    cachedRowScopeInstance ?: staticObject(DISCOVER_ROW_SCOPE_INSTANCE_CLASS, "INSTANCE")
-        .also { cachedRowScopeInstance = it }
+private fun ReaMicroSettingsHook.rowScopeInstance(): Any = requireNotNull(HostUiBindings.current).value("rowScope")
 
-@Volatile
-private var cachedRowScopeInstance: Any? = null
-
-@Volatile
-private var cachedIconVectorMethod: Method? = null
-
-private fun ReaMicroSettingsHook.iconVectorMethod(): Method =
-    cachedIconVectorMethod ?: synchronized(DiscoverPageLock) {
-        cachedIconVectorMethod ?: cls(DISCOVER_ICON_KT_CLASS).declaredMethods.first {
-            it.hostNameMatches(DISCOVER_ICON_METHOD) &&
-                it.parameterTypes.size == DISCOVER_ICON_PARAMETER_COUNT &&
-                typeMatches(it.parameterTypes.firstOrNull(), DISCOVER_IMAGE_VECTOR_CLASS)
-        }.apply { isAccessible = true }.also { cachedIconVectorMethod = it }
-    }
-
-@Volatile
-private var cachedAndroidViewMethod: Method? = null
-
-private fun ReaMicroSettingsHook.androidViewMethod(): Method =
-    cachedAndroidViewMethod ?: synchronized(DiscoverPageLock) {
-        cachedAndroidViewMethod ?: cls(ANDROID_VIEW_KT_CLASS).declaredMethods.first {
-            it.hostNameMatches(ANDROID_VIEW_METHOD) && it.parameterTypes.size == DISCOVER_ANDROID_VIEW_PARAMETER_COUNT
-        }.apply { isAccessible = true }.also { cachedAndroidViewMethod = it }
-    }
-
-private val DiscoverPageLock = Any()
+private fun ReaMicroSettingsHook.iconVectorMethod() = requireNotNull(HostDiscoverBindings.current).method("icon")
 
 private const val LOG_PREFIX = "[ReaMicro]"
 
@@ -1003,45 +914,9 @@ private const val DISCOVER_COVER_CORNER_DP = 4
 
 private const val DISCOVER_TAG_SEPARATOR = " / "
 
-private const val DISCOVER_TEXT_PARAMETER_COUNT = 22
-
 private const val DISCOVER_TEXT_ELLIPSIS_CHANGED = 24960
 
-private const val DISCOVER_SIZE_PARAMETER_COUNT = 2
-
-private const val DISCOVER_PADDING_SIDES_METHOD = "padding-qDBjuR0"
-
-private const val DISCOVER_PADDING_SIDES_PARAMETER_COUNT = 5
-
-private const val DISCOVER_SPACER_PARAMETER_COUNT = 3
-
-private const val DISCOVER_ROW_WEIGHT_PARAMETER_COUNT = 3
-
-private const val DISCOVER_ICON_PARAMETER_COUNT = 7
-
-private const val DISCOVER_ANDROID_VIEW_PARAMETER_COUNT = 6
-
-private const val DISCOVER_FILL_MAX_WIDTH_PARAMETER_COUNT = 4
-
 private const val GRID_TITLE_MAX_LINES = 4
-
-private const val DISCOVER_FILL_MAX_WIDTH_DEFAULT_MASK = 1
-
-private const val DISCOVER_ASPECT_RATIO_CLASS = "androidx.compose.foundation.layout.AspectRatioKt"
-
-private const val DISCOVER_ASPECT_RATIO_METHOD = "aspectRatio"
-
-private const val DISCOVER_ASPECT_RATIO_PARAMETER_COUNT = 3
-
-private const val DISCOVER_ROW_SCOPE_INSTANCE_CLASS = "androidx.compose.foundation.layout.RowScopeInstance"
-
-private const val DISCOVER_ROW_WEIGHT_METHOD = "weight"
-
-private const val DISCOVER_ICON_KT_CLASS = "androidx.compose.material3.IconKt"
-
-private const val DISCOVER_ICON_METHOD = "Icon-ww6aTOc"
-
-private const val DISCOVER_IMAGE_VECTOR_CLASS = "androidx.compose.ui.graphics.vector.ImageVector"
 
 private const val DISCOVER_ICON_CHANGED_MASK = 0
 
@@ -1050,8 +925,6 @@ private const val DISCOVER_ICON_DEFAULT_MASK = 0x0
 private const val DISCOVER_TOP_BAR_ACTIONS_KEY = 0x524D46A0
 
 private const val DISCOVER_KIND_ROW_KEY = 0x524D4691
-
-private const val DISCOVER_KIND_EXPAND_KEY = 0x524D4692
 
 private const val DISCOVER_BOOK_STATUS_ITEM_KEY = 0x524D4693
 

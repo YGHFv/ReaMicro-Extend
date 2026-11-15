@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.sp
 internal fun HostThoughtEditorInput(
     value: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
-    palette: StructureHome130Style.Palette,
+    palette: HostEmbeddedStyle.Palette,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     readOnly: Boolean = false,

@@ -1,6 +1,6 @@
 package com.reamicro.fix.epub.editor
 
-import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.HostEpubServicesBindings
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 
@@ -21,37 +21,31 @@ internal object HostOpfIdentifier {
 
     fun read(loader: ClassLoader, root: File): Snapshot {
         require(root.isDirectory) { "EPUB 解包目录不存在" }
-        val pathType = loader.hostClass("okio.Path")
-        val pathCompanion = pathType.getField("Companion").get(null)
-        val path = pathCompanion.javaClass.getMethod("get", String::class.java, Boolean::class.javaPrimitiveType)
-            .invoke(pathCompanion, root.canonicalPath, false)
-        val opfType = loader.hostClass("org.epub.structure.opf.Opf")
-        val companion = opfType.getField("Companion").get(null)
+        val host = requireNotNull(HostEpubServicesBindings.metadata) { "宿主 OPF 接口尚未解析" }
+        check(host.type("opf").classLoader === loader)
+        val path = requireNotNull(host.method("path").invoke(null, root.canonicalPath, false))
         val opf = try {
-            companion.javaClass.getMethod("obtain", pathType).invoke(companion, path)
+            host.method("obtain").invoke(null, path)
         } catch (error: InvocationTargetException) {
             throw IllegalStateException("宿主 OPF 读取失败：${error.targetException.message.orEmpty()}", error.targetException)
         }
         return fromHostOpf(requireNotNull(opf) { "宿主未返回 OPF" })
     }
 
-    private fun enumName(value: Any?): String =
-        value?.toString()?.substringAfterLast('.')?.substringBefore('(').orEmpty()
-
     internal fun fromHostOpf(opf: Any): Snapshot {
-        fun read(target: Any, name: String): Any? =
-            target.javaClass.getMethod(name).apply { isAccessible = true }.invoke(target)
-        val metadata = requireNotNull(read(opf, "getMetadata")) { "宿主未返回元数据" }
-        val identifier = requireNotNull(read(metadata, "getUuid")) { "宿主未返回唯一标识" }
-        val id = requireNotNull(read(identifier, "getId")) { "宿主未返回标识类型" }
-        val type = read(identifier, "getType")
+        val host = requireNotNull(HostEpubServicesBindings.metadata) { "宿主 OPF 接口尚未解析" }
+        check(host.type("opf").isInstance(opf))
+        val metadata = host.required("opf.metadata", opf)
+        val identifier = host.required("metadata.identifier", metadata)
+        val id = host.required("identifier.id", identifier)
+        val type = host.value("identifier.type", identifier)
+        val typeName = (type as? Enum<*>)?.name.orEmpty()
         return Snapshot(
-            value = read(identifier, "getValue") as? String ?: "",
-            id = read(id, "getValue") as? String ?: "",
-            type = enumName(type),
-            scheme = type?.let { runCatching { read(it, "getScheme") as? String }.getOrNull() }
-                ?.takeIf { it.isNotBlank() } ?: enumName(type),
-            uniqueReference = read(opf, "getUniqueIdentifier") as? String ?: "",
+            value = host.text("identifier.value", identifier),
+            id = host.method("id.value").invoke(id) as? String ?: "",
+            type = typeName,
+            scheme = type?.let { host.text("kind.scheme", it) }?.takeIf { it.isNotBlank() } ?: typeName,
+            uniqueReference = host.text("opf.reference", opf),
         )
     }
 }

@@ -1,62 +1,46 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostStaticMethod
+import com.reamicro.fix.core.HostEpubSourceBindings
 import com.reamicro.fix.core.HostHtmlParser
 import com.reamicro.fix.hook.reader.*
 
 internal class HostSearchIndexBuilder(loader: ClassLoader) {
     private val parser = HostHtmlParser(loader)
-    private val nodeClass = loader.hostClass("com.fleeksoft.ksoup.nodes.Node")
-    private val textClass = loader.hostClass("com.fleeksoft.ksoup.nodes.TextNode")
-    private val nodeName = nodeClass.hostMethod("nodeName")
-    private val childNodes = nodeClass.hostMethod("childNodes")
-    private val nodeText = textClass.hostMethod("text")
-    private val body = loader.hostClass("com.fleeksoft.ksoup.nodes.Document").hostMethod("body")
-    private val getSteps = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getAllSteps", nodeClass)
-    private val getStep = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getSteps", nodeClass)
-    private val cfiClass = loader.hostClass("org.epub.html.EpubCFI")
-    private val stepClass = loader.hostClass("org.epub.html.EpubCFI\$StepReference")
-    private val idClass = loader.hostClass("org.epub.html.EpubCFI\$IDAssertion")
-    private val offsetClass = loader.hostClass("org.epub.html.EpubCFI\$CharacterOffset")
-    private val biasClass = loader.hostClass("org.epub.html.EpubCFI\$SideBias")
-    private val step = stepClass.getConstructor(Int::class.javaPrimitiveType, idClass)
-    private val cfi = cfiClass.getDeclaredConstructor(stepClass, stepClass, stepClass,
-        List::class.java, offsetClass, biasClass).apply { isAccessible = true }
-    private val zeroOffset = offsetClass.getConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType).newInstance(1, 0)
+    private val host get() = requireNotNull(HostEpubSourceBindings.current)
 
     fun index(raw: String, base: CfiBase): IndexedSearchText {
         require(raw.length <= 4_000_000) { "章节超过索引范围" }
         val doc = parser.parse(raw, "/search-source.xhtml")
-        val root = body.invoke(doc)!!
-        val spine = step.newInstance(base.spineIndex, null)
-        val item = step.newInstance(base.itemRefIndex, null)
-        val bodyStep = getStep.invoke(null, root)
+        val root = host.body(doc)
+        val spine = host.step(base.spineIndex)
+        val item = host.step(base.itemRefIndex)
+        val bodyStep = host.method("node.step").invoke(null, root)
+        val zeroOffset = host.offset(1, 0)
         val text = StringBuilder()
         val spans = ArrayList<TextSpan>()
         fun separator() { if (text.isNotEmpty() && text.last() != '\n') text.append('\n') }
         fun visit(node: Any, depth: Int) {
             if (Thread.currentThread().isInterrupted) throw InterruptedException("索引已取消")
             require(depth < 256)
-            val name = (nodeName.invoke(node) as String).lowercase()
+            val name = host.nodeName(node).lowercase(java.util.Locale.ROOT)
             if (name in ignored) return
             val block = name in blocks
             if (block) separator()
             when {
                 name == "#text" -> {
-                    val value = (nodeText.invoke(node) as String).trim(' ', '\n')
+                    val value = host.text(node).trim(' ', '\n')
                     if (value.isNotEmpty()) {
                         val start = text.length; text.append(value)
                         // 使用同一宿主 CFI 数据类型，省去已内联的 Builder setter；不改节点步进与字符偏移。
-                        val location = cfi.newInstance(spine, item, bodyStep, getSteps.invoke(null, node), zeroOffset, null)
+                        val location = host.record("cfi", mapOf("spine" to spine, "item" to item, "body" to bodyStep,
+                            "steps" to host.method("node.steps").invoke(null, node), "offset" to zeroOffset, "bias" to null))
                         val prefix = location.toString().substringBeforeLast(':') + ":"
                         spans += TextSpan(start, text.length, base, emptyList(), 1, 0, prefix)
                     }
                 }
                 name == "br" -> text.append('\n')
                 name in objects -> text.append('\ufffc')
-                else -> (childNodes.invoke(node) as List<*>).filterNotNull().forEach { visit(it, depth + 1) }
+                else -> host.children(node).forEach { visit(it, depth + 1) }
             }
             if (block) separator()
         }

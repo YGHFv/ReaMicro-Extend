@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -58,11 +59,12 @@ import com.reamicro.fix.epub.editor.EpubTextFiles
 import com.reamicro.fix.epub.editor.EpubStorageFiles
 import com.reamicro.fix.epub.editor.EpubMetadataFields
 import com.reamicro.fix.epub.editor.EpubChapterNames
+import com.reamicro.fix.epub.editor.EpubChapterLabelIndex
 import com.reamicro.fix.epub.editor.EpubChapterTitlePreview
 import com.reamicro.fix.epub.editor.FontPreviewSamples
 import com.reamicro.fix.epub.editor.epubPreviewSampleSize
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
+import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -88,26 +90,42 @@ internal class EpubStructureView(
     private var revision by mutableIntStateOf(0)
     private var externalWriteBusy by mutableStateOf(false)
     private val opened = mutableStateListOf<String>()
-    private var files by mutableStateOf(emptyList<Entry>())
+    private var listing by mutableStateOf(StructureListingIndex<Entry>(emptyList(), { it.path }, { it.group }) { emptyList() })
+    private val files: List<Entry> get() = listing.entries
     private var current by mutableStateOf<String?>(null)
-    private var availablePaths by mutableStateOf<List<String>>(emptyList())
-    private var requestedPath by mutableStateOf<String?>(null)
+    private var fileNavigationAnimated by mutableStateOf(true)
+    private var editorPageCovered by mutableStateOf(false)
+    private data class RequestedFile(val path: String, val animated: Boolean)
+    private var requestedPath by mutableStateOf<RequestedFile?>(null)
     private var chapterTitles by mutableStateOf<Map<String, List<String>>>(emptyMap())
+    private var chapterIndex by mutableStateOf<EpubChapterLabelIndex?>(null)
+    private var searchIndexRequested by mutableStateOf(false)
     private var availableLabels by mutableStateOf<Map<String, List<String>>>(emptyMap())
     fun fileSearchLabels(): Map<String, List<String>> = availableLabels
-    fun filePaths(): List<String> = availablePaths
-    fun requestOpenFile(path: String) { requestedPath = path }
+    fun requestFileSearchIndex() { searchIndexRequested = true }
+    fun filePaths(): List<String> = listing.paths
+    fun requestOpenFile(path: String, animated: Boolean = true) {
+        fileNavigationAnimated = animated
+        if (!animated) listing.byPath[path]?.takeIf { !it.native &&
+            StructureFileOpenPolicy.canOpen(it.name, it.kind, it.native) }?.let { current = it.path }
+        requestedPath = RequestedFile(path, animated)
+    }
     private var homeRequest by mutableIntStateOf(0)
     private val navigationScrollStates = mutableMapOf<String, androidx.compose.foundation.lazy.LazyListState>()
-    fun showHome() { homeRequest++ }
+    fun showHome(animated: Boolean = true) {
+        fileNavigationAnimated = animated
+        current = null
+        homeRequest++
+    }
+    fun setEditorVisible(value: Boolean) { editorPageCovered = value }
     fun openedFilePaths(): List<String> = opened.toList()
     fun recordOpenedText(path: String) {
         StructureOpenedFiles.record(opened, path)
     }
     private val snackbar = SnackbarHostState()
-    private var dark by mutableStateOf(StructureHome130Style.isDark(activity))
-    private val palette get() = StructureHome130Style.palette(activity, dark)
-    private val hostFonts by lazy { StructureHome130Style.fonts(activity) }
+    private var dark by mutableStateOf(HostEmbeddedStyle.isDark(activity))
+    private val palette get() = HostEmbeddedStyle.palette(activity, dark)
+    private var hostFonts by mutableStateOf(HostEmbeddedStyle.Fonts(FontFamily.Serif, FontFamily.SansSerif))
     private var back: (() -> Boolean)? = null
     private var view: ComposeView? = null
     private var unsupportedToast: Toast? = null
@@ -124,9 +142,13 @@ internal class EpubStructureView(
                 setViewTreeLifecycleOwner(owner)
                 setViewTreeSavedStateRegistryOwner(owner)
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+                owner.attach(this)
                 setContent { this@EpubStructureView.StructureContent() }
             }.also { view = it }
-        } catch (e: Throwable) { owner.close(); throw e }
+        } catch (e: Throwable) {
+            runCatching { owner.close() }.onFailure(e::addSuppressed)
+            throw e
+        }
     }
     fun bindWindow(window: android.view.Window?) {
 
@@ -151,17 +173,17 @@ internal class EpubStructureView(
         val warning = result.optString("warning")
         showFeedback(warning.ifBlank { result.optString("message") }, warning.isNotBlank())
     }
-    fun updateTheme() { dark = StructureHome130Style.isDark(activity) }
+    fun updateTheme() { dark = HostEmbeddedStyle.isDark(activity) }
     fun handleBack(): Boolean = back?.invoke() ?: false
     fun dispose() {
         unsupportedToast?.cancel()
         unsupportedToast = null
         back = null
-        view?.disposeComposition()
-        owner.close()
+        val compose = view
         view = null
+        try { compose?.disposeComposition() } finally { owner.close() }
     }
-    private suspend fun call(name: String, vararg args: String?): JSONObject = withContext(Dispatchers.IO) {
+    private suspend fun call(name: String, vararg args: String?): JSONObject = withContext(ModuleUiRuntime.io) {
         val text = request(name, args)
         val value = if (text.isBlank() || text == "kotlin.Unit") JSONObject() else JSONObject(text)
         check(!value.has("ok") || value.optBoolean("ok")) { value.optString("message", "操作失败") }
@@ -190,21 +212,24 @@ internal class EpubStructureView(
     @Composable private fun StructureContent() {
 
         val themed = palette.controlsScheme()
+        LaunchedEffect(Unit) {
+            hostFonts = withContext(ModuleUiRuntime.io) { StructureHostFonts.load(activity) }
+        }
         val uiFont by produceState<FontFamily?>(null, uiFontFileProvider) {
-            value = withContext(Dispatchers.IO) { runCatching {
+            value = withContext(ModuleUiRuntime.io) { runCatching {
                 uiFontFileProvider()?.takeIf { it.isFile }?.let { FontFamily(Typeface.createFromFile(it)) }
             }.getOrNull() }
         }
-        val typography = remember(uiFont, hostFonts) { StructureHome130Style.typography(hostFonts, uiFont) }
+        val typography = remember(uiFont, hostFonts, EmbeddedHostUi.typographyStyles) { HostEmbeddedStyle.typography(hostFonts, uiFont) }
         MaterialTheme(colorScheme = themed, typography = typography) {
             val scope = rememberCoroutineScope()
             var metadata by remember { mutableStateOf(JSONObject()) }
             var displayBookTitle by remember { mutableStateOf(bookTitle) }
             var metadataLoading by remember { mutableStateOf(false) }
             var loading by remember { mutableStateOf(true) }
+            var firstListing by remember { mutableStateOf(true) }
             var failure by remember { mutableStateOf<String?>(null) }
             var preparedPreview by remember { mutableStateOf<PreparedPreview?>(null) }
-            var previewLoading by remember { mutableStateOf(false) }
             var previewGeneration by remember { mutableIntStateOf(0) }
             var revealedPath by remember { mutableStateOf<String?>(null) }
             val collapsed = remember { mutableStateMapOf<String, Boolean>() }
@@ -219,14 +244,14 @@ internal class EpubStructureView(
 
             var previewSamples by remember { mutableStateOf(FontPreviewSamples.defaults) }
             var fileSearchVisible by remember { mutableStateOf(false) }
-            val file = files.firstOrNull { it.path == current }
+            val file = listing.byPath[current]
             val pageColor = palette.page
 
             LaunchedEffect(pageColor) { onSurfaceChanged(pageColor.toArgb()) }
 
             val treeScroll = rememberLazyListState()
 
-            val groupedFiles = remember(files) { files.groupBy { it.group } }
+            val groupedFiles = listing.groups
 
             fun perform(operation: suspend () -> Unit) {
                 if (busy) return
@@ -280,7 +305,7 @@ internal class EpubStructureView(
                     afterWrite(call("saveCssSelector", entry.path, hash, rule.getInt("id").toString(), next))
                 }
             }
-            fun select(entry: Entry) {
+            fun select(entry: Entry, animated: Boolean = true) {
                 if (busy) return
 
                 if (!StructureFileOpenPolicy.canOpen(entry.name, entry.kind, entry.native)) {
@@ -289,6 +314,7 @@ internal class EpubStructureView(
                 }
                 unsupportedToast?.cancel()
                 revealedPath = null
+                fileNavigationAnimated = animated
                 if (entry.native) {
 
                     current = StructureEditorContext.previewBehindEditor(current, files.firstOrNull { it.path == current }?.kind)
@@ -299,14 +325,15 @@ internal class EpubStructureView(
 
                 scope.launch { drawer.close() }
             }
-            fun locate(entry: Entry) {
+            fun locate(entry: Entry, animated: Boolean = true) {
                 if (busy) return
                 if (StructureFileOpenPolicy.canOpen(entry.name, entry.kind, entry.native)) {
-                    select(entry)
+                    select(entry, animated)
                     return
                 }
 
                 current = null
+                fileNavigationAnimated = animated
                 collapsed[entry.group] = false
                 revealedPath = entry.path
                 scope.launch {
@@ -329,38 +356,43 @@ internal class EpubStructureView(
             }
             LaunchedEffect(requestedPath, loading, busy) {
                 if (loading || busy) return@LaunchedEffect
-                val path = requestedPath ?: return@LaunchedEffect
+                val request = requestedPath ?: return@LaunchedEffect
                 requestedPath = null
-                val entry = files.firstOrNull { it.path == path }
-                if (entry != null) locate(entry)
-                else showFeedback("文件已不存在：$path", warning = true)
+                val entry = listing.byPath[request.path]
+                if (entry != null) locate(entry, request.animated)
+                else showFeedback("文件已不存在：${request.path}", warning = true)
             }
             fun requestNew(group: String) {
                 prompt = textPrompt("新建文件", "") { name -> afterWrite(call("createTextFile", group, name)) }
             }
             LaunchedEffect(revision) {
-                loading = files.isEmpty()
+                loading = firstListing || files.isEmpty()
                 metadataLoading = true
                 val loadRevision = revision
                 val started = android.os.SystemClock.elapsedRealtime()
                 try {
-                    val (data, loadedFiles) = withContext(Dispatchers.IO) {
+                    val (data, loaded) = withContext(ModuleUiRuntime.io) {
                         val snapshot = call("initialData")
-                        snapshot to entries(snapshot.getJSONArray("files"))
+                        snapshot to StructureListingIndex(entries(snapshot.getJSONArray("files")),
+                            { it.path }, { it.group }, { StructureFileSearch.contentNames(it.name) })
                     }
-                    files = loadedFiles
+                    val publishedAt = android.os.SystemClock.elapsedRealtime()
+                    listing = loaded
                     chapterTitles = emptyMap()
-                    availableLabels = loadedFiles.associate { it.path to StructureFileSearch.contentNames(it.name) }
-                    availablePaths = loadedFiles.map { it.path }
+                    chapterIndex = null
+                    searchIndexRequested = false
+                    availableLabels = loaded.labels
                     displayBookTitle = data.optString("title").ifBlank { bookTitle }
-                    val valid = files.map { it.path }.toSet()
+                    val valid = loaded.byPath.keys
                     opened.removeAll { it !in valid }
                     navigationScrollStates.keys.retainAll(valid)
                     if (current !in valid) current = null
                     failure = null
+                    firstListing = false
                     loading = false
-                    com.reamicro.fix.xposed.XposedBridge.log(
-                        "ReaMicro structure listing count=${files.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}",
+                    com.reamicro.fix.xposed.HookRuntime.log(
+                        "ReaMicro structure listing count=${files.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}" +
+                            " mainPublishMs=${android.os.SystemClock.elapsedRealtime() - publishedAt}",
                     )
                     try {
                         val details = call("initialMetadata")
@@ -368,7 +400,7 @@ internal class EpubStructureView(
                         displayBookTitle = details.optString("title").ifBlank { displayBookTitle }
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
-                        com.reamicro.fix.xposed.XposedBridge.log("ReaMicro structure metadata deferred failure: ${e.message}")
+                        com.reamicro.fix.xposed.HookRuntime.log("ReaMicro structure metadata deferred failure: ${e.message}")
                         metadataLoading = false
                         snackbar.showSnackbar("文件列表已加载，元数据读取失败：${e.message.orEmpty()}")
                     }
@@ -378,57 +410,73 @@ internal class EpubStructureView(
                     if (revision == loadRevision) { loading = false; metadataLoading = false }
                 }
             }
-            LaunchedEffect(files, revision) {
+            LaunchedEffect(listing, revision) {
                 if (files.isEmpty()) return@LaunchedEffect
+                // Allow the first file rows to reach a frame before deferred TOC work competes for IO.
+                withFrameNanos { }
                 try {
                     val inventory = files
-                    chapterTitles = withContext(Dispatchers.IO) {
+                    val index = withContext(ModuleUiRuntime.io) {
                         val context = coroutineContext
                         val toc = EpubChapterNames.toc(root, inventory.map { it.path }) { context.ensureActive() }
-                        inventory.filter { it.native }.associate { entry ->
-                            context.ensureActive()
-
-                            val fallback = if (toc[entry.path].orEmpty().isNotEmpty()) "" else runCatching {
-                                EpubChapterTitlePreview.read(EpubTextFiles.resolve(root, entry.path)) { context.ensureActive() }
+                        EpubChapterLabelIndex(toc) { path, checkCancelled ->
+                            runCatching {
+                                EpubChapterTitlePreview.read(EpubTextFiles.resolve(root, path), checkCancelled)
                             }.getOrElse { if (it is CancellationException) throw it else "" }
-                            entry.path to (toc[entry.path].orEmpty() + listOf(fallback).filter { it.isNotBlank() }).distinct()
                         }
                     }
+                    chapterTitles = index.tocNames
+                    chapterIndex = index
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) {
-                    com.reamicro.fix.xposed.XposedBridge.log("ReaMicro chapter label indexing failed: ${e.message}")
+                    com.reamicro.fix.xposed.HookRuntime.log("ReaMicro chapter label indexing failed: ${e.message}")
                 }
             }
-            LaunchedEffect(files, chapterTitles, metadata) {
-                availableLabels = files.associate { entry -> entry.path to StructureFileSearch.contentNames(
-                    entry.name, cover = entry.path == metadata.optString("coverPath"),
-                    banner = entry.path == metadata.optString("bannerPath")) + chapterTitles[entry.path].orEmpty() }
+            LaunchedEffect(chapterIndex, files, revision, fileSearchVisible, searchIndexRequested) {
+                val index = chapterIndex ?: return@LaunchedEffect
+                if (!fileSearchVisible && !searchIndexRequested) return@LaunchedEffect
+                val inventory = files.filter { it.native }.map { it.path }
+                val loadRevision = revision
+                val complete = withContext(ModuleUiRuntime.io) {
+                    val context = coroutineContext
+                    index.complete(inventory) { context.ensureActive() }
+                }
+                if (chapterIndex === index && revision == loadRevision) chapterTitles = chapterTitles + complete
+            }
+            LaunchedEffect(listing, chapterTitles, metadata, fileSearchVisible, searchIndexRequested) {
+                if (!fileSearchVisible && !searchIndexRequested) return@LaunchedEffect
+                val inventory = listing
+                val titles = chapterTitles
+                val cover = metadata.optString("coverPath")
+                val banner = metadata.optString("bannerPath")
+                availableLabels = withContext(ModuleUiRuntime.io) {
+                    inventory.entries.associate { entry -> entry.path to StructureFileSearch.contentNames(
+                        entry.name, cover = entry.path == cover, banner = entry.path == banner) + titles[entry.path].orEmpty() }
+                }
             }
             LaunchedEffect(current, revision, files, loading) {
                 val generation = ++previewGeneration
-                previewLoading = false
                 preparedPreview = null
                 val pathAtLoad = current
+                val revisionAtLoad = revision
                 if (pathAtLoad == null) {
                     return@LaunchedEffect
                 }
-                val target = files.firstOrNull { it.path == pathAtLoad } ?: return@LaunchedEffect
+                val target = listing.byPath[pathAtLoad] ?: return@LaunchedEffect
                 if (loading || target.native) return@LaunchedEffect
-                previewLoading = target.name.endsWith(".opf", true) || target.kind == "css" || target.kind == "navigation"
-                try {
-                    val data = when {
-                        target.name.endsWith(".opf", true) -> structurePreviewResult {
-                            call("getMetadata", pathAtLoad).getJSONObject("metadata")
-                        }
-                        target.kind == "css" -> structurePreviewResult { call("cssRules", pathAtLoad) }
-                        target.kind == "navigation" -> structurePreviewResult { call("navigation", pathAtLoad) }
-                        else -> null
+                val data = when {
+                    target.name.endsWith(".opf", true) -> structurePreviewResult {
+                        call("getMetadata", pathAtLoad).getJSONObject("metadata")
                     }
-                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                    if (current != pathAtLoad) return@LaunchedEffect
-                    preparedPreview = PreparedPreview(target, revision, data)
-                    StructureOpenedFiles.record(opened, pathAtLoad)
-                } finally { if (generation == previewGeneration) previewLoading = false }
+                    target.kind == "css" -> structurePreviewResult { call("cssRules", pathAtLoad) }
+                    target.kind == "navigation" -> structurePreviewResult { call("navigation", pathAtLoad) }
+                    else -> null
+                }
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (current != pathAtLoad || revision != revisionAtLoad ||
+                    generation != previewGeneration) return@LaunchedEffect
+                preparedPreview = PreparedPreview(target, revisionAtLoad, data)
+                StructureOpenedFiles.record(opened, pathAtLoad)
             }
             SideEffect {
                 back = {
@@ -439,26 +487,31 @@ internal class EpubStructureView(
                         confirmDelete -> { confirmDelete = false; true }
                         sheet != null -> { sheet = null; true }
                         drawer.isOpen -> { scope.launch { drawer.close() }; true }
-                        current != null -> { current = null; true }
+                        current != null -> { fileNavigationAnimated = true; current = null; true }
                         else -> false
                     }
                 }
             }
             LaunchedEffect(opened.size) { if (opened.isEmpty()) drawer.close() }
+            val renderPage: @Composable (Entry?) -> Unit = { file ->
                 Scaffold(
+                    modifier = Modifier.fillMaxSize(),
                     containerColor = pageColor,
                     contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
                     snackbarHost = { SnackbarHost(snackbar) },
                     topBar = {
                         StructureToolbar(
                             title = displayBookTitle, subtitle = file?.path,
-                            titleStyle = StructureHome130Style.title(hostFonts),
-                            subtitleStyle = StructureHome130Style.caption(hostFonts),
+                            titleStyle = HostEmbeddedStyle.title(hostFonts),
+                            subtitleStyle = HostEmbeddedStyle.caption(hostFonts),
                             titleColor = palette.text, subtitleColor = palette.caption,
                             modifier = Modifier.windowInsetsPadding(TopAppBarDefaults.windowInsets),
                             navigationIcon = {
-                                IconButton(enabled = !busy, onClick = { if (current != null) current = null else close() }) {
-                                    Icon(StructureHome130Icons.Back, "返回")
+                                IconButton(enabled = !busy, onClick = {
+                                    if (current != null) { fileNavigationAnimated = true; current = null }
+                                    else close()
+                                }) {
+                                    Icon(HostEmbeddedIcons.Back, "返回")
                                 }
                             },
                             actions = {
@@ -468,7 +521,9 @@ internal class EpubStructureView(
                                         stringResource(R.string.epub_structure_search_title),
                                         Modifier.size(24.dp), tint = palette.text)
                                 }
-                                if (file != null) IconButton(enabled = !busy, onClick = { prompt = null; current = null }) {
+                                if (file != null) IconButton(enabled = !busy, onClick = {
+                                    prompt = null; fileNavigationAnimated = true; current = null
+                                }) {
                                     Icon(painterResource(R.drawable.ic_structure_home), "返回图书结构", Modifier.size(24.dp), tint = palette.text)
                                 }
                                 if (opened.isNotEmpty()) IconButton(enabled = !busy && prompt == null, onClick = { scope.launch { drawer.open() } }) {
@@ -491,63 +546,62 @@ internal class EpubStructureView(
                         drawerState = drawer, gesturesEnabled = opened.isNotEmpty(),
                         drawerContent = {
                             OpenedFilesContent(
-                                onOpen = { path -> files.firstOrNull { it.path == path }?.let(::select) },
+                                onOpen = { path -> listing.byPath[path]?.let(::select) },
                                 onClose = ::closeOpened,
-                                onLongClick = { path -> sheet = files.firstOrNull { it.path == path } },
+                                onLongClick = { path -> sheet = listing.byPath[path] },
                             )
                         },
                     ) {
                         Box(Modifier.fillMaxSize()) {
-                        when {
-                            loading -> StructureDataLoading(Modifier.align(Alignment.Center))
-                            failure != null -> Column(Modifier.align(Alignment.Center).padding(24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(failure!!, color = palette.caption)
-                                TextButton(onClick = { refresh() }) { Text("重试") }
-                            }
-                            else -> {
-                                if (current == null || preparedPreview == null) LazyColumn(state = treeScroll, modifier = Modifier.fillMaxSize()) {
-                                    if (files.isEmpty()) item { Text("没有文件", Modifier.padding(32.dp), color = palette.caption) }
-                                    groupedFiles.forEach { (group, list) ->
-                                        item(key = "folder:$group", contentType = "folder") {
-                                            FolderRow(
-                                                group = group,
-                                                collapsed = collapsed[group] == true,
-                                                enabled = !busy,
-                                                onToggle = { collapsed[group] = !(collapsed[group] ?: false) },
-                                                onImport = { perform { call("pickFile", group) } },
-                                                onNew = { requestNew(group) }, modifier = structureItemAnimation(),
-                                            )
+                        if (file == null) {
+                                Box(Modifier.fillMaxSize().background(palette.content)) {
+                                    when {
+                                        loading -> StructurePageLoading()
+                                        failure != null -> Column(Modifier.align(Alignment.Center).padding(24.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(failure!!, color = palette.caption)
+                                            TextButton(onClick = { refresh() }) { Text("重试") }
                                         }
-                                        if (collapsed[group] != true) itemsIndexed(
-                                            list, key = { _, entry -> "file:${entry.path}" },
-                                            contentType = { _, _ -> "file" },
-                                        ) { index, entry ->
-                                            FileRow(
-                                                entry, entry.path == metadata.optString("coverPath"), entry.path == metadata.optString("bannerPath"),
-                                                showDivider = index < list.lastIndex,
-                                                onClick = { select(entry) },
-                                                onLongClick = { sheet = entry },
-                                                modifier = structureItemAnimation().then(
-                                                    if (entry.path == revealedPath) Modifier.background(palette.primarySoft)
-                                                    else Modifier),
-                                            )
+                                        else -> LazyColumn(state = treeScroll, modifier = Modifier.fillMaxSize()) {
+                                            if (files.isEmpty()) item { Text("没有文件", Modifier.padding(32.dp), color = palette.caption) }
+                                            groupedFiles.forEach { (group, list) ->
+                                                item(key = "folder:$group", contentType = "folder") {
+                                                    FolderRow(
+                                                        group = group,
+                                                        collapsed = collapsed[group] == true,
+                                                        enabled = !busy,
+                                                        onToggle = { collapsed[group] = !(collapsed[group] ?: false) },
+                                                        onImport = { perform { call("pickFile", group) } },
+                                                        onNew = { requestNew(group) }, modifier = structureItemAnimation(),
+                                                    )
+                                                }
+                                                if (collapsed[group] != true) itemsIndexed(
+                                                    list, key = { _, entry -> "file:${entry.path}" },
+                                                    contentType = { _, _ -> "file" },
+                                                ) { index, entry ->
+                                                    FileRow(
+                                                        entry, entry.path == metadata.optString("coverPath"), entry.path == metadata.optString("bannerPath"),
+                                                        showDivider = index < list.lastIndex,
+                                                        onClick = { select(entry) },
+                                                        onLongClick = { sheet = entry },
+                                                        modifier = structureItemAnimation().then(
+                                                            if (entry.path == revealedPath) Modifier.background(palette.primarySoft)
+                                                            else Modifier),
+                                                    )
+                                                }
+                                            }
+                                            item(key = "tree-bottom") { Spacer(Modifier.navigationBarsPadding()) }
                                         }
                                     }
-
-                                    item(key = "tree-bottom") { Spacer(Modifier.navigationBarsPadding()) }
                                 }
-                            }
-                        }
-                        StructureFileTransition(
-                            target = preparedPreview.takeIf { current != null && failure == null },
-                            modifier = Modifier.fillMaxSize(),
-                            contentKey = { it.entry.path },
-                        ) { scene ->
-                            val file = scene.entry
+                        } else {
+                            val scene = rememberStructurePageContent(file.path,
+                                preparedPreview?.takeIf { it.entry.path == file.path })
                             Box(Modifier.fillMaxSize().background(palette.content)
-                                .pointerInput(file.path) { detectTapGestures { } }) {
+                                .pointerInput(file.path) { detectTapGestures { } },
+                                contentAlignment = Alignment.Center) {
                             when {
+                            scene == null -> StructureDataLoading()
                             file.kind == "image" -> ImagePage(file, scene.revision)
                             file.kind == "font" -> FontPage(file, scene.revision, previewSamples, !busy) { index ->
                                 val (label, value) = previewSamples[index]
@@ -560,7 +614,7 @@ internal class EpubStructureView(
                             }
                             file.kind == "navigation" -> NavigationPage(file, scene.data,
                                 editSource = { openScripta(file.path, false) },
-                                openChapter = { path -> files.firstOrNull { it.path == path }?.let(::select) })
+                                openChapter = { path -> listing.byPath[path]?.let(::select) })
                             file.name.endsWith(".opf", true) -> MetadataPage(file, scene.data) { key, label, value ->
                                 prompt = textPrompt(label, value, allowEmpty = EpubMetadataFields.allowsEmpty(key)) { next ->
                                     afterWrite(call("saveMetadataField", file.path, key, next, value))
@@ -578,8 +632,9 @@ internal class EpubStructureView(
                         }
                             }
                         }
-                        if ((metadataLoading || previewLoading) && !loading && file != null) LinearProgressIndicator(
+                        if (metadataLoading && !loading && file != null) LinearProgressIndicator(
                             Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                            color = palette.native.role("Tertiary"), trackColor = palette.surfaceHighest,
                         )
                         if (busy) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .08f)),
                             contentAlignment = Alignment.Center) { StructureDataLoading() }
@@ -612,18 +667,28 @@ internal class EpubStructureView(
                                 }
                             })
                         StructureFileSearchOverlay(
-                            visible = fileSearchVisible, paths = availablePaths, labels = availableLabels, palette = palette, busy = busy,
+                            visible = fileSearchVisible, paths = listing.paths, labels = availableLabels, palette = palette, busy = busy,
                             onDismiss = { if (!busy) fileSearchVisible = false },
                             onSelect = { path ->
                                 if (!busy) {
                                     fileSearchVisible = false
-                                    files.firstOrNull { it.path == path }?.let { locate(it) }
+                                    listing.byPath[path]?.let { locate(it) }
                                 }
                             },
                         )
                     }
                     }
                 }
+            }
+            Box(Modifier.fillMaxSize().structureCoveredPage(editorPageCovered)) {
+                StructureFileTransition(
+                    target = file.takeIf { current != null && !loading && failure == null },
+                    modifier = Modifier.fillMaxSize(),
+                    contentKey = { it.path },
+                    animated = fileNavigationAnimated,
+                    rootContent = { renderPage(null) },
+                ) { renderPage(it) }
+            }
 
             sheet?.let { selected ->
                 ModalBottomSheet(
@@ -645,7 +710,7 @@ internal class EpubStructureView(
                             EntryIcon(selected, Modifier.size(30.dp, 36.dp))
                             Column(Modifier.weight(1f).padding(horizontal = 16.dp).padding(top = 2.dp)) {
                                 StructureTruncatedText(selected.name.substringBeforeLast('.', selected.name),
-                                    StructureHome130Style.fileName(hostFonts), palette.text, Modifier.fillMaxWidth())
+                                    HostEmbeddedStyle.fileName(hostFonts), palette.text, Modifier.fillMaxWidth())
                                 EntrySummary(selected, selected.path == metadata.optString("coverPath"), selected.path == metadata.optString("bannerPath"))
                             }
                         }
@@ -668,7 +733,7 @@ internal class EpubStructureView(
                             }
                             if (selected.kind == "image") {
                                 StructureBookDetailDivider(activity.classLoader, palette)
-                                SheetAction("设置封面", StructureHome130Icons.ImageOutline, !busy) {
+                                SheetAction("设置封面", HostEmbeddedIcons.ImageOutline, !busy) {
                                     sheet = null
                                     perform { afterWrite(call("setCover", selected.path)) }
                                 }
@@ -683,7 +748,7 @@ internal class EpubStructureView(
                         AnimatedContent(targetState = confirmDelete, label = "confirm") { confirmed ->
                             FileActionCard(confirmed = confirmed) {
                                 SheetAction(if (confirmed) "确定删除吗？" else "删除文件",
-                                    if (confirmed) StructureHome130Icons.DeleteForever else StructureHome130Icons.DeleteOutline,
+                                    if (confirmed) HostEmbeddedIcons.DeleteForever else HostEmbeddedIcons.DeleteOutline,
                                     !busy, destructive = true, confirmed = confirmed, chevron = !confirmed) {
                                     if (!confirmed) confirmDelete = true
                                     else perform {
@@ -719,11 +784,11 @@ internal class EpubStructureView(
             ) {
                 StructureTruncatedText(
                     group.ifBlank { "EPUB-DIR" }.uppercase(Locale.ROOT),
-                    StructureHome130Style.caption(hostFonts), palette.caption,
+                    HostEmbeddedStyle.caption(hostFonts), palette.caption,
                     Modifier.weight(1f),
                 )
                 if (canImport) Icon(
-                    StructureHome130Icons.Import, "导入到此目录",
+                    HostEmbeddedIcons.Import, "导入到此目录",
                     Modifier.padding(end = 8.dp).clip(CircleShape).size(16.dp).clickable(
                         enabled = enabled, role = Role.Button, onClickLabel = "导入到此目录",
                         onClick = onImport,
@@ -731,7 +796,7 @@ internal class EpubStructureView(
                     tint = palette.icon,
                 )
                 Icon(
-                    if (collapsed) StructureHome130Icons.Collapsed else StructureHome130Icons.Expanded,
+                    if (collapsed) HostEmbeddedIcons.Collapsed else HostEmbeddedIcons.Expanded,
                     if (collapsed) "展开目录" else "折叠目录", Modifier.size(16.dp),
                     tint = palette.icon,
                 )
@@ -750,7 +815,7 @@ internal class EpubStructureView(
                 EntryIcon(file, Modifier.padding(horizontal = 16.dp, vertical = 14.dp).size(30.dp, 36.dp))
                 Column(Modifier.weight(1f).padding(top = 16.dp, bottom = 16.dp, end = 16.dp)) {
                     StructureTruncatedText(file.name.substringBeforeLast('.', file.name),
-                        StructureHome130Style.fileName(hostFonts), palette.text, Modifier.fillMaxWidth())
+                        HostEmbeddedStyle.fileName(hostFonts), palette.text, Modifier.fillMaxWidth())
                     EntrySummary(file, cover, banner)
                 }
 
@@ -759,13 +824,13 @@ internal class EpubStructureView(
         }
     }
     private fun LazyItemScope.structureItemAnimation(): Modifier = Modifier.animateItem(
-        fadeInSpec = spring(stiffness = 400f),
+        fadeInSpec = null,
         placementSpec = spring(stiffness = 400f, visibilityThreshold = IntOffset(1, 1)),
         fadeOutSpec = spring(stiffness = 400f),
     )
 
     @Composable private fun EntryIcon(file: Entry, modifier: Modifier) {
-        val order = EpubStorageFiles.structure130TypeOrder(file.name)
+        val order = EpubStorageFiles.structureTypeOrder(file.name)
         Box(modifier.clip(RoundedCornerShape(3.dp))) {
             if (order == 8) Thumbnail(file)
             else {
@@ -785,9 +850,22 @@ internal class EpubStructureView(
     }
 
     @Composable private fun EntrySummary(file: Entry, cover: Boolean = false, banner: Boolean = false) {
-        val order = EpubStorageFiles.structure130TypeOrder(file.name)
+        val order = EpubStorageFiles.structureTypeOrder(file.name)
+        val chapterName by produceState("", file.path, revision, chapterIndex) {
+            val index = chapterIndex ?: return@produceState
+            if (!file.native) return@produceState
+            val loadRevision = revision
+            val names = withContext(ModuleUiRuntime.io) {
+                val context = coroutineContext
+                index.names(file.path) { context.ensureActive() }
+            }
+            if (chapterIndex === index && revision == loadRevision) {
+                value = names.firstOrNull().orEmpty()
+                if (chapterTitles[file.path] != names) chapterTitles = chapterTitles + (file.path to names)
+            }
+        }
         val dimensions by produceState("", file.path, revision) {
-            value = if (order != 8) "" else withContext(Dispatchers.IO) { runCatching {
+            value = if (order != 8) "" else withContext(ModuleUiRuntime.io) { runCatching {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(EpubTextFiles.resolve(root, file.path).path, bounds)
                 if (bounds.outWidth > 0 && bounds.outHeight > 0) "${bounds.outWidth} x ${bounds.outHeight}" else ""
@@ -795,7 +873,6 @@ internal class EpubStructureView(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             val contentName = StructureFileLabels.name(file.name, cover, banner)
-            val chapterName = chapterTitles[file.path].orEmpty().firstOrNull().orEmpty()
             Text(if (file.kind == "navigation") "目录结构" else contentName,
                 style = MaterialTheme.typography.bodySmall,
                 color = when {
@@ -826,7 +903,7 @@ internal class EpubStructureView(
     ) {
         LazyColumn(Modifier.fillMaxWidth(.67f).fillMaxHeight().background(palette.content)) {
             items(opened.toList(), key = { it }) { path ->
-                val entry = files.firstOrNull { it.path == path }
+                val entry = listing.byPath[path]
                 if (entry != null) OpenedFileRow(entry, modifier = structureItemAnimation(),
                     onOpen = { onOpen(path) }, onClose = { onClose(path) },
                     onLongClick = onLongClick?.let { action -> { action(path) } })
@@ -844,10 +921,10 @@ internal class EpubStructureView(
                 verticalAlignment = Alignment.CenterVertically) {
                 EntryIcon(file, Modifier.size(20.dp, 24.dp))
                 StructureTruncatedText(file.name.substringBeforeLast('.', file.name),
-                    StructureHome130Style.drawerName(hostFonts), palette.native.role("OnSurface"),
+                    HostEmbeddedStyle.drawerName(hostFonts), palette.native.role("OnSurface"),
                     Modifier.weight(1f).padding(horizontal = 16.dp))
                 IconButton(onClick = onClose) {
-                    Icon(StructureHome130Icons.Close, "关闭文件", Modifier.size(20.dp), tint = palette.text)
+                    Icon(HostEmbeddedIcons.Close, "关闭文件", Modifier.size(20.dp), tint = palette.text)
                 }
             }
             HorizontalDivider(Modifier.padding(start = 52.dp), thickness = .8.dp, color = palette.divider)
@@ -864,7 +941,7 @@ internal class EpubStructureView(
             verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, Modifier.padding(end = 16.dp).size(20.dp), tint = foreground)
             Text(label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = foreground)
-            if (chevron) Icon(StructureHome130Icons.NavigateNext, null,
+            if (chevron) Icon(HostEmbeddedIcons.NavigateNext, null,
                 Modifier.padding(top = 2.dp).size(24.dp), tint = palette.surfaceHighest)
         }
     }
@@ -879,19 +956,19 @@ internal class EpubStructureView(
     @Composable private fun Thumbnail(file: Entry) {
         val bitmap by produceState<android.graphics.Bitmap?>(null, file.path, revision) {
             value = null
-            value = withContext(Dispatchers.IO) { runCatching { decodeImage(file, 128) }.getOrNull() }
+            value = withContext(ModuleUiRuntime.io) { runCatching { decodeImage(file, 128) }.getOrNull() }
         }
         bitmap?.let { Image(it.asImageBitmap(), file.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
     }
     @Composable private fun ImagePage(file: Entry, revision: Int) {
         val decoded by produceState<Result<android.graphics.Bitmap>?>(null, file.path, revision) {
             value = null
-            value = withContext(Dispatchers.IO) { runCatching { decodeImage(file, 2048) } }
+            value = withContext(ModuleUiRuntime.io) { runCatching { decodeImage(file, 2048) } }
         }
         val bitmap = decoded?.getOrNull()
         var scale by remember(file.path) { mutableFloatStateOf(1f) }
         var offset by remember(file.path) { mutableStateOf(Offset.Zero) }
-        BoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding().padding(16.dp).clip(RoundedCornerShape(0.dp))
+        Box(Modifier.fillMaxSize().navigationBarsPadding().padding(16.dp).clip(RoundedCornerShape(0.dp))
             .pointerInput(file.path) { detectTapGestures(onDoubleTap = {
                 scale = if (scale > 1f) 1f else 2f; offset = Offset.Zero
             }) }.pointerInput(file.path) { detectTransformGestures { _, pan, zoom, _ ->
@@ -917,7 +994,7 @@ internal class EpubStructureView(
 
         var loaded by remember(file.path, revision) { mutableStateOf<Result<FontFamily>?>(null) }
         LaunchedEffect(file.path, revision) {
-            loaded = withContext(Dispatchers.IO) { runCatching {
+            loaded = withContext(ModuleUiRuntime.io) { runCatching {
                 EpubTextFiles.resolve(root, file.path).inputStream().use { input ->
 
                     FontFamily(Typeface.Builder(input.fd).build()
@@ -946,7 +1023,7 @@ internal class EpubStructureView(
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                         Text("EX$index. $sample", Modifier.weight(1f), fontFamily = family,
                             style = MaterialTheme.typography.titleSmall, color = palette.text)
-                        Icon(StructureHome130Icons.Edit2, "编辑字体预览文本",
+                        Icon(HostEmbeddedIcons.Edit2, "编辑字体预览文本",
                             Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp), tint = palette.icon)
                     }
                 }
@@ -1030,7 +1107,7 @@ internal class EpubStructureView(
                         Text(value.ifBlank { "[未设置]" }, Modifier.weight(1f),
                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
                             color = if (value.isBlank()) palette.caption else palette.text)
-                        Icon(StructureHome130Icons.Edit2, "编辑$label",
+                        Icon(HostEmbeddedIcons.Edit2, "编辑$label",
                             Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp), tint = palette.icon)
                     }
                 }
@@ -1065,7 +1142,7 @@ internal class EpubStructureView(
                         showFeedback(if (copied.isSuccess) "已复制标识" else "复制失败，请重试")
                     }
                 }) {
-                    Icon(StructureHome130Icons.Copy, "复制标识", Modifier.size(16.dp),
+                    Icon(HostEmbeddedIcons.Copy, "复制标识", Modifier.size(16.dp),
                         tint = if (value.isBlank() || error.isNotBlank()) palette.caption else palette.icon)
                 }
             }
@@ -1110,7 +1187,7 @@ internal class EpubStructureView(
                                 Text(rule.optString("selector"), Modifier.weight(1f),
                                     style = MaterialTheme.typography.labelMedium, color = Color(0xFFB8860B),
                                     maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                Icon(StructureHome130Icons.Edit2, "编辑选择器",
+                                Icon(HostEmbeddedIcons.Edit2, "编辑选择器",
                                     Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp), tint = palette.icon)
                             }
                             if (rule.optString("comment").isNotBlank()) Text(rule.optString("comment"),
@@ -1139,7 +1216,7 @@ internal class EpubStructureView(
                                             style = MaterialTheme.typography.bodyMedium, color = palette.text,
                                             textAlign = androidx.compose.ui.text.style.TextAlign.End,
                                             maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                        Icon(StructureHome130Icons.Edit2, "编辑 ${row.optString("name")}",
+                                        Icon(HostEmbeddedIcons.Edit2, "编辑 ${row.optString("name")}",
                                             Modifier.padding(top = 2.dp).size(16.dp), tint = palette.icon)
                                     }
                                     if (row.optString("computedValue").isNotBlank()) Text(
@@ -1160,15 +1237,28 @@ internal class EpubStructureView(
     }
 }
 
+/** Matches the host sync body: fill remaining space, then center after its scaled top inset. */
+@Composable internal fun StructurePageLoading() {
+    val context = LocalContext.current
+    val insets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+    Box(Modifier.fillMaxSize().windowInsetsPadding(insets)
+        .padding(top = (16f * EmbeddedHostUi.scale(context)).dp),
+        contentAlignment = Alignment.Center) {
+        StructureDataLoading()
+    }
+}
+
 @Composable internal fun StructureDataLoading(modifier: Modifier = Modifier) {
-    val palette = StructureHome130Style.palette(LocalContext.current,
+    val palette = HostEmbeddedStyle.palette(LocalContext.current,
         LocalConfiguration.current.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES,
     )
     CircularProgressIndicator(
-        modifier = modifier,
-        color = palette.primary,
-        trackColor = palette.divider,
+        modifier = modifier.size(40.dp),
+        color = palette.native.role("Tertiary"),
+        trackColor = palette.surfaceHighest,
         strokeWidth = 2.dp,
+        strokeCap = StrokeCap.Round,
+        gapSize = 4.dp,
     )
 }

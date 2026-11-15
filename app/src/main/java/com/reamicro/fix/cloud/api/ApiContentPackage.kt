@@ -73,25 +73,47 @@ internal fun isPackageUpdateAvailable(
 }
 
 internal fun isSemanticVersion(value: String): Boolean {
-    val core = value.trim().substringBefore('-')
+    val normalized = value.trim().substringBefore('+')
+    val core = normalized.substringBefore('-')
     if (core.isBlank()) return false
-    return core.split('.').all { it.isNotBlank() && it.toIntOrNull() != null }
+    if (!core.split('.').all { part -> part.isNotEmpty() && part.all { it in '0'..'9' } }) return false
+    return '-' !in normalized || normalized.substringAfter('-').split('.')
+        .all { part -> part.isNotEmpty() && part.all { it.isLetterOrDigit() || it == '-' } }
 }
 
 internal fun comparePackageVersions(left: String, right: String): Int {
-    fun parts(value: String): List<Int> = value.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
-    val a = parts(left)
-    val b = parts(right)
+    val normalizedLeft = left.trim().substringBefore('+')
+    val normalizedRight = right.trim().substringBefore('+')
+    fun parts(value: String): List<java.math.BigInteger> =
+        value.substringBefore('-').split('.').map { it.toBigIntegerOrNull() ?: java.math.BigInteger.ZERO }
+    val a = parts(normalizedLeft)
+    val b = parts(normalizedRight)
     for (index in 0 until maxOf(a.size, b.size)) {
-        val comparison = (a.getOrElse(index) { 0 }).compareTo(b.getOrElse(index) { 0 })
+        val comparison = a.getOrElse(index) { java.math.BigInteger.ZERO }
+            .compareTo(b.getOrElse(index) { java.math.BigInteger.ZERO })
         if (comparison != 0) return comparison
     }
-    val leftSuffix = left.substringAfter('-', "")
-    val rightSuffix = right.substringAfter('-', "")
-    return when {
-        leftSuffix.isBlank() && rightSuffix.isBlank() -> 0
-        leftSuffix.isBlank() -> 1
-        rightSuffix.isBlank() -> -1
-        else -> leftSuffix.compareTo(rightSuffix)
+    val leftSuffix = normalizedLeft.substringAfter('-', "")
+    val rightSuffix = normalizedRight.substringAfter('-', "")
+    if (leftSuffix.isEmpty() || rightSuffix.isEmpty()) {
+        return when {
+            leftSuffix == rightSuffix -> 0
+            leftSuffix.isEmpty() -> 1
+            else -> -1
+        }
     }
+    val x = leftSuffix.split('.')
+    val y = rightSuffix.split('.')
+    for (index in 0 until minOf(x.size, y.size)) {
+        val xNumber = x[index].takeIf { it.all { char -> char in '0'..'9' } }?.toBigIntegerOrNull()
+        val yNumber = y[index].takeIf { it.all { char -> char in '0'..'9' } }?.toBigIntegerOrNull()
+        val comparison = when {
+            xNumber != null && yNumber != null -> xNumber.compareTo(yNumber)
+            xNumber != null -> -1
+            yNumber != null -> 1
+            else -> x[index].compareTo(y[index])
+        }
+        if (comparison != 0) return comparison
+    }
+    return x.size.compareTo(y.size)
 }

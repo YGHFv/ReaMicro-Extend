@@ -1,16 +1,15 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-
-import com.reamicro.fix.core.hostNameMatches
-
-
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.graphics.Color
-import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.reload.TaskCancellation
+import com.reamicro.fix.reload.cancellableQuery
+import java.util.concurrent.CancellationException
 import android.provider.DocumentsContract
 import android.text.TextUtils
 import android.util.TypedValue
@@ -21,13 +20,13 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.reamicro.fix.R
 import com.reamicro.fix.cloud.webdav.ImportLocalLibraryRowContext
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
 import java.util.Locale
 import java.util.UUID
+import java.io.File
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.online.download.importCacheFile
-import com.reamicro.fix.online.download.enqueueNativeImport
 import com.reamicro.fix.cloud.local.localLibraryBookUrl
 import com.reamicro.fix.cloud.local.localDocumentUri
 import com.reamicro.fix.cloud.local.localLibraryReadablePath
@@ -43,7 +42,6 @@ internal fun WebDavDriveHook.canShowLocalLibraryEntry(): Boolean =
     settingsProvider().canRunLocalLibraryCloud
 
 internal fun WebDavDriveHook.renderImportLocalLibraryRow(composer: Any) {
-    if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") return
     val context = importLocalLibraryRow.get()
     runCatching {
         renderImportLocalLibraryDivider(composer)
@@ -61,7 +59,7 @@ internal fun WebDavDriveHook.renderImportLocalLibraryRow(composer: Any) {
             popLocalLibraryIcon()
         }
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render local library import row: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render local library import row: ${it.stackTraceToString()}")
     }
 }
 
@@ -76,7 +74,7 @@ internal fun WebDavDriveHook.renderImportLocalLibraryDivider(composer: Any) {
             2,
         )
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render local library import divider: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render local library import divider: ${it.stackTraceToString()}")
     }
 }
 
@@ -84,117 +82,114 @@ internal fun WebDavDriveHook.localLibraryImportClickCallback(context: ImportLoca
     functionProxy("LocalLibraryImportBrowse", FUNCTION0_CLASS) {
         runCatching {
             val navGraphScope = context?.navGraphScope ?: return@runCatching
-            val coroutineScope = context.coroutineScope ?: return@runCatching
-            val sheetState = context.sheetState ?: return@runCatching
-            val intentReceiver = context.intentReceiver ?: return@runCatching
-            method(BOOK_LIBRARY_SHEET_CLASS, BOOK_LIBRARY_AUTH_ROW_CLICK_METHOD, 5).invoke(
-                null,
-                navGraphScope,
-                BACKUP_TYPE_LOCAL_LIBRARY,
-                coroutineScope,
-                sheetState,
-                intentReceiver,
-            )
+            val ui = requireNotNull(com.reamicro.fix.core.HostStorageBindings.ui)
+            context.intentReceiver?.let { receiver ->
+                ui.method("dismiss").invoke(receiver, ui.field("hide").get(null))
+            }
+            navigateStorage(navGraphScope, BACKUP_TYPE_LOCAL_LIBRARY)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open local library import row: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open local library import row: ${it.stackTraceToString()}")
             context?.navGraphScope?.let { scope -> navigateStorage(scope, BACKUP_TYPE_LOCAL_LIBRARY) }
         }
         targetUnit()
     }
 
-internal fun WebDavDriveHook.scheduleLocalLibrarySearchRefresh(
-    viewModel: Any?,
-    query: String,
-    webDavResults: List<Any>,
-    webDavSeq: Long,
-    localSeq: Long,
-    delayMs: Long,
-) {
-    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
-        com.reamicro.fix.reload.ModuleResources.thread({
-            runCatching {
-                if (
-                    webDavHomeSearchSeq.get() != webDavSeq ||
-                    localLibraryHomeSearchSeq.get() != localSeq
-                ) return@runCatching
-                val refreshedLocalResults = if (query.isBlank() || !canShowLocalLibraryEntry()) {
-                    emptyList()
-                } else {
-                    searchLocalLibraryBooks(query)
-                }
-                if (
-                    webDavHomeSearchSeq.get() != webDavSeq ||
-                    localLibraryHomeSearchSeq.get() != localSeq
-                ) return@runCatching
-                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                    if (
-                        webDavHomeSearchSeq.get() == webDavSeq &&
-                        localLibraryHomeSearchSeq.get() == localSeq
-                    ) {
-                        rememberHomeSearchSnapshot(webDavResults, refreshedLocalResults)
-                        updateHomeWebDavSearchResults(viewModel, webDavResults, refreshedLocalResults, null)
-                    }
-                }
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX local library delayed search refresh failed: ${it.stackTraceToString()}")
-            }
-        }, "ReaMicroLocalLibrarySearchRefresh").start()
-    }, delayMs)
-}
+
 
 internal fun WebDavDriveHook.enqueueLocalLibraryImport(workerManager: Any, book: Any): Any {
+    val execution = storageExecutionGeneration.get()
+    check(!storageClosed && settingsProvider().moduleEnabled) { "模块已停用" }
+    val identity = requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())) {
+        "账号状态正在变化，请稍后重新导入"
+    }
+    val context = currentContext() ?: error("Android context not available")
     val name = book.callString("getName").ifBlank { LOCAL_LIBRARY_TITLE }
     val path = cloudPathOf(book)
     val sourceUrl = book.callString("getUrl").ifBlank { localLibraryBookUrl(path) }
     val sourceSize = book.invokeNoArg("getSize") as? Number
-    val tracker = workerManager.javaClass.hostField("tracker")
-        .apply { isAccessible = true }
-        .get(workerManager)
+    val work = com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+    val tracker = work.tracker(workerManager)
+    check(AccountHostRuntime.isCurrentStorage(identity, activityProvider())) { "账号已切换，请重新导入" }
     rememberWorkerManager(workerManager)
     val id = UUID.randomUUID().toString()
-    val stateFlow = tracker.javaClass.methods.first {
-        it.hostNameMatches("createTask") && it.parameterTypes.size == 4
-    }.apply { isAccessible = true }.invoke(
-        tracker,
-        id,
-        "download",
-        path.ifBlank { name },
-        newWorkState("Running", 0, null, null, name),
-    )
+    val stateFlow = work.create(tracker, id, "download", path.ifBlank { name }, newWorkState("Running", 0, null, null, name))
     val handle = newNativeWorkHandle(id, requireNotNull(stateFlow))
-
+    val importAborted = java.util.concurrent.atomic.AtomicBoolean(false)
+    fun checkActive() {
+        if (importAborted.get() || Thread.currentThread().isInterrupted || work.cancelled(tracker, id) ||
+            storageClosed || !settingsProvider().moduleEnabled || execution != storageExecutionGeneration.get() ||
+            !AccountHostRuntime.isCurrentStorage(identity, activityProvider())) {
+            throw java.util.concurrent.CancellationException("账号已切换或本地书库导入已取消")
+        }
+    }
     com.reamicro.fix.reload.ModuleResources.thread({
+        var localFile: File? = null
+        var queued = false
         runCatching {
+            checkActive()
             val entry = localLibraryEntry(path) ?: error("本地书库文件不存在")
-            val context = currentContext() ?: error("Android context not available")
-            val localFile = importCacheFile(
-                context.cacheDir,
-                "reamicro-local-library",
-                entry.name,
-            )
-            localFile.parentFile?.mkdirs()
+            checkActive()
+            val cachedFile = importCacheFile(context.cacheDir, "reamicro-local-library", entry.name)
+            localFile = cachedFile
+            ImportCompletionState.retain(cachedFile)
+            cachedFile.parentFile?.mkdirs()
             setTrackedWorkState(tracker, id, "Running", 20, null, null, name)
+            var copied = 0L
+            var reported = 20
             context.contentResolver.openInputStream(localDocumentUri(entry))?.use { input ->
-                localFile.outputStream().use { output -> input.copyTo(output) }
+                cachedFile.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        checkActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        checkActive()
+                        output.write(buffer, 0, count)
+                        copied += count
+                        val progress = if (entry.size > 0L) (20 + copied * 55 / entry.size).toInt().coerceIn(20, 75) else 20
+                        if (progress >= reported + 2) {
+                            setTrackedWorkState(tracker, id, "Running", progress, null, null, name)
+                            reported = progress
+                        }
+                    }
+                }
             } ?: error("无法读取本地书库文件")
+            checkActive()
             setTrackedWorkState(tracker, id, "Running", 80, null, null, name)
-            val platformFile = platformFile(localFile)
-
-            if (!ModuleImportPrecheck.precheck(localFile, sourceUrl)) {
+            val platformFile = platformFile(cachedFile)
+            if (!ModuleImportPrecheck.precheck(cachedFile, sourceUrl)) {
                 cancelTrackedWork(tracker, id)
+                cachedFile.delete()
                 logWebDav("local library import cancelled before queue path=$path")
                 return@runCatching
             }
-            rememberPendingWebDavImport(platformFile, localFile, sourceUrl, sourceSize?.toLong() ?: entry.size)
-            enqueueNativeImport(workerManager, platformFile)
-            setTrackedWorkState(tracker, id, "Success", 100, null, sourceUrl, name)
-            logWebDav("local library import queued path=$path")
+            checkActive()
+            val source = rememberPendingWebDavImport(platformFile, cachedFile, sourceUrl,
+                sourceSize?.toLong() ?: entry.size, identity, ::checkActive)
+            checkActive()
+            val result = NativeImportTaskBridge.await(workerManager, platformFile, ::checkActive,
+                onProgress = { progress -> setTrackedWorkState(tracker, id, "Running", progress, null, null, name) },
+                onQueued = { queued = true }, workerFinished = source::isWorkerFinished,
+                onCancellationRequested = { importAborted.set(true) })
+            runCatching { work.completeImport(tracker, id, result ?: sourceUrl, name) }
+                .onFailure { HookRuntime.logError("$LOG_PREFIX completed local import status publication failed", it) }
+            logWebDav("local library native import completed path=$path")
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX local library import failed: ${it.stackTraceToString()}")
-            setTrackedWorkState(tracker, id, "Error", 100, it.message ?: "本地书库导入失败", null, name)
+            importAborted.set(true)
+            if (!queued) {
+                localFile?.delete()
+                localFile?.parentFile?.takeIf { folder -> folder.isDirectory && folder.listFiles().isNullOrEmpty() }?.delete()
+            }
+            if (it is java.util.concurrent.CancellationException || !AccountHostRuntime.isCurrentStorage(identity, activityProvider())) {
+                cancelTrackedWork(tracker, id)
+            } else {
+                HookRuntime.log("$LOG_PREFIX local library import failed: ${it.stackTraceToString()}")
+                setTrackedWorkState(tracker, id, "Error", 100, it.message ?: "本地书库导入失败", null, name)
+            }
+        }.also {
+            if (!queued) localFile?.let(::forgetPendingWebDavImport)
         }
     }, "ReaMicroLocalLibraryImport").start()
-
     return handle
 }
 
@@ -211,7 +206,7 @@ internal fun WebDavDriveHook.renderLocalLibraryAccountRoute(navGraphScope: Any, 
         )
         return true
     } catch (throwable: Throwable) {
-        XposedBridge.log("$LOG_PREFIX failed to render local library account route: ${throwable.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render local library account route: ${throwable.stackTraceToString()}")
         return false
     } finally {
         val next = (localLibraryAccountScreenDepth.get() ?: 0) - 1
@@ -236,7 +231,7 @@ internal fun WebDavDriveHook.renderLocalLibraryFolderRows(composer: Any) {
         }
         androidViews.render(factory, fillMaxWidthModifier(), composer, null)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to render local library folder rows: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to render local library folder rows: ${it.stackTraceToString()}")
     }
 }
 
@@ -310,25 +305,10 @@ internal fun WebDavDriveHook.isLocalLibraryAccountContext(): Boolean =
 
 internal fun WebDavDriveHook.localLibraryAuth(): Any {
     val dir = localLibraryDisplayDir()
-    return cls(AUTH_YUN115_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-        List::class.java,
-        cls(DIR_CLASS),
-    ).apply { isAccessible = true }.newInstance(
-        "local-library",
-        currentLocalLibraryOrderBy(),
-        currentLocalLibraryOrderDirection(),
-        LOCAL_LIBRARY_TITLE,
-        localLibraryUsedSize(),
-        localLibraryUsedSize(),
-        listOf(dir),
-        dir,
-    )
+    return com.reamicro.fix.core.HostStorageRecords.localAuth(cls(AUTH_YUN115_CLASS), cls(DIR_CLASS), arrayOf(
+        "local-library", currentLocalLibraryOrderBy(), currentLocalLibraryOrderDirection(), LOCAL_LIBRARY_TITLE,
+        localLibraryUsedSize(), localLibraryUsedSize(), listOf(dir), dir,
+    ))
 }
 
 internal fun WebDavDriveHook.localLibraryDisplayDir(): Any =
@@ -369,125 +349,196 @@ internal fun WebDavDriveHook.updateLocalLibraryAccountAuthFlow() {
     setMutableStateFlowValue(flow, localLibraryAuth())
 }
 
-internal fun WebDavDriveHook.refreshLocalLibrary(path: String = currentLocalLibraryBrowseDir(), force: Boolean = false) {
-    val flow = synchronized(localLibraryLock) { localLibraryFlow } ?: return
-    runCatching {
-        val normalizedPath = localLibraryPathArg(path)
-        if (force) clearLocalLibraryListCache()
-        val items = listLocalLibrary(normalizedPath)
+private data class LocalLibraryRefresh(
+    val sequence: Long,
+    val generation: Long,
+    val path: String,
+    val order: String,
+    val direction: String,
+    val flow: Any,
+)
+
+private fun WebDavDriveHook.localLibraryRefresh(path: String, force: Boolean): LocalLibraryRefresh? {
+    if (storageClosed || storagePaused || !settingsProvider().moduleEnabled) return null
+    val normalized = localLibraryPathArg(path)
+    if (normalized != localLibraryPathArg(currentLocalLibraryBrowseDir())) return null
+    val flow = synchronized(localLibraryLock) { localLibraryFlow } ?: return null
+    if (force) clearLocalLibraryListCache()
+    val sequence = localLibraryRefreshSequence.incrementAndGet()
+    return LocalLibraryRefresh(sequence, localLibraryCacheGeneration.get(), normalized,
+        currentLocalLibraryOrderBy(), currentLocalLibraryOrderDirection(), flow)
+}
+
+private fun WebDavDriveHook.isCurrent(request: LocalLibraryRefresh): Boolean =
+    !storageClosed && !storagePaused && settingsProvider().moduleEnabled &&
+        request.sequence == localLibraryRefreshSequence.get() &&
+        request.generation == localLibraryCacheGeneration.get() &&
+        request.path == localLibraryPathArg(currentLocalLibraryBrowseDir()) &&
+        request.order == currentLocalLibraryOrderBy() && request.direction == currentLocalLibraryOrderDirection() &&
+        synchronized(localLibraryLock) { localLibraryFlow === request.flow }
+
+private fun WebDavDriveHook.loadLocalLibrary(request: LocalLibraryRefresh, current: () -> Boolean) {
+    try {
+        TaskCancellation.checkCurrent()
+        if (!current() || !isCurrent(request)) return
+        val items = listLocalLibrary(request.path)
             .filter { it.isDirectory || isSupportedBookFile(it.name) }
             .map {
+                TaskCancellation.checkCurrent()
                 if (it.isDirectory) newLocalLibraryCloudFolder(it) else newLocalLibraryCloudBook(it)
             }
-        flow.javaClass.methods.first {
-            it.hostNameMatches("setValue") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }.invoke(flow, pagingDataFrom(items))
-        logWebDav("refresh local library path=$normalizedPath items=${items.size}")
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to refresh local library: ${it.stackTraceToString()}")
-        runCatching {
-            flow.javaClass.methods.first { method ->
-                method.hostNameMatches("setValue") && method.parameterTypes.size == 1
-            }.apply { isAccessible = true }.invoke(flow, emptyPagingData())
+        TaskCancellation.checkCurrent()
+        if (!current() || !isCurrent(request)) return
+        val paging = pagingDataFrom(items)
+        postStorageUi {
+            if (current() && isCurrent(request)) {
+                setMutableStateFlowValue(request.flow, paging)
+                logWebDav("refresh local library items=${items.size}")
+            }
+        }
+    } catch (error: Throwable) {
+        TaskCancellation.rethrowIfCancelled(error)
+        HookRuntime.logError("$LOG_PREFIX failed to refresh local library", error)
+    }
+}
+
+internal fun WebDavDriveHook.refreshLocalLibrary(path: String = currentLocalLibraryBrowseDir(), force: Boolean = false) {
+    refreshLocalLibraryAsync(path, force)
+}
+
+internal fun WebDavDriveHook.refreshLocalLibraryAsync(path: String = currentLocalLibraryBrowseDir(), force: Boolean = false) {
+    if (storageClosed || storagePaused) return
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+        postStorageUi { refreshLocalLibraryAsync(path, force) }
+        return
+    }
+    val request = localLibraryRefresh(path, force) ?: return
+    try {
+        localRefreshWorker.submitIf({ isCurrent(request) }) { ticket ->
+            loadLocalLibrary(request, ticket::isCurrent)
+        }
+    } catch (error: Throwable) {
+        if (ModuleResources.accepting && !storageClosed) {
+            HookRuntime.logError("$LOG_PREFIX local library refresh start failed", error)
         }
     }
 }
 
-internal fun WebDavDriveHook.refreshLocalLibraryAsync(path: String = currentLocalLibraryBrowseDir(), force: Boolean = false) {
-    com.reamicro.fix.reload.ModuleResources.thread {
-        refreshLocalLibrary(path, force)
-    }.start()
-}
-
-internal fun WebDavDriveHook.searchLocalLibraryBooks(query: String): List<Any> {
+internal fun WebDavDriveHook.searchLocalLibraryBooks(query: String, extendIndex: Boolean = true): List<Any> {
+    TaskCancellation.checkCurrent()
     val needle = query.trim()
-    if (needle.isBlank()) return emptyList()
+    if (needle.isEmpty()) return emptyList()
+    val generation = localLibraryCacheGeneration.get()
     val rootsKey = localLibraryRootsKey()
     val cached = localLibrarySearchIndex?.takeIf {
-        it.rootsKey == rootsKey && System.currentTimeMillis() - it.createdAtMs <= LOCAL_LIBRARY_SEARCH_INDEX_TTL_MS
+        it.generation == generation && it.rootsKey == rootsKey &&
+            SystemClock.elapsedRealtime() - it.createdAtMs <= LOCAL_LIBRARY_SEARCH_INDEX_TTL_MS
     }
     val entries = cached?.entries ?: buildLocalLibrarySearchIndex(
-        rootsKey = rootsKey,
-        maxDurationMs = LOCAL_LIBRARY_SEARCH_SYNC_BUDGET_MS,
+        rootsKey, LOCAL_LIBRARY_SEARCH_SYNC_BUDGET_MS, generation,
     ).entries
-    ensureLocalLibrarySearchIndexAsync(rootsKey)
-    val results = entries.filter { entry ->
-        isSupportedBookFile(entry.name) &&
-            (
-                entry.name.contains(needle, ignoreCase = true) ||
-                    localLibraryReadablePath(entry).contains(needle, ignoreCase = true)
-                )
+    if (extendIndex) ensureLocalLibrarySearchIndexAsync(rootsKey)
+    checkLocalLibraryGeneration(generation)
+    return entries.filter { entry ->
+        TaskCancellation.checkCurrent()
+        isSupportedBookFile(entry.name) && (entry.name.contains(needle, ignoreCase = true) ||
+            localLibraryReadablePath(entry).contains(needle, ignoreCase = true))
+    }.distinctBy { it.path }.let(::sortLocalLibraryEntries).map {
+        checkLocalLibraryGeneration(generation)
+        newLocalLibraryCloudBook(it)
     }
-    logWebDav("local search query=$needle indexed=${entries.size} results=${results.size}")
-    return results
-        .distinctBy { it.path }
-        .let(::sortLocalLibraryEntries)
-        .map { newLocalLibraryCloudBook(it) }
+}
+
+private fun WebDavDriveHook.checkLocalLibraryGeneration(generation: Long) {
+    TaskCancellation.checkCurrent()
+    if (generation != localLibraryCacheGeneration.get() || storageClosed || !settingsProvider().moduleEnabled) {
+        throw CancellationException("Local library changed")
+    }
 }
 
 internal fun WebDavDriveHook.buildLocalLibrarySearchIndex(
     rootsKey: String,
     maxDurationMs: Long,
+    generation: Long = localLibraryCacheGeneration.get(),
 ): LocalLibrarySearchIndex {
-    val deadline = System.currentTimeMillis() + maxDurationMs
+    checkLocalLibraryGeneration(generation)
+    val deadline = SystemClock.elapsedRealtime() + maxDurationMs
     val queue = java.util.ArrayDeque<String>()
     val visited = mutableSetOf<String>()
     val indexed = mutableListOf<LocalLibraryEntry>()
-    localLibraryRoots().forEach { queue.add(it.path) }
+    var failedDirectory = false
+    val roots = localLibraryRoots()
+    roots.forEach { queue.add(it.path) }
     while (queue.isNotEmpty() && visited.size < LOCAL_LIBRARY_SEARCH_MAX_DIRS) {
-        if (System.currentTimeMillis() >= deadline) break
+        checkLocalLibraryGeneration(generation)
+        if (SystemClock.elapsedRealtime() >= deadline) break
         val path = queue.removeFirst()
         if (!visited.add(path)) continue
-        val entries = runCatching { listLocalLibrary(path) }
-            .onFailure { XposedBridge.log("$LOG_PREFIX local library index skipped $path: ${it.message}") }
-            .getOrDefault(emptyList())
+        val entries = try { listLocalLibrary(path) } catch (error: Throwable) {
+            TaskCancellation.rethrowIfCancelled(error)
+            failedDirectory = true
+            HookRuntime.logError("$LOG_PREFIX local library index directory failed", error)
+            emptyList()
+        }
         entries.forEach { entry ->
+            checkLocalLibraryGeneration(generation)
             when {
                 entry.isDirectory -> queue.add(entry.path)
                 isSupportedBookFile(entry.name) -> indexed.add(entry)
             }
         }
     }
-    val index = LocalLibrarySearchIndex(
-        rootsKey = rootsKey,
-        entries = indexed.distinctBy { it.path },
-        createdAtMs = System.currentTimeMillis(),
-        complete = queue.isEmpty(),
-    )
+    checkLocalLibraryGeneration(generation)
+    val index = LocalLibrarySearchIndex(rootsKey, indexed.distinctBy { it.path },
+        SystemClock.elapsedRealtime(), queue.isEmpty() && !failedDirectory, generation)
     synchronized(localLibrarySearchIndexLock) {
+        checkLocalLibraryGeneration(generation)
         val current = localLibrarySearchIndex
-        if (current == null || current.rootsKey != rootsKey || index.entries.size >= current.entries.size || index.complete) {
+        if (current == null || current.generation != generation || current.rootsKey != rootsKey ||
+            index.entries.size >= current.entries.size || index.complete) {
             localLibrarySearchIndex = index
         }
     }
-    logWebDav("local index roots=${localLibraryRoots().size} scanned=${visited.size} entries=${index.entries.size} complete=${index.complete}")
+    logWebDav("local index roots=${roots.size} scanned=${visited.size} entries=${index.entries.size} complete=${index.complete}")
     return index
 }
 
 internal fun WebDavDriveHook.ensureLocalLibrarySearchIndexAsync(rootsKey: String = localLibraryRootsKey()) {
-    val current = localLibrarySearchIndex
-    if (current != null &&
-        current.rootsKey == rootsKey &&
-        current.complete &&
-        System.currentTimeMillis() - current.createdAtMs <= LOCAL_LIBRARY_SEARCH_INDEX_TTL_MS
-    ) return
+    if (storageClosed || storagePaused || !settingsProvider().moduleEnabled) return
+    val generation = localLibraryCacheGeneration.get()
+    val token = Any()
     synchronized(localLibrarySearchIndexLock) {
-        if (localLibrarySearchIndexBuilding) return
-        localLibrarySearchIndexBuilding = true
+        if (generation != localLibraryCacheGeneration.get() || storageClosed || storagePaused ||
+            !settingsProvider().moduleEnabled) return
+        val current = localLibrarySearchIndex
+        if (current != null && current.generation == generation && current.rootsKey == rootsKey && current.complete &&
+            SystemClock.elapsedRealtime() - current.createdAtMs <= LOCAL_LIBRARY_SEARCH_INDEX_TTL_MS) return
+        if (localLibraryIndexRequest != null) return
+        localLibraryIndexRequest = token
     }
-    com.reamicro.fix.reload.ModuleResources.thread({
-        runCatching {
-            buildLocalLibrarySearchIndex(
-                rootsKey = rootsKey,
-                maxDurationMs = LOCAL_LIBRARY_SEARCH_BACKGROUND_BUDGET_MS,
-            )
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX local library background index failed: ${it.stackTraceToString()}")
+    fun active(): Boolean = !storageClosed && !storagePaused && settingsProvider().moduleEnabled &&
+        generation == localLibraryCacheGeneration.get() &&
+        synchronized(localLibrarySearchIndexLock) { localLibraryIndexRequest === token }
+    fun release() = synchronized(localLibrarySearchIndexLock) {
+        if (localLibraryIndexRequest === token) localLibraryIndexRequest = null
+    }
+    try {
+        val accepted = localIndexWorker.submitIf(::active) { ticket ->
+            try {
+                buildLocalLibrarySearchIndex(rootsKey, LOCAL_LIBRARY_SEARCH_BACKGROUND_BUDGET_MS, generation)
+                if (ticket.isCurrent() && active()) homeSearch.localChanged(generation, indexReady = true)
+            } catch (error: Throwable) {
+                TaskCancellation.rethrowIfCancelled(error)
+                HookRuntime.logError("$LOG_PREFIX local library background index failed", error)
+            } finally { release() }
         }
-        synchronized(localLibrarySearchIndexLock) {
-            localLibrarySearchIndexBuilding = false
+        if (accepted == null) release()
+    } catch (error: Throwable) {
+        release()
+        if (ModuleResources.accepting && !storageClosed) {
+            HookRuntime.logError("$LOG_PREFIX local library index start failed", error)
         }
-    }, "ReaMicroLocalLibraryIndex").start()
+    }
 }
 
 internal fun WebDavDriveHook.localLibraryDirTree(path: String): List<Any> {
@@ -519,21 +570,17 @@ internal fun WebDavDriveHook.updateLocalLibraryStorageTrees(path: String) {
 internal fun WebDavDriveHook.updateLocalLibraryStorageTree(viewModel: Any, path: String) {
     runCatching {
         val tree = localLibraryDirTree(path)
-        val updateMethod = viewModel.javaClass.superclass?.methods?.firstOrNull {
-            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-        } ?: viewModel.javaClass.methods.first {
-            it.hostNameMatches("updateUiState") && it.parameterTypes.size == 1
-        }
+        val updateMethod = requireNotNull(com.reamicro.fix.core.HostStorageBindings.data).method("update")
         updateMethod.apply { isAccessible = true }.invoke(
             viewModel,
-            functionProxy("LocalLibraryStorageTreeState", FUNCTION1_CLASS) { args ->
+            functionProxy("LocalLibraryStorageTreeState", FUNCTION1_CLASS, fallback = { args -> args?.firstOrNull() }) { args ->
                 val state = args?.getOrNull(0) ?: return@functionProxy args?.getOrNull(0)
                 storageStateWithTree(state, tree)
             },
         )
         logWebDav("update local library tree path=$path size=${tree.size}")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to update local library storage tree: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to update local library storage tree: ${it.stackTraceToString()}")
     }
 }
 
@@ -547,18 +594,7 @@ internal fun WebDavDriveHook.newLocalLibraryCloudFolder(entry: LocalLibraryEntry
 
 internal fun WebDavDriveHook.newLocalLibraryCloudBook(entry: LocalLibraryEntry): Any {
     val url = localLibraryBookUrl(entry.path)
-    return cls(CLOUD_BOOK_CLASS).getDeclaredConstructor(
-        String::class.java,
-        String::class.java,
-        java.lang.Integer.TYPE,
-        String::class.java,
-        java.lang.Long.TYPE,
-        java.lang.Long.TYPE,
-        String::class.java,
-        String::class.java,
-        cls(FLOW_CLASS),
-        cls(FLOW_CLASS),
-    ).apply { isAccessible = true }.newInstance(
+    return com.reamicro.fix.core.HostStorageRecords.book(cls(CLOUD_BOOK_CLASS), cls(FLOW_CLASS), arrayOf(
         entry.path,
         entry.name,
         BACKUP_TYPE_LOCAL_LIBRARY,
@@ -569,7 +605,7 @@ internal fun WebDavDriveHook.newLocalLibraryCloudBook(entry: LocalLibraryEntry):
         "",
         webDavLocalBookFlow(url),
         webDavWorkFlow(entry.path),
-    )
+    ))
 }
 
 internal fun WebDavDriveHook.currentLocalLibraryBrowseDir(): String =
@@ -591,6 +627,7 @@ internal fun WebDavDriveHook.saveLocalLibraryBrowseDir(path: String) {
     localLibraryPrefs(activityProvider())?.edit()
         ?.putString(KEY_LOCAL_BROWSE_DIR, localLibraryPathArg(path))
         ?.apply()
+    invalidateLocalLibraryRefresh()
 }
 
 internal fun WebDavDriveHook.saveLocalLibraryOrderBy(value: String) {
@@ -604,6 +641,7 @@ internal fun WebDavDriveHook.saveLocalLibraryOrderBy(value: String) {
     localLibraryPrefs(activityProvider())?.edit()
         ?.putString(KEY_LOCAL_ORDER_BY, normalized)
         ?.apply()
+    invalidateLocalLibraryRefresh()
 }
 
 internal fun WebDavDriveHook.saveLocalLibraryOrderDirection(value: String) {
@@ -611,6 +649,14 @@ internal fun WebDavDriveHook.saveLocalLibraryOrderDirection(value: String) {
     localLibraryPrefs(activityProvider())?.edit()
         ?.putString(KEY_LOCAL_ORDER_DIRECTION, normalized)
         ?.apply()
+    invalidateLocalLibraryRefresh()
+}
+
+private fun WebDavDriveHook.invalidateLocalLibraryRefresh() {
+    val sequence = localLibraryRefreshSequence.incrementAndGet()
+    if (localRefreshWorkerState.isInitialized()) {
+        localRefreshWorker.cancelIf { localLibraryRefreshSequence.get() == sequence }
+    }
 }
 
 internal fun WebDavDriveHook.localLibraryFolderUris(): List<String> =
@@ -626,11 +672,20 @@ internal fun WebDavDriveHook.saveLocalLibraryFolderUris(uris: List<String>) {
     localLibraryPrefs(activityProvider())?.edit()
         ?.putString(KEY_LOCAL_FOLDER_URIS, uris.distinct().joinToString("\n"))
         ?.apply()
+    clearLocalLibraryListCache()
 }
 
 internal fun WebDavDriveHook.clearLocalLibraryListCache() {
-    localLibraryListCache.clear()
-    localLibrarySearchIndex = null
+    val generation = synchronized(localLibrarySearchIndexLock) {
+        localLibraryListCache.clear()
+        localLibrarySearchIndex = null
+        localLibraryIndexRequest = null
+        localLibraryCacheGeneration.incrementAndGet()
+    }
+    if (localIndexWorkerState.isInitialized()) {
+        localIndexWorker.cancelIf { synchronized(localLibrarySearchIndexLock) { localLibraryIndexRequest == null } }
+    }
+    if (homeSearchState.isInitialized()) homeSearch.localChanged(generation, indexReady = false)
 }
 
 internal fun WebDavDriveHook.localLibraryRootsKey(): String =
@@ -639,7 +694,6 @@ internal fun WebDavDriveHook.localLibraryRootsKey(): String =
 internal fun WebDavDriveHook.addLocalLibraryFolder(uri: Uri) {
     val value = uri.toString()
     if (value.isBlank()) return
-    clearLocalLibraryListCache()
     saveLocalLibraryFolderUris(localLibraryFolderUris() + value)
     saveLocalLibraryBrowseDir(LOCAL_LIBRARY_ROOT_PATH)
     synchronized(localLibraryLock) {
@@ -650,7 +704,6 @@ internal fun WebDavDriveHook.addLocalLibraryFolder(uri: Uri) {
 }
 
 internal fun WebDavDriveHook.removeLocalLibraryFolder(uriString: String) {
-    clearLocalLibraryListCache()
     val next = localLibraryFolderUris().filter { it != uriString }
     saveLocalLibraryFolderUris(next)
     saveLocalLibraryBrowseDir(LOCAL_LIBRARY_ROOT_PATH)
@@ -681,7 +734,7 @@ internal fun WebDavDriveHook.launchLocalLibraryFolderPicker() {
         }
         activity.startActivityForResult(intent, REQUEST_LOCAL_LIBRARY_DIR)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX failed to launch local library folder picker: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to launch local library folder picker: ${it.stackTraceToString()}")
         activity.toast("无法打开目录选择")
     }
 }
@@ -697,6 +750,7 @@ internal fun WebDavDriveHook.localLibraryUsedSize(): Long =
 internal fun WebDavDriveHook.localLibraryRoots(): List<LocalLibraryEntry> {
     val context = currentContext() ?: return emptyList()
     return localLibraryFolderUris().mapNotNull { raw ->
+        TaskCancellation.checkCurrent()
         val treeUri = runCatching { Uri.parse(raw) }.getOrNull() ?: return@mapNotNull null
         val docId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return@mapNotNull null
         val documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
@@ -727,60 +781,48 @@ internal fun WebDavDriveHook.sortLocalLibraryEntries(entries: List<LocalLibraryE
     )
 
 internal fun WebDavDriveHook.listLocalLibrary(path: String): List<LocalLibraryEntry> {
+    val generation = localLibraryCacheGeneration.get()
+    checkLocalLibraryGeneration(generation)
     val normalized = localLibraryPathArg(path)
-    if (normalized == LOCAL_LIBRARY_ROOT_PATH) return sortLocalLibraryEntries(localLibraryRoots())
-    localLibraryListCache[normalized]?.takeIf {
-        System.currentTimeMillis() - it.createdAtMs <= LOCAL_LIBRARY_LIST_CACHE_TTL_MS
-    }?.let {
-        return sortLocalLibraryEntries(it.entries)
+    if (normalized == LOCAL_LIBRARY_ROOT_PATH) {
+        return sortLocalLibraryEntries(localLibraryRoots()).also { checkLocalLibraryGeneration(generation) }
     }
-    val context = currentContext() ?: return emptyList()
-    val decoded = decodeLocalLibraryPath(normalized) ?: return emptyList()
+    localLibraryListCache[normalized]?.takeIf {
+        it.generation == generation && SystemClock.elapsedRealtime() - it.createdAtMs <= LOCAL_LIBRARY_LIST_CACHE_TTL_MS
+    }?.let { return sortLocalLibraryEntries(it.entries).also { checkLocalLibraryGeneration(generation) } }
+    val context = currentContext() ?: error("Android context not available")
+    val decoded = decodeLocalLibraryPath(normalized) ?: error("Invalid local library folder")
     val treeUri = Uri.parse(decoded.treeUri)
     val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, decoded.documentId)
-    val resolver = context.contentResolver
     val projection = arrayOf(
-        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-        DocumentsContract.Document.COLUMN_MIME_TYPE,
-        DocumentsContract.Document.COLUMN_SIZE,
+        DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+        DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE,
         DocumentsContract.Document.COLUMN_LAST_MODIFIED,
     )
-    return runCatching {
-        resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-            val docIdIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-            val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
-            val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
-            val modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-            buildList {
-                while (cursor.moveToNext()) {
-                    val docId = cursor.stringAt(docIdIndex)
-                    val name = cursor.stringAt(nameIndex)
-                    if (docId.isBlank() || name.isBlank()) continue
-                    if (name.startsWith(".")) continue
-                    val mime = cursor.stringAt(mimeIndex)
-                    val isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR
-                    add(
-                        LocalLibraryEntry(
-                            name = name,
-                            path = encodeLocalLibraryPath(decoded.treeUri, docId),
-                            treeUri = decoded.treeUri,
-                            documentId = docId,
-                            isDirectory = isDirectory,
-                            size = cursor.longAt(sizeIndex),
-                            updatedAt = cursor.longAt(modifiedIndex).takeIf { it > 0L } ?: System.currentTimeMillis(),
-                        ),
-                    )
-                }
+    val entries = context.contentResolver.cancellableQuery(childrenUri, projection) { result ->
+        val cursor = requireNotNull(result) { "本地书库目录暂不可用" }
+        val docIdIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+        val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        val mimeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+        val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+        val modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+        buildList {
+            while (cursor.moveToNext()) {
+                checkLocalLibraryGeneration(generation)
+                val docId = cursor.stringAt(docIdIndex)
+                val name = cursor.stringAt(nameIndex)
+                if (docId.isBlank() || name.isBlank() || name.startsWith(".")) continue
+                add(LocalLibraryEntry(name, encodeLocalLibraryPath(decoded.treeUri, docId), decoded.treeUri, docId,
+                    cursor.stringAt(mimeIndex) == DocumentsContract.Document.MIME_TYPE_DIR,
+                    cursor.longAt(sizeIndex), cursor.longAt(modifiedIndex).takeIf { it > 0L } ?: System.currentTimeMillis()))
             }
-        }.orEmpty()
-    }.getOrElse {
-        XposedBridge.log("$LOG_PREFIX failed to list local library $normalized: ${it.stackTraceToString()}")
-        emptyList()
-    }.also {
-        localLibraryListCache[normalized] = LocalLibraryListCache(it, System.currentTimeMillis())
-    }.let(::sortLocalLibraryEntries)
+        }
+    }
+    synchronized(localLibrarySearchIndexLock) {
+        checkLocalLibraryGeneration(generation)
+        localLibraryListCache[normalized] = LocalLibraryListCache(entries, SystemClock.elapsedRealtime(), generation)
+    }
+    return sortLocalLibraryEntries(entries)
 }
 
 internal fun WebDavDriveHook.localLibraryEntry(path: String): LocalLibraryEntry? {

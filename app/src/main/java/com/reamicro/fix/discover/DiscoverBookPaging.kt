@@ -41,6 +41,7 @@ internal fun loadDiscoverBookPage(
         if (isCancelled()) return null
         val next = sourcePage + 1
         val result = runCatching { fetch(next) }.getOrElse {
+            com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
             DiscoverLoadState.Failed(it.message.orEmpty().ifBlank { it.javaClass.simpleName })
         }
         if (isCancelled()) return null

@@ -50,7 +50,6 @@
 - 在阅微原有关联搜索基础上补充更多关联搜索源，并按「关联补全-源名」显示结果。
 - 支持按源启用/停用关联补全搜索源。
 - 恢复图书详情页关联操作入口，支持取消关联、重新关联和封面修复。
-- 支持手动编辑关联数据入口（需要对应功能源存在）。
 
 ### WebDAV 与本地书库
 
@@ -170,8 +169,8 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 
 改动前值得知道的两条：
 
-- 宿主逻辑类名、混淆映射、原生 ABI 和扫描规则分别由 `HostClasses.kt`、
-  `app/src/main/assets/host-profiles/` 及相应兼容代码维护；宿主升级并非只改一个类名文件。
+- 宿主通过代码中的语义查询定位。`HostReaderFeatures` 按功能查找阅读器方法，`HostSemanticQueries` 为既有逻辑接口查询描述符；`HostQuerySession` 共用桥接与有上限的当前宿主缓存。
+- `app/src/main/assets/host-legacy/` 只冻结正式版 2.3.3 的旧 ABI 兼容资产。2.3.4 B1/B2 不再打包版本映射；查询成功不代表旧原生 ABI 自动兼容。
 - 模块启动会打印 `hook installed N/M, failed: [...]`，设置页「关于 → 模块自检」
   能看到明细。宿主升级后先看这一行定位掉线的 hook。
 
@@ -179,15 +178,15 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 
 - 入口为阅微「设置 → 补全计划 → 关于补全 → API102 热重载」，需要框架服务支持 API102。
 - 当前原地界面恢复只验证了阅微正式版 2.3.3：保留进程、Activity 和窗口，刷新根界面并返回首页，不保持深层页面。
-- 阅微 2.3.4 beta 使用独立的 `2.3.4-b1` 适配配置；更新模块后使用“重启阅微”，不需要重启手机。旧手动编辑功能源不能直接沿用，需另行适配。
+- 阅微 2.3.4 B1/B2 使用当前 DEX 语义查询；更新模块后使用“重启阅微”。阅读器控件和翻页动作已验证三宿主的反射契约，依赖旧原生 ABI 的其他功能仍需逐项迁移。
 - 任务或扫描未结束、外部功能源缺少退出协议，或者本进程使用过尚不能安全卸载的模块编辑器/独立 Compose 面板时，会拒绝热重载。此时使用原“重启阅微”。
 - “重启阅微”仍是真正的进程重启，和热重载不是同一个操作；正常重启不显示等待卡片，失败时保留提示。
-- 本地忽略的外部源码和 `.rmsource` 不随 Git 提交发布。手动功能源需另行适配退出协议并重建；`tools/enable-manual-hot-reload.py` 仅适用于匹配的本地源码，不能把独立发布的旧源视为自动兼容。
+- 本地忽略的外部源码和 `.rmsource` 不随 Git 提交发布。外部功能源需适配退出协议并重新构建，独立发布的旧源不自动兼容。
 
 ### 本地文件清理
 
 - `build/`、`app/build/`、编辑器子项目的 `build/`、项目 Gradle/Kotlin 缓存和 Python 字节码可以重新生成；删除前应停止对应构建并保留需要的 APK/测试报告。
-- `signing/`、`local.properties`、`external-sources/src/`、`source-files/` 和 `tools/host-mappings/` 不是临时缓存，不应批量清除。
+- `signing/`、`local.properties`、`external-sources/src/` 和 `source-files/` 不是临时缓存，不应批量清除。
 - 一次性排查脚本、截图、设备导出数据及旧审计报告不属于公开发布内容；清理时先归档到项目外，不使用无差别的 `git clean -xfd`。
 
 ## 注意事项

@@ -5,7 +5,6 @@ import android.app.Application
 import android.content.ComponentCallbacks2
 import android.content.res.Configuration
 import android.os.Bundle
-import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import com.reamicro.fix.association.model.BookSource
@@ -21,13 +20,13 @@ import com.reamicro.fix.cloud.api.mirrorToModule
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.XposedModuleSettings
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.AtomicLong
 
 class ReaMicroHookEntry {
-    private var currentActivityRef: WeakReference<Activity>? = null
+    @Volatile private var currentActivityRef: WeakReference<Activity>? = null
     @Volatile private var currentActivityResumed: Boolean = false
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
 
@@ -38,18 +37,103 @@ class ReaMicroHookEntry {
     private var bookshelfCompletion: BookshelfCompletionHook? = null
     private var coverFade: CoverFadeHook? = null
     private var bookBackupScroll: BookBackupScrollHook? = null
-    private var attachReloadedActivity: ((Activity) -> Unit)? = null
+    private var attachReloadedActivity: ((Activity, Boolean) -> Unit)? = null
+    private var attachStartedActivity: ((Activity, Boolean) -> Unit)? = null
+    @Volatile private var readerAutoPage: ReaderAutoPageHook? = null
+    @Volatile private var webDavDrive: WebDavDriveHook? = null
+    @Volatile private var readerImportOverwrite: ReaderImportOverwriteHook? = null
+    @Volatile private var manualAssociationUi: ManualAssociationUiHook? = null
+    @Volatile private var disabledExecutionSyncPending = false
 
-    internal fun attachAfterHotReload(activity: Activity) {
-        requireNotNull(attachReloadedActivity).invoke(activity)
+    init {
+        moduleSettings.onModuleExecutionInvalidated = {
+            listOf<() -> Unit>(
+                { webDavDrive?.invalidateExecution() },
+                { readerAutoPage?.invalidateExecution() },
+                { readerImportOverwrite?.onModuleEnabledChanged(false) },
+                { manualAssociationUi?.invalidateExecution() },
+                YouShuWebSearchBridge::invalidateExecution,
+                YouShuSourceRequests::invalidateAll,
+            ).forEach { invalidate ->
+                runCatching(invalidate).onFailure { HookRuntime.logError("$LOG_PREFIX execution cancellation failed", it) }
+            }
+        }
+        moduleSettings.onModuleEnabledChanged = { enabled ->
+            listOf<() -> Unit>(
+                { webDavDrive?.onModuleEnabledChanged(enabled) },
+                { readerAutoPage?.onModuleEnabledChanged(enabled) },
+                { if (enabled) readerImportOverwrite?.onModuleEnabledChanged(true) },
+                { manualAssociationUi?.onModuleEnabledChanged(enabled) },
+                { YouShuWebSearchBridge.onModuleEnabledChanged(enabled) },
+            ).forEach { notify ->
+                runCatching(notify).onFailure { HookRuntime.logError("$LOG_PREFIX feature activation update failed", it) }
+            }
+            if (!enabled) {
+                heartbeatHandler.removeCallbacks(heartbeatRunnable)
+                cancelActivityUi()
+                HostSettingsDialogs.dismissActive()
+                HostYouShuLoginDialog.dismissActive()
+            }
+        }
+        // This also covers generations installed while the master switch is off.
+        com.reamicro.fix.reload.ModuleResources.cleanup {
+            moduleSettings.closeForReload()
+            currentActivityRef = null
+            currentActivityResumed = false
+            attachStartedActivity = null
+            attachReloadedActivity = null
+            readerAutoPage = null
+            webDavDrive = null
+            readerImportOverwrite = null
+            manualAssociationUi = null
+            disabledExecutionSyncPending = false
+        }
+    }
+
+    internal fun attachStartupContext(context: android.content.Context) {
+        com.reamicro.fix.online.OnlineParserContext.attach(context)
+        moduleSettings.attachContext(context)
+        synchronizeDisabledExecution(context)
+    }
+
+    internal fun observeStartupActivity(activity: Activity, resumed: Boolean) {
+        com.reamicro.fix.online.OnlineParserContext.attach(activity)
+        setCurrentActivity(activity)
+        currentActivityResumed = resumed
+        moduleSettings.attachContext(activity)
+        if (resumed) {
+            synchronizeDisabledExecution(activity)
+            ReaMicroSettingsHook.activeInstanceOrNull()?.finishActivationRestart(activity)
+        }
+    }
+
+    private fun synchronizeDisabledExecution(context: android.content.Context) {
+        if (moduleSettings.snapshot().moduleEnabled || disabledExecutionSyncPending ||
+            com.reamicro.fix.cloud.local.LocalTaskMirror.activationConfirmed(false)) return
+        disabledExecutionSyncPending = true
+        com.reamicro.fix.cloud.local.LocalTaskMirror.setModuleEnabled(context, false) { result ->
+            disabledExecutionSyncPending = false
+            if (!result.success) HookRuntime.logError("$LOG_PREFIX disabled execution handoff will retry on resume")
+        }
+    }
+
+    internal fun attachAfterStartup(activity: Activity, resumed: Boolean) {
+        requireNotNull(attachStartedActivity).invoke(activity, resumed)
+    }
+
+    internal fun attachAfterHotReload(activity: Activity, resumed: Boolean = true) {
+        requireNotNull(attachReloadedActivity).invoke(activity, resumed)
     }
     @Volatile private var memoryCallbacksInstalled: Boolean = false
     @Volatile private var apiSettingsMirrored: Boolean = false
     private val heartbeatHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
+    private val activityUiHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
+    private val activityUiGeneration = AtomicLong(0L)
+    @Volatile private var globalFontRefreshPending = false
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             val activity = currentActivityRef?.get()
-            if (activity != null && currentActivityResumed) {
+            if (activity != null && currentActivityResumed && moduleSettings.snapshot().moduleEnabled) {
                 val appContext = activity.applicationContext
                 CloudTaskNotificationPoller.poll(appContext, source = "foreground-heartbeat")
 
@@ -60,9 +144,28 @@ class ReaMicroHookEntry {
     }
 
     fun handleLoadedPackage(packageName: String, classLoader: ClassLoader) {
-        if (packageName !in REAMICRO_PACKAGES) return
-        XposedBridge.log("$LOG_PREFIX loaded for $packageName")
-        YouShuWebSearchBridge.attach { currentActivityRef?.get() }
+        if (!com.reamicro.fix.core.HostPackages.contains(packageName)) return
+        HookRuntime.log("$LOG_PREFIX loaded for $packageName")
+        if (!moduleSettings.snapshot().moduleEnabled) {
+            installFeature("ReaMicroSettingsHook") {
+                ReaMicroSettingsHook(classLoader, activityProvider, moduleSettings).install()
+            }
+            attachStartedActivity = { activity, resumed ->
+                com.reamicro.fix.reload.HostGeneration.attach(activity.application)
+                observeStartupActivity(activity, resumed)
+            }
+            attachReloadedActivity = { activity, resumed ->
+                com.reamicro.fix.reload.HostGeneration.attach(activity.application)
+                observeStartupActivity(activity, resumed)
+            }
+            HookRuntime.logAlways("$LOG_PREFIX module disabled; only activation settings installed")
+            logHookInstallReport()
+            return
+        }
+        YouShuWebSearchBridge.attach(activityProvider) { moduleSettings.snapshot().moduleEnabled }
+        installFeature("HostSourceBrowserBridge") {
+            check(HostSourceBrowserBridge.install(classLoader, activityProvider)) { "宿主书源网页入口不可用" }
+        }
         val readerHook = ReaderHook(
             classLoader = classLoader,
             activityProvider = activityProvider,
@@ -72,18 +175,18 @@ class ReaMicroHookEntry {
         )
         installFeature("ReaderHook", readerHook::install)
         installFeature("ReaderAutoPageHook") {
-            ReaderAutoPageHook(
+            readerAutoPage = ReaderAutoPageHook(
                 classLoader = classLoader,
                 activityProvider = activityProvider,
                 settingsProvider = settingsProvider,
-            ).install()
+            ).also { it.install() }
         }
         HookInstallReport.installResult(ENTRY_FEATURE_ID, "ReaderImportOverwriteHook") {
-            ReaderImportOverwriteHook(
+            readerImportOverwrite = ReaderImportOverwriteHook(
                 classLoader = classLoader,
                 activityProvider = activityProvider,
                 settingsProvider = settingsProvider,
-            ).install()
+            ).also { it.install() }
         }
         val globalFontHook = ReaMicroGlobalFontHook(
             classLoader = classLoader,
@@ -129,6 +232,14 @@ class ReaMicroHookEntry {
                 settingsProvider = settingsProvider,
             ).install()
         }
+        installFeature("ManualEditUnlockHook") {
+            ManualEditUnlockHook(activityProvider, moduleSettings).install()
+        }
+        val manualAssociationUiHook = ManualAssociationUiHook(classLoader, activityProvider, settingsProvider)
+        manualAssociationUi = manualAssociationUiHook
+        if (manualAssociationUiHook.install()) {
+            installedFeatureIds += "manual-edit"
+        }
         val profileBackgroundHook = ProfileBackgroundHook(
             classLoader = classLoader,
             activityProvider = activityProvider,
@@ -141,27 +252,35 @@ class ReaMicroHookEntry {
             activityProvider = activityProvider,
         )
         installFeature("BookDetailsAssociationActionHook", bookDetailsAssociationActionHook::install)
-        if (com.reamicro.fix.core.HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4")) {
-            installFeature("BookDetailsAssociationBridge") {
-                B2BookDetailsAssociationBridge(classLoader, activityProvider, settingsProvider,
-                    bookDetailsAssociationActionHook::requestCoverFixFromBarcode).install()
-            }
+        installFeature("BookDetailsAssociationBridge") {
+            HostBookDetailsAssociationBridge(classLoader, activityProvider, settingsProvider,
+                bookDetailsAssociationActionHook::requestCoverFixFromBarcode).install()
         }
         installFeature("BookOverviewImageSelectionHook") {
-            BookOverviewImageSelectionHook(
+            HookRuntime.withFeatureGate({ moduleSettings.snapshot().bookImageSelectionEnabled }) { BookOverviewImageSelectionHook(
                 classLoader = classLoader,
                 activityProvider = activityProvider,
                 requestCoverFix = bookDetailsAssociationActionHook::requestCoverFixForCurrentDetails,
-            ).install()
+                enabledProvider = {
+                    val snapshot = moduleSettings.snapshot()
+                    snapshot.moduleEnabled && snapshot.bookImageSelectionEnabled
+                },
+            ).install() }
         }
         installFeature("TravelingMerchantEndTimeHook") {
-            TravelingMerchantEndTimeHook(classLoader).install()
+            HookRuntime.withFeatureGate({ moduleSettings.snapshot().merchantEndTimeEnabled }) {
+                TravelingMerchantEndTimeHook(classLoader).install()
+            }
         }
         installFeature("LocalExportHook") {
-            LocalExportHook(
+            HookRuntime.withFeatureGate({ moduleSettings.snapshot().bookLocalExportEnabled }) { LocalExportHook(
                 classLoader = classLoader,
                 activityProvider = activityProvider,
-            ).install()
+                enabledProvider = {
+                    val snapshot = moduleSettings.snapshot()
+                    snapshot.moduleEnabled && snapshot.bookLocalExportEnabled
+                },
+            ).install() }
         }
         val webDavDriveHook = WebDavDriveHook(
             classLoader = classLoader,
@@ -169,28 +288,30 @@ class ReaMicroHookEntry {
             settingsProvider = settingsProvider,
             globalTypefaceProvider = globalFontHook::globalAndroidTypeface,
         )
+        webDavDrive = webDavDriveHook
         installFeature("WebDavDriveHook", webDavDriveHook::install)
-        if (com.reamicro.fix.core.HostSymbols.usesReleaseLayout) {
-            installFeature("CoverFadeHook") {
-                coverFade = CoverFadeHook(classLoader, settingsProvider).also { it.install() }
-            }
-            installFeature("BookBackupScrollHook") {
-                bookBackupScroll = BookBackupScrollHook(classLoader, settingsProvider).also { it.install() }
-            }
-            installFeature("HomeDefaultPageHook") {
+        installFeature("WebDavSyncHook") {
+            WebDavSyncHook(classLoader, activityProvider, settingsProvider, webDavDriveHook).install()
+        }
+        installFeature("CoverFadeHook") {
+            coverFade = CoverFadeHook(classLoader, settingsProvider).also { it.install() }
+        }
+        installFeature("BookBackupScrollHook") {
+            bookBackupScroll = BookBackupScrollHook(classLoader, settingsProvider).also { it.install() }
+        }
+        installFeature("HomeDefaultPageHook") {
+            HookRuntime.withFeatureGate({ moduleSettings.snapshot().homeDefaultPageEnabled }) {
                 HomeDefaultPageHook(classLoader, settingsProvider).install()
             }
-            installFeature("WebDavSyncHook") {
-                WebDavSyncHook(classLoader, activityProvider, settingsProvider, webDavDriveHook).install()
-            }
-            installFeature("BookshelfCompletionHook") {
-                bookshelfCompletion = BookshelfCompletionHook(classLoader, activityProvider, settingsProvider, webDavDriveHook)
-                    .also { it.install() }
-            }
         }
-
+        installFeature("BookshelfCompletionHook") {
+            bookshelfCompletion = BookshelfCompletionHook(classLoader, activityProvider, settingsProvider, webDavDriveHook)
+                .also { it.install() }
+        }
         installFeature("DiscoverCardHook") {
-            DiscoverCardHook(classLoader).install()
+            HookRuntime.withFeatureGate({ moduleSettings.snapshot().onlineDiscoverEnabled }) {
+                DiscoverCardHook(classLoader).install()
+            }
         }
         installFeature("MainActivity") {
             hookMainActivity(
@@ -206,42 +327,69 @@ class ReaMicroHookEntry {
         logHookInstallReport()
     }
 
-    private fun installFeature(feature: String, block: () -> Unit) {
+    private fun installFeature(feature: String, block: () -> Any?) {
         HookInstallReport.install(ENTRY_FEATURE_ID, feature, block)
     }
 
     private fun logHookInstallReport() {
-        XposedBridge.logAlways("$LOG_PREFIX ${HookInstallReport.summaryLine()}")
+        HookRuntime.logAlways("$LOG_PREFIX ${HookInstallReport.summaryLine()}")
         HookInstallReport.failureDetails().forEach { detail ->
-            XposedBridge.logError("$LOG_PREFIX hook install failure: $detail")
+            HookRuntime.logError("$LOG_PREFIX hook install failure: $detail")
         }
     }
 
     private fun disableSearchSource(source: BookSource, message: String) {
         val groupId = ModuleSettings.searchSourceGroupId(source) ?: source.id
         moduleSettings.setAssociationSearchSourceEnabled(groupId, false)
-        val activity = currentActivityRef?.get()
-        if (activity != null) {
-            activity.runOnUiThread {
-                Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
-            }
+        postCurrentActivityUi { activity ->
+            Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
         }
-        XposedBridge.log("$LOG_PREFIX ${source.displayName} disabled: $message")
+        HookRuntime.log("$LOG_PREFIX ${source.displayName} disabled: $message")
     }
 
     private fun refreshCurrentActivityForGlobalFont() {
-        val activity = currentActivityRef?.get() ?: return
-        activity.runOnUiThread {
-            activity.window?.decorView?.postDelayed({
-                if (activity.isFinishing || activity.isDestroyed) return@postDelayed
-                runCatching {
-                    activity.recreate()
-                    XposedBridge.log("$LOG_PREFIX global UI font activity recreated")
-                }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX global UI font activity recreate failed: ${it.stackTraceToString()}")
-                }
-            }, GLOBAL_FONT_RECREATE_DELAY_MS)
+        globalFontRefreshPending = true
+        scheduleGlobalFontRecreate()
+    }
+
+    private fun scheduleGlobalFontRecreate() {
+        if (!globalFontRefreshPending || !currentActivityResumed) return
+        postCurrentActivityUi(GLOBAL_FONT_RECREATE_DELAY_MS) { activity ->
+            if (!globalFontRefreshPending) return@postCurrentActivityUi
+            globalFontRefreshPending = false
+            runCatching {
+                activity.recreate()
+                HookRuntime.log("$LOG_PREFIX global UI font activity recreated")
+            }.onFailure {
+                HookRuntime.log("$LOG_PREFIX global UI font activity recreate failed: ${it.stackTraceToString()}")
+            }
         }
+    }
+
+    private fun setCurrentActivity(activity: Activity) {
+        if (currentActivityRef?.get() === activity) return
+        cancelActivityUi()
+        currentActivityRef = WeakReference(activity)
+        currentActivityResumed = false
+    }
+
+    private fun cancelActivityUi() {
+        activityUiGeneration.incrementAndGet()
+        activityUiHandler.removeCallbacksAndMessages(null)
+    }
+
+    private fun postCurrentActivityUi(delayMillis: Long = 0L, action: (Activity) -> Unit): Boolean {
+        if (!currentActivityResumed) return false
+        val owner = currentActivityRef?.get() ?: return false
+        val ownerRef = WeakReference(owner)
+        val generation = activityUiGeneration.get()
+        return activityUiHandler.postDelayed({
+            val activity = ownerRef.get() ?: return@postDelayed
+            if (currentActivityRef?.get() !== activity || !currentActivityResumed ||
+                generation != activityUiGeneration.get() || activity.isFinishing || activity.isDestroyed
+            ) return@postDelayed
+            action(activity)
+        }, delayMillis)
     }
 
     private fun hookMainActivity(
@@ -253,64 +401,85 @@ class ReaMicroHookEntry {
         readerDialogueHighlightHook: ReaderDialogueHighlightHook,
         bookDetailsAssociationActionHook: BookDetailsAssociationActionHook,
     ) {
-        attachReloadedActivity = { activity ->
-            currentActivityRef = WeakReference(activity)
-            currentActivityResumed = true
+        val startedActivities = java.util.Collections.newSetFromMap(java.util.WeakHashMap<Activity, Boolean>())
+        fun attachContext(activity: Activity) {
+            com.reamicro.fix.reload.HostGeneration.attach(activity.application)
+            webDavDriveHook.onHostActivityCreated(activity)
+            readerHook.onHostActivityCreated(activity)
+            readerAutoPage?.onHostActivityCreated(activity)
+            setCurrentActivity(activity)
             moduleSettings.attachContext(activity)
+            mirrorApiSettings(activity)
             installExternalFeatures(classLoader)
-            installMemoryCallbacks(activity.application, readerHook, readerFontCompletionHook, readerDialogueHighlightHook,
-                profileBackgroundHook, bookDetailsAssociationActionHook)
+            installMemoryCallbacks(activity.application, webDavDriveHook, readerHook, readerFontCompletionHook,
+                readerDialogueHighlightHook, profileBackgroundHook, bookDetailsAssociationActionHook)
+        }
+        fun finishCreation(activity: Activity) {
+            if (!startedActivities.add(activity)) return
+            RotationOrientationController.apply(activity, moduleSettings.snapshot())
+            webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
             bookshelfCompletion?.onHostStarted()
             coverFade?.onHostStarted()
             bookBackupScroll?.onHostStarted()
+            profileBackgroundHook.refreshRandomImageFor(activity)
+            ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
+            CloudTaskNotificationPoller.poll(activity.applicationContext)
+            com.reamicro.fix.migration.LegacyAndroidWakeCleanup.runForHost(activity.applicationContext)
+            com.reamicro.fix.cloud.local.LocalTaskMirror.push(activity.applicationContext)
             startForegroundHeartbeat()
         }
+        attachStartedActivity = { activity, resumed ->
+            attachContext(activity)
+            currentActivityResumed = resumed
+            finishCreation(activity)
+            if (resumed) {
+                webDavDriveHook.onHostActivityResumed(activity)
+                readerHook.onHostActivityResumed(activity)
+                readerAutoPage?.onHostActivityResumed(activity)
+                scheduleGlobalFontRecreate()
+                DexKitUpdateScan.onResume(activity)
+            }
+        }
+        attachReloadedActivity = { activity, resumed ->
+            attachContext(activity)
+            currentActivityResumed = resumed
+            if (resumed) {
+                webDavDriveHook.onHostActivityResumed(activity)
+                readerHook.onHostActivityResumed(activity)
+                readerAutoPage?.onHostActivityResumed(activity)
+                scheduleGlobalFontRecreate()
+                startForegroundHeartbeat()
+            }
+            bookshelfCompletion?.onHostStarted()
+            coverFade?.onHostStarted()
+            bookBackupScroll?.onHostStarted()
+        }
         HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityCreate") {
-            val mainActivityClass = XposedHelpers.findClass("app.zhendong.reamicro.MainActivity", classLoader)
+            val lifecycle = requireNotNull(com.reamicro.fix.core.HostIntegrationBindings.activity) {
+                "MainActivity lifecycle contract unavailable"
+            }
+            val mainActivityClass = lifecycle.type("activity")
 
-            XposedHelpers.findAndHookMethod(
-                mainActivityClass,
-                "onCreate",
-                Bundle::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(
+                lifecycle.method("create"),
+                object : HookCallback() {
+                    override fun after(param: Call) {
                         if (!mainActivityClass.isInstance(param.thisObject)) return
                         val activity = param.thisObject as? Activity ?: return
-                        com.reamicro.fix.reload.HostGeneration.attach(activity.application)
-                        currentActivityRef = WeakReference(activity)
+                        attachContext(activity)
                         currentActivityResumed = false
-                        moduleSettings.attachContext(activity)
-                        mirrorApiSettings(activity)
-                        installExternalFeatures(classLoader)
-                        installMemoryCallbacks(
-                            application = activity.application,
-                            readerHook = readerHook,
-                            readerFontCompletionHook = readerFontCompletionHook,
-                            readerDialogueHighlightHook = readerDialogueHighlightHook,
-                            profileBackgroundHook = profileBackgroundHook,
-                            bookDetailsAssociationActionHook = bookDetailsAssociationActionHook,
-                        )
-                        RotationOrientationController.apply(activity, moduleSettings.snapshot())
-                        webDavDriveHook.cleanupStartupCacheIfNeeded(activity)
-                        bookshelfCompletion?.onHostStarted()
-                        coverFade?.onHostStarted()
-                        bookBackupScroll?.onHostStarted()
-                        profileBackgroundHook.refreshRandomImageFor(activity)
-                        ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
-                        CloudTaskNotificationPoller.poll(activity.applicationContext)
-                        val appContext = activity.applicationContext
-                        com.reamicro.fix.migration.LegacyAndroidWakeCleanup.runForHost(appContext)
-
-                        com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext)
-                        startForegroundHeartbeat()
-                        XposedBridge.log("$LOG_PREFIX MainActivity.onCreate hooked")
+                        finishCreation(activity)
+                        HookRuntime.log("$LOG_PREFIX MainActivity.onCreate hooked")
                     }
 
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                    override fun before(param: Call) {
                         if (!mainActivityClass.isInstance(param.thisObject)) return
                         val activity = param.thisObject as? Activity ?: return
                         com.reamicro.fix.reload.HostGeneration.attach(activity.application)
-                        currentActivityRef = WeakReference(activity)
+                        webDavDriveHook.onHostActivityCreated(activity)
+                        readerHook.onHostActivityCreated(activity)
+                        readerAutoPage?.onHostActivityCreated(activity)
+                        setCurrentActivity(activity)
                         currentActivityResumed = false
                         moduleSettings.attachContext(activity)
                         installExternalFeatures(classLoader)
@@ -318,18 +487,24 @@ class ReaMicroHookEntry {
                 },
             )
             HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityResume") {
-                XposedHelpers.findAndHookMethod(
-                    mainActivityClass,
-                    "onResume",
-                    object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
+                HookRuntime.hookMethod(
+                    lifecycle.method("resume"),
+                    object : HookCallback() {
+                        override fun after(param: Call) {
                             if (!mainActivityClass.isInstance(param.thisObject)) return
                             val activity = param.thisObject as? Activity ?: return
-                            currentActivityRef = WeakReference(activity)
+                            webDavDriveHook.onHostActivityCreated(activity)
+                            readerHook.onHostActivityCreated(activity)
+                            readerAutoPage?.onHostActivityCreated(activity)
+                            setCurrentActivity(activity)
                             currentActivityResumed = true
                             moduleSettings.attachContext(activity)
                             mirrorApiSettings(activity)
                             installExternalFeatures(classLoader)
+                            webDavDriveHook.onHostActivityResumed(activity)
+                            readerHook.onHostActivityResumed(activity)
+                            readerAutoPage?.onHostActivityResumed(activity)
+                            scheduleGlobalFontRecreate()
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
                             profileBackgroundHook.refreshRandomImageFor(activity)
                             CloudTaskNotificationPoller.poll(activity.applicationContext)
@@ -345,6 +520,7 @@ class ReaMicroHookEntry {
 
     private fun installMemoryCallbacks(
         application: Application,
+        webDavDriveHook: WebDavDriveHook,
         readerHook: ReaderHook,
         readerFontCompletionHook: ReaderFontCompletionHook,
         readerDialogueHighlightHook: ReaderDialogueHighlightHook,
@@ -386,8 +562,12 @@ class ReaMicroHookEntry {
                 override fun onActivityResumed(activity: Activity) = Unit
                 override fun onActivityPaused(activity: Activity) {
                     DexKitUpdateScan.onPause(activity)
+                    webDavDriveHook.onHostActivityPaused(activity)
+                    readerHook.onHostActivityPaused(activity)
+                    readerAutoPage?.onHostActivityPaused(activity)
                     if (currentActivityRef?.get() !== activity) return
                     currentActivityResumed = false
+                    cancelActivityUi()
                     heartbeatHandler.removeCallbacks(heartbeatRunnable)
                 }
                 override fun onActivityStopped(activity: Activity) = Unit
@@ -395,18 +575,19 @@ class ReaMicroHookEntry {
 
                 override fun onActivityDestroyed(activity: Activity) {
                     DexKitUpdateScan.onDestroyed(activity)
-                    if (activity.javaClass.name != "app.zhendong.reamicro.MainActivity") return
-                    if (activity.isChangingConfigurations) return
+                    webDavDriveHook.onHostActivityDestroyed(activity)
+                    readerAutoPage?.onHostActivityDestroyed(activity)
+                    YouShuWebSearchBridge.onHostActivityDestroyed(activity)
+                    if (currentActivityRef?.get() !== activity) return
+                    currentActivityResumed = false
+                    cancelActivityUi()
+                    heartbeatHandler.removeCallbacks(heartbeatRunnable)
                     readerHook.onHostActivityDestroyed("MainActivity lifecycle destroyed")
                     readerFontCompletionHook.releaseMemory("MainActivity lifecycle destroyed")
                     readerDialogueHighlightHook.releaseMemory("MainActivity lifecycle destroyed")
                     profileBackgroundHook.releaseMemory("MainActivity lifecycle destroyed")
                     bookDetailsAssociationActionHook.releaseMemory("MainActivity lifecycle destroyed")
-                    if (currentActivityRef?.get() === activity) {
-                        currentActivityRef = null
-                        currentActivityResumed = false
-                        heartbeatHandler.removeCallbacks(heartbeatRunnable)
-                    }
+                    currentActivityRef = null
                 }
             }
             application.registerActivityLifecycleCallbacks(lifecycleCallback)
@@ -414,7 +595,9 @@ class ReaMicroHookEntry {
                 application.unregisterComponentCallbacks(memoryCallback)
                 application.unregisterActivityLifecycleCallbacks(lifecycleCallback)
                 heartbeatHandler.removeCallbacksAndMessages(null)
-                moduleSettings.closeForReload()
+                currentActivityResumed = false
+                cancelActivityUi()
+                globalFontRefreshPending = false
                 bookshelfCompletion?.closeForReload()
                 coverFade?.closeForReload()
                 bookBackupScroll?.closeForReload()
@@ -424,9 +607,11 @@ class ReaMicroHookEntry {
                 profileBackgroundHook.releaseMemory("API102 hot reload")
                 bookDetailsAssociationActionHook.releaseMemory("API102 hot reload")
                 currentActivityRef = null
+                attachStartedActivity = null
+                attachReloadedActivity = null
             }
             memoryCallbacksInstalled = true
-            XposedBridge.log("$LOG_PREFIX memory callbacks installed")
+            HookRuntime.log("$LOG_PREFIX memory callbacks installed")
         }
     }
 
@@ -454,12 +639,13 @@ class ReaMicroHookEntry {
             onSearchSourceDisabled = ::disableSearchSource,
         )
         features.forEach { feature ->
+            if (feature.id in installedFeatureIds) return@forEach
             val disabledReason = ExternalFeatureCompatibility.disabledReason(feature.id, feature.capabilities)
             if (disabledReason != null) {
                 if (disabledFeatureIds.add(feature.id)) {
                     HookInstallReport.record("ExternalFeature", feature.id, false,
                         UnsupportedOperationException(disabledReason))
-                    XposedBridge.logAlways("$LOG_PREFIX external feature disabled: ${feature.id}, " +
+                    HookRuntime.logAlways("$LOG_PREFIX external feature disabled: ${feature.id}, " +
                         "profile=${com.reamicro.fix.core.HostSymbols.profileId}, reason=$disabledReason")
                 }
                 return@forEach
@@ -475,16 +661,15 @@ class ReaMicroHookEntry {
                 } else {
                     com.reamicro.fix.reload.HostGeneration.unsupportedExtension(feature.id)
                 }
-                XposedBridge.log("$LOG_PREFIX external feature installed: ${feature.id} ${feature.displayName}")
+                HookRuntime.log("$LOG_PREFIX external feature installed: ${feature.id} ${feature.displayName}")
             }.onFailure {
                 installedFeatureIds.remove(feature.id)
-                XposedBridge.log("$LOG_PREFIX external feature ${feature.id} install failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX external feature ${feature.id} install failed: ${it.stackTraceToString()}")
             }
         }
     }
 
     private companion object {
-        val REAMICRO_PACKAGES = setOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix")
         const val LOG_PREFIX = "ReaMicro LSP"
         const val HEARTBEAT_INTERVAL_MS = 5 * 60_000L
         const val ENTRY_FEATURE_ID = "Entry"

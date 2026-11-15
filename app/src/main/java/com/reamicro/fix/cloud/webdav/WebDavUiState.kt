@@ -4,6 +4,8 @@ internal data class SyncAuthCardRenderContext(
     val bookId: Long? = null,
     val onSetupDefaultDir: Any? = null,
     val onPick: Any? = null,
+    val onAuthorize: Any? = null,
+    val isRunning: Boolean = false,
     var webDavRendered: Boolean = false,
     var nativeAuthRowsSeen: Int = 0,
 )
@@ -34,11 +36,4 @@ internal data class HomeSearchSection(
     val type: Int,
     val title: String = "",
     val results: List<*>,
-)
-
-internal data class CloudBookRowExtendedDisplayContext(
-    val updatedAt: Long,
-    val extensionLabel: String,
-    var textIndex: Int = 0,
-    var extensionSuppressed: Boolean = false,
 )

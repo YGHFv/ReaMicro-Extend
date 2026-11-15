@@ -7,7 +7,6 @@ import android.os.Process
 import com.reamicro.fix.cloud.api.ApiServerSettingsBridgeProvider
 import org.json.JSONObject
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 internal object LocalTaskBridgeRuntime {
@@ -70,7 +69,12 @@ internal object LocalTaskBridgeRuntime {
             override fun apply(accountId: String, tasks: JSONObject, token: String, clearedAt: Long) =
                 store.applyMirror(accountId, tasks, token, clearedAt)
             override fun snapshot(accountId: String?, recordLimit: Int): String {
-                return store.snapshotPayload(accountId, recordLimit).toString()
+                return store.snapshotPayload(accountId, recordLimit)
+                    .put("moduleEnabled", ModuleTaskActivation.isEnabled(context)).toString()
+            }
+            override fun activate(enabled: Boolean): Boolean {
+                ModuleTaskActivation.change(context, enabled)
+                return ModuleTaskActivation.isEnabled(context)
             }
         })
     }

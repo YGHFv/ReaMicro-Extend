@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.dp
 import top.yukonga.scripta.editor.EditorColors
 
 internal object StructureScriptaChrome {
-    fun colors(palette: StructureHome130Style.Palette): EditorColors =
+    fun colors(palette: HostEmbeddedStyle.Palette): EditorColors =
         (if (palette.dark) EditorColors.Default else EditorColors.Light).copy(
             background = palette.content,
             foreground = palette.text,
@@ -55,7 +55,7 @@ internal object StructureScriptaChrome {
 }
 
 @Composable
-internal fun StructureSourceHeader(extension: String, state: StructureScriptaUiState, palette: StructureHome130Style.Palette) {
+internal fun StructureSourceHeader(extension: String, state: StructureScriptaUiState, palette: HostEmbeddedStyle.Palette) {
     Row(Modifier.fillMaxWidth().heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp)
         .padding(horizontal = 16.dp, vertical = StructureSearchChromeMetrics.sectionGap.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -70,7 +70,7 @@ internal fun StructureSourceHeader(extension: String, state: StructureScriptaUiS
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun StructureEditorFooter(
-    palette: StructureHome130Style.Palette, state: StructureScriptaUiState,
+    palette: HostEmbeddedStyle.Palette, state: StructureScriptaUiState,
     line: Int, column: Int, format: String, softWrap: Boolean, showDetails: Boolean,
     onUndo: () -> Unit, onRedo: () -> Unit, onSearch: () -> Unit,
     onSave: () -> Unit, onGotoLine: () -> Unit, onSoftWrap: () -> Unit,
@@ -111,7 +111,7 @@ internal fun StructureEditorFooter(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun StructureScriptaSearchPanel(
-    palette: StructureHome130Style.Palette, modifier: Modifier = Modifier,
+    palette: HostEmbeddedStyle.Palette, modifier: Modifier = Modifier,
     query: String, replacement: String, scope: EpubSearchScope, regex: Boolean, textOnly: Boolean,
     enabled: Boolean, processing: Boolean, hasMatches: Boolean, status: String,
     onQueryChange: (String) -> Unit, onReplacementChange: (String) -> Unit,
@@ -132,7 +132,7 @@ internal fun StructureScriptaSearchPanel(
                 Row(Modifier.fillMaxWidth().heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(status.ifBlank { "查找替换" }, Modifier.weight(1f), style = structureEditorControlTextStyle(), color = palette.caption)
                     IconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = !processing, onClick = onClose) {
-                        Icon(StructureHome130Icons.Close, "关闭查找替换", Modifier.size(20.dp), tint = palette.caption)
+                        Icon(HostEmbeddedIcons.Close, "关闭查找替换", Modifier.size(20.dp), tint = palette.caption)
                     }
                 }
                 SearchField(query, "查找内容", palette, enabled, ImeAction.Search, onQueryChange, onSearch,
@@ -161,7 +161,7 @@ internal fun StructureScriptaSearchPanel(
 }
 
 @Composable
-private fun SearchField(value: String, label: String, palette: StructureHome130Style.Palette,
+private fun SearchField(value: String, label: String, palette: HostEmbeddedStyle.Palette,
     enabled: Boolean, imeAction: ImeAction, onValueChange: (String) -> Unit, onSubmit: () -> Unit,
     requestFocusOnShow: Boolean = false) {
     val focus = remember { FocusRequester() }
@@ -193,7 +193,7 @@ private fun SearchField(value: String, label: String, palette: StructureHome130S
 
 @Composable
 private fun SearchToggle(label: String, selected: Boolean, enabled: Boolean,
-    palette: StructureHome130Style.Palette, onToggle: () -> Unit) {
+    palette: HostEmbeddedStyle.Palette, onToggle: () -> Unit) {
     val textStyle = structureEditorControlTextStyle()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val side = StructureSearchChromeMetrics.checkboxSide(textStyle.fontSize.value, density.fontScale).dp
@@ -230,7 +230,7 @@ private fun SearchToggle(label: String, selected: Boolean, enabled: Boolean,
 
 @Composable
 internal fun StructureScriptaUnsavedPrompt(
-    visible: Boolean, filename: String, switching: Boolean, palette: StructureHome130Style.Palette, busy: Boolean,
+    visible: Boolean, filename: String, switching: Boolean, palette: HostEmbeddedStyle.Palette, busy: Boolean,
     onContinue: () -> Unit, onDiscard: () -> Unit, onSave: () -> Unit,
 ) {
     val state = remember { MutableTransitionState(false) }

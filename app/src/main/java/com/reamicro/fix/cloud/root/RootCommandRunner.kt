@@ -4,6 +4,8 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.RejectedExecutionException
+import com.reamicro.fix.reload.ModuleResources
 import com.reamicro.fix.reload.ModuleResources.backgroundThread as thread
 
 internal data class RootCommandResult(
@@ -76,18 +78,26 @@ $command"""
 
     fun execute(builder: ProcessBuilder, input: String? = null, timeoutSeconds: Long = 20): RootCommandResult {
         require(timeoutSeconds > 0)
+        val lease = ModuleResources.lease() ?: throw RejectedExecutionException("Module generation is retiring")
+        return lease.use { executeAdmitted(builder, input, timeoutSeconds) }
+    }
+
+    private fun executeAdmitted(builder: ProcessBuilder, input: String?, timeoutSeconds: Long): RootCommandResult {
         val process = builder.redirectErrorStream(false).start()
         val stdout = Capture(MAX_OUTPUT_BYTES)
         val stderr = Capture(256 * 1024)
         val writerError = AtomicReference<Throwable?>()
-        val reader = stdout.drain(process.inputStream, "ReaMicroRootStdout")
-        val errorReader = stderr.drain(process.errorStream, "ReaMicroRootStderr")
-        val writer = thread(name = "ReaMicroRootStdin", isDaemon = true) {
-            try {
-                process.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(input.orEmpty()) }
-            } catch (error: Exception) { writerError.set(error) }
-        }
+        var interrupted = false
         try {
+            // Thread registration can fail during startup. It belongs inside the process
+            // lifetime boundary so the already-created child is still killed and reaped.
+            val reader = stdout.drain(process.inputStream, "ReaMicroRootStdout")
+            val errorReader = stderr.drain(process.errorStream, "ReaMicroRootStderr")
+            val writer = thread(name = "ReaMicroRootStdin", isDaemon = true) {
+                try {
+                    process.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(input.orEmpty()) }
+                } catch (error: Exception) { writerError.set(error) }
+            }
             if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
                 throw RootCommandTimeout(RootCommandResult(-1, stdout.text(), stderr.text(), stdout.truncated || stderr.truncated))
             }
@@ -100,11 +110,15 @@ $command"""
             }
             check(stdout.error == null && stderr.error == null) { "Root 输出读取失败，执行结果未知" }
             return RootCommandResult(process.exitValue(), stdout.text(), stderr.text(), stdout.truncated || stderr.truncated)
+        } catch (error: InterruptedException) {
+            interrupted = true
+            throw error
         } finally {
             if (process.isAlive) process.destroyForcibly()
             runCatching { process.outputStream.close() }
             runCatching { process.inputStream.close() }
             runCatching { process.errorStream.close() }
+            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 

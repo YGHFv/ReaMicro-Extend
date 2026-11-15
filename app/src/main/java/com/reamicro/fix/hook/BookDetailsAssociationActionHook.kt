@@ -1,37 +1,21 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostClassOrNull
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostAbiField
-import com.reamicro.fix.core.hostAbiMethod
-import com.reamicro.fix.core.hostMethod
-
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.typeMatches
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.Activity
 import android.widget.Toast
 import com.reamicro.fix.core.HookInstallReport
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.core.HostNativeAbi
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
-import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.util.Collections
 import java.util.LinkedHashMap
-import java.util.concurrent.CountDownLatch
 
 class BookDetailsAssociationActionHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
 ) {
-    private val localBooksById = Collections.synchronizedMap(limitedBookCache())
     private val localBooksByCloudId = Collections.synchronizedMap(limitedBookCache())
     private val completedCoverFixes = Collections.synchronizedMap(
         object : LinkedHashMap<String, Boolean>(32, 0.75f, true) {
@@ -42,21 +26,146 @@ class BookDetailsAssociationActionHook(
 
     private val overviewContexts = Collections.synchronizedMap(LinkedHashMap<Long, DetailContext>())
     @Volatile private var currentDetailsContext: DetailContext? = null
+    @Volatile private var cachedAccountGeneration = Long.MIN_VALUE
+    private val pendingRequests = NativeCoverRequestOwnership()
+
+    private val binding get() = requireNotNull(com.reamicro.fix.core.HostBookCoverBindings.current)
 
     fun install() {
-        hookBookshelfDetailNavigation()
-        hookBookDetailsViewModel()
-        hookBookOverviewViewModel()
-        hookNavGraphScope()
-        hookNavigationBackCleanup()
+        HookInstallReport.install("BookDetailsAssociationActionHook", "dynamicCoverActions") {
+            val contract = binding
+            val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+            fun hook(member: java.lang.reflect.Executable, callback: HookCallback) {
+                handles += HookRuntime.hookMethod(member, callback)
+            }
+            try {
+                hook(contract.method("sourceClick"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        param.thisObject?.let { contract.field("sourceBook").get(it) }?.let(::cacheLocalBook)
+                    }
+                })
+                HookRuntime.deoptimize(contract.method("sourceClick"))
+                hook(contract.constructor("details"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable != null) return
+                        val vm = param.thisObject ?: return
+                        val args = contract.field("args").get(vm) ?: return
+                        currentDetailsContext = detailContext(
+                            contract.field("args#bookId").getLong(args), contract.field("args#compat").getBoolean(args),
+                            vm, contract.field("detailsRepository").get(vm),
+                        )
+                    }
+                })
+                hook(contract.constructor("overview"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable != null) return
+                        val vm = param.thisObject ?: return
+                        val id = contract.field("overviewId").getLong(vm)
+                        val context = detailContext(id, true, vm,
+                            contract.field("overviewRepository").get(vm), isOverview = true) ?: return
+                        overviewContexts[id] = context
+                        currentDetailsContext = context
+                    }
+                })
+                hook(contract.method("applyBook"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val vm = param.thisObject ?: return
+                        val book = param.args?.firstOrNull() ?: return
+                        cacheLocalBook(book)
+                        val id = contract.field("book#id").getLong(book)
+                        val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return
+                        if (id <= 0L || callLong(book, "getUid") != identity.accountId) return
+                        val uuid = callString(book, "getUuid")
+                        val previous = overviewContexts[id]?.takeIf {
+                            it.viewModelRef.get() === vm && AccountHostRuntime.isCurrentStorage(it.identity) &&
+                                (it.localBookUuid == null || it.localBookUuid == uuid)
+                        }
+                        val context = previous?.copy(localBookUuid = uuid) ?: detailContext(id, true, vm,
+                            contract.field("overviewRepository").get(vm), isOverview = true,
+                            localBookUuid = uuid) ?: return
+                        overviewContexts[id] = context
+                        if (currentDetailsContext?.viewModelRef?.get() === vm) currentDetailsContext = context
+                    }
+                })
+                hook(contract.method("cleared"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        val vm = param.thisObject ?: return
+                        synchronized(overviewContexts) {
+                            overviewContexts.entries.removeAll { it.value.viewModelRef.get() == null || it.value.viewModelRef.get() === vm }
+                        }
+                        if (currentDetailsContext?.viewModelRef?.get() === vm) clearBookDetailsContext()
+                    }
+                })
+                HookRuntime.deoptimize(contract.method("cleared"))
+                hook(contract.method("configureRequest"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val callback = param.thisObject ?: return
+                        if ((contract.field("configuration.tag").get(callback) as Number).toLong() !=
+                            contract.configurationTag()) return
+                        val request = contract.field("configuration.request").get(callback)
+                        runCatching { pendingRequests.check(request) }.onFailure { param.throwable = it }
+                    }
+                    override fun after(param: Call) {
+                        if (param.throwable != null) return
+                        val callback = param.thisObject ?: return
+                        if ((contract.field("configuration.tag").get(callback) as Number).toLong() !=
+                            contract.configurationTag()) return
+                        runCatching {
+                            val request = contract.field("configuration.request").get(callback)
+                            if (!pendingRequests.check(request)) return@runCatching
+                            val builder = requireNotNull(param.args.firstOrNull())
+                            check(contract.field("nativeRequest.body").get(builder) === request) {
+                                "Native cover request body changed"
+                            }
+                        }.onFailure { param.throwable = it }
+                    }
+                })
+                hook(contract.method("defaultRequest"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val callback = param.thisObject ?: return
+                        runCatching {
+                            val builder = contract.defaultRequestBuilder(callback) ?: return@runCatching
+                            pendingRequests.check(contract.field("nativeRequest.body").get(builder))
+                        }.onFailure { param.throwable = it }
+                    }
+                    override fun after(param: Call) {
+                        if (param.throwable != null) return
+                        val callback = param.thisObject ?: return
+                        runCatching {
+                            val builder = contract.defaultRequestBuilder(callback) ?: return@runCatching
+                            pendingRequests.bind(contract.field("nativeRequest.body").get(builder), builder)
+                        }.onFailure { param.throwable = it }
+                    }
+                })
+                HookRuntime.deoptimize(contract.method("configureRequest"))
+                HookRuntime.deoptimize(contract.method("defaultRequest"))
+                com.reamicro.fix.reload.ModuleResources.cleanup { pendingRequests.clear() }
+                hook(com.reamicro.fix.core.HostNavigation.navigateMethod(classLoader), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val route = param.args?.getOrNull(1)
+                        if (!contract.type("route").isInstance(route) && !contract.type("overviewRoute").isInstance(route)) clearBookDetailsContext()
+                    }
+                })
+                hook(com.reamicro.fix.core.HostNavigation.controllerPopMethod(classLoader), object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable == null && param.result == true) clearBookDetailsContext()
+                    }
+                })
+            } catch (error: Throwable) {
+                handles.asReversed().forEach { handle -> runCatching { handle.unhook() }.onFailure(error::addSuppressed) }
+                releaseMemory("cover hook installation failed")
+                throw error
+            }
+        }
     }
 
     internal fun requestCoverFixFromBarcode(viewModel: Any, book: Any): Boolean {
         val details = currentDetailsContext?.takeIf { it.viewModelRef.get() === viewModel } ?: return false
         if (callLong(book, "getCloudId") != details.bookId) return false
         val localId = callLong(book, "getId").takeIf { it > 0L } ?: return false
+        if (!isDetailsCurrent(details) || callLong(book, "getUid") != details.identity.accountId) return false
         cacheLocalBook(book)
-        fixAssociationCover(details.copy(localBookId = localId))
+        fixAssociationCover(details.copy(localBookId = localId, localBookUuid = callString(book, "getUuid")))
         return true
     }
 
@@ -66,240 +175,69 @@ class BookDetailsAssociationActionHook(
         val details = currentDetailsContext?.takeIf { it.bookId == expectedBookId }
             ?: overviewContexts[expectedBookId]?.takeIf { it.viewModelRef.get() != null && it.repositoryRef.get() != null }
             ?: return false
-        if (expectedBookId != details.bookId) return false
+        if (expectedBookId != details.bookId || !isAccountCurrent(details) ||
+            callLong(expectedBook, "getUid") != details.identity.accountId) return false
+        val uuid = callString(expectedBook, "getUuid")
+        if (details.localBookUuid != null && details.localBookUuid != uuid) return false
+        currentDetailsContext = details
         cacheLocalBook(expectedBook)
-        fixAssociationCover(details.copy(localBookId = expectedBookId))
+        fixAssociationCover(details.copy(localBookId = expectedBookId, localBookUuid = uuid))
         return true
     }
 
     fun releaseMemory(reason: String) {
         currentDetailsContext = null
         overviewContexts.clear()
-        localBooksById.clear()
         localBooksByCloudId.clear()
         completedCoverFixes.clear()
-        XposedBridge.log("$LOG_PREFIX book details memory released: $reason")
-    }
-
-    private fun hookBookshelfDetailNavigation() {
-        runCatching {
-            val screenClass = XposedHelpers.findClass(BOOKSHELF_SCREEN_CLASS, classLoader)
-            val methods = screenClass.declaredMethods.filter { method ->
-                method.parameterTypes.size == 4 &&
-                    typeMatches(method.parameterTypes.lastOrNull(), BOOK_CLASS)
-            }
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val book = param.args?.getOrNull(3) ?: return
-                        cacheLocalBook(book)
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX book details association bookshelf cache hooks installed: ${methods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook bookshelf detail navigation: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookBookDetailsViewModel() {
-        HookInstallReport.install("BookDetailsAssociationActionHook", "hookBookDetailsViewModel") {
-            val viewModelClass = XposedHelpers.findClass(BOOK_DETAILS_VIEW_MODEL_CLASS, classLoader)
-            XposedBridge.hookAllConstructors(viewModelClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val viewModel = param.thisObject ?: return
-                    val args = fieldValue(viewModel, "args") ?: param.args?.getOrNull(0) ?: return
-                    val repository = fieldValue(viewModel, "bookRepository", "repository") ?: param.args?.getOrNull(1) ?: return
-                    val bookId = callLong(args, "getBookId")
-                    val compat = callBoolean(args, "getCompat")
-                    currentDetailsContext = DetailContext(
-                        bookId = bookId,
-                        compat = compat,
-                        viewModelRef = WeakReference(viewModel),
-                        repositoryRef = WeakReference(repository),
-                    )
-                    XposedBridge.log("$LOG_PREFIX book details association context captured: bookId=$bookId, compat=$compat")
-                }
-            })
-            hookViewModelCleared(viewModelClass) { viewModel ->
-                synchronized(overviewContexts) {
-                    overviewContexts.entries.removeAll { it.value.viewModelRef.get() == null || it.value.viewModelRef.get() === viewModel }
-                }
-                if (currentDetailsContext?.viewModelRef?.get() === viewModel) {
-                    clearBookDetailsContext()
-                }
-            }
-        }
-    }
-
-    private fun hookBookOverviewViewModel() {
-        HookInstallReport.install("BookDetailsAssociationActionHook", "hookBookOverviewViewModel") {
-            val viewModelClass = XposedHelpers.findClass(BOOK_OVERVIEW_VIEW_MODEL_CLASS, classLoader)
-            XposedBridge.hookAllConstructors(viewModelClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val viewModel = param.thisObject ?: return
-                    val bookId = fieldValue(viewModel, "bookId")?.let { it as? Long } ?: callLong(viewModel, "getBookId")
-                    val repository = fieldValue(viewModel, "bookRepository")
-                        ?: param.args?.getOrNull(1)
-                        ?: return
-                    currentDetailsContext = DetailContext(
-                        bookId = bookId,
-                        compat = true,
-                        viewModelRef = WeakReference(viewModel),
-                        repositoryRef = WeakReference(repository),
-                        isOverview = true,
-                    )
-                    currentDetailsContext?.let { overviewContexts[bookId] = it }
-                    XposedBridge.log("$LOG_PREFIX book overview association context captured: bookId=$bookId")
-                }
-            })
-            XposedBridge.hookAllMethods(viewModelClass, "applyBook", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val book = param.args?.getOrNull(0) ?: return
-                    cacheLocalBook(book)
-                    val vm = param.thisObject ?: return
-                    val repository = fieldValue(vm, "bookRepository") ?: return
-                    val id = callLong(book, "getId")
-                    if (id > 0L) overviewContexts[id] = DetailContext(id, true, WeakReference(vm), WeakReference(repository), isOverview = true)
-                }
-            })
-            hookViewModelCleared(viewModelClass) { viewModel ->
-                synchronized(overviewContexts) {
-                    overviewContexts.entries.removeAll { it.value.viewModelRef.get() == null || it.value.viewModelRef.get() === viewModel }
-                }
-                if (currentDetailsContext?.viewModelRef?.get() === viewModel) {
-                    clearBookDetailsContext()
-                }
-            }
-            XposedBridge.log("$LOG_PREFIX book overview viewModel hook installed")
-        }
-    }
-
-    private fun hookNavGraphScope() {
-        val navigation = HostNativeAbi.navigation(HostSymbols.profileId)
-        if (navigation != null) {
-            HookInstallReport.install("BookDetailsAssociationActionHook", "nativeNavigationCleanup") {
-                val scope = classLoader.hostClass(NAV_GRAPH_SCOPE_CLASS)
-                XposedBridge.hookMethod(
-                    scope.getDeclaredMethod(navigation.navigate, scope, Any::class.java),
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val routeType = param.args?.getOrNull(1)?.javaClass
-                            if (!typeMatches(routeType, ROUTE_BOOK_DETAIL_CLASS) &&
-                                !typeMatches(routeType, ROUTE_BOOK_OVERVIEW_CLASS)) {
-                                clearBookDetailsContext()
-                            }
-                        }
-                    },
-                )
-            }
-            return
-        }
-        runCatching {
-            val navGraphScopeClass = XposedHelpers.findClass(NAV_GRAPH_SCOPE_CLASS, classLoader)
-            XposedBridge.hookAllMethods(navGraphScopeClass, "navigate", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val route = param.args?.getOrNull(0)
-                    val routeName = route?.javaClass?.name
-                    if (routeName != ROUTE_BOOK_DETAIL_CLASS && routeName != ROUTE_BOOK_OVERVIEW_CLASS) {
-                        clearBookDetailsContext()
-                    }
-                }
-            })
-            XposedBridge.hookAllMethods(navGraphScopeClass, "popBackStack", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (param.result == true) clearBookDetailsContext()
-                }
-            })
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook NavGraphScope: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookNavigationBackCleanup() {
-        val navigation = HostNativeAbi.navigation(HostSymbols.profileId)
-        if (navigation != null) {
-            HookInstallReport.install("BookDetailsAssociationActionHook", "nativeBackCleanup") {
-                val controller = classLoader.hostClass("ReaMicroHost.NavController")
-                XposedBridge.hookMethod(controller.getDeclaredMethod(navigation.controllerPop), object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (param.throwable == null && param.result == true) clearBookDetailsContext()
-                    }
-                })
-            }
-            return
-        }
-        if (classLoader.hostClassOrNull(NAV_CONTROLLER_HOLDER_CLASS) != null) {
-            runCatching {
-                val holderClass = classLoader.hostClass(NAV_CONTROLLER_HOLDER_CLASS)
-                XposedBridge.hookAllMethods(holderClass, "popBack", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        clearBookDetailsContext()
-                    }
-                })
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX failed to hook NavControllerHolder popBack: ${it.stackTraceToString()}")
-            }
-        } else {
-            XposedBridge.log("$LOG_PREFIX NavControllerHolder unavailable; using NavGraphScope cleanup")
-        }
-        if (classLoader.hostClassOrNull(ANDROIDX_NAV_CONTROLLER_CLASS) != null) {
-            runCatching {
-                val navControllerClass = classLoader.hostClass(ANDROIDX_NAV_CONTROLLER_CLASS)
-                XposedBridge.hookAllMethods(navControllerClass, "popBackStack", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (param.result != false) clearBookDetailsContext()
-                    }
-                })
-            }.onFailure {
-                XposedBridge.log("$LOG_PREFIX failed to hook NavController popBackStack: ${it.stackTraceToString()}")
-            }
-        } else {
-            XposedBridge.log("$LOG_PREFIX AndroidX NavController unavailable; using NavGraphScope cleanup")
-        }
+        HookRuntime.log("$LOG_PREFIX book details memory released: $reason")
     }
 
     private fun fixAssociationCover(details: DetailContext) {
         val bookId = details.bookId
-        val activity = activityProvider()
+        val activity = details.activityRef.get() ?: return
         com.reamicro.fix.reload.ModuleResources.thread {
             val result = runCatching {
-
+                checkDetailsCurrent(details)
+                check(details.identity.accountId > 0L && details.identity.token.isNotBlank()) { "请先登录阅微" }
                 val repository = details.repositoryRef.get() ?: error("BookRepository unavailable")
-                val bookshelf = fieldValue(repository, "bookshelfRepository") ?: error("BookshelfRepository unavailable")
+                val bookshelf = binding.field("shelf").get(repository) ?: error("BookshelfRepository unavailable")
                 val book = findLocalBookForDetails(bookshelf, details) ?: error("Book not found: $bookId")
+                checkDetailsCurrent(details)
                 val coverUrl = resolveDetailsCoverUrl(repository, details, book)
+                checkDetailsCurrent(details)
                 if (!isRemoteCoverUrl(coverUrl)) error("Cover unavailable")
-                val dedupeKey = "$bookId|$coverUrl"
-                if (completedCoverFixes.putIfAbsent(dedupeKey, true) != null) {
-                    CoverFixUploadResult(0L, coverUrl)
-                } else {
-                    runCatching {
-                        CoverFixUploadResult(postAssociationCover(repository, book, coverUrl), coverUrl)
-                    }.onFailure {
-                        completedCoverFixes.remove(dedupeKey)
-                    }.getOrThrow()
+                val uuid = callString(book, "getUuid")
+                val dedupeKey = "${details.identity.generation}|${details.identity.accountId}|$uuid|$bookId|$coverUrl"
+                val previousUpload = withDetailsCurrent(details) {
+                    completedCoverFixes.putIfAbsent(dedupeKey, false)
+                }
+                when (previousUpload) {
+                    true -> CoverFixUploadResult(0L)
+                    false -> CoverFixUploadResult(0L, pending = true)
+                    null -> runCatching {
+                            val id = postAssociationCover(repository, book, coverUrl, details)
+                            withDetailsCurrent(details) { completedCoverFixes[dedupeKey] = true }
+                            CoverFixUploadResult(id)
+                        }.onFailure { completedCoverFixes.remove(dedupeKey, false) }.getOrThrow()
                 }
             }
-            activity?.runOnUiThread {
-                result
-                    .onSuccess { upload ->
-                        Toast.makeText(activity, "\u5df2\u4e0a\u4f20\u5c01\u9762", Toast.LENGTH_SHORT).show()
-                        XposedBridge.logAlways(
-                            "$LOG_PREFIX association cover fix uploaded manually: " +
-                                "bookId=$bookId, userBookId=${upload.userBookId}, cover=${upload.coverUrl}",
-                        )
+            activity.runOnModuleUiThread {
+                if (!isDetailsCurrent(details)) return@runOnModuleUiThread
+                result.onSuccess { upload ->
+                    val message = if (upload.pending) "封面正在上传" else "已上传封面"
+                    Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
+                    if (!upload.pending) HookRuntime.logAlways("$LOG_PREFIX association cover uploaded manually: " +
+                        "bookId=$bookId, userBookId=${upload.userBookId}")
+                }.onFailure { error ->
+                    val message = when (error.message) {
+                        "Cover unavailable" -> "未找到可上传的封面"
+                        "请先登录阅微" -> "请先登录阅微"
+                        else -> "封面修复失败"
                     }
-                    .onFailure {
-                        val message = if (it.message == "Cover unavailable") {
-                            "\u672a\u627e\u5230\u53ef\u4e0a\u4f20\u7684\u5c01\u9762"
-                        } else {
-                            "\u5c01\u9762\u4fee\u590d\u5931\u8d25"
-                        }
-                        XposedBridge.log("$LOG_PREFIX failed to fix association cover manually: ${it.stackTraceToString()}")
-                        Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
-                    }
+                    HookRuntime.log("$LOG_PREFIX manual cover upload failed: ${error.javaClass.simpleName}")
+                    Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
+                }
             }
         }.apply { name = "ReaMicro-ManualCoverFix" }.start()
     }
@@ -318,15 +256,15 @@ class BookDetailsAssociationActionHook(
 
     private fun overviewStateCoverUrl(details: DetailContext, publisherName: String): String {
         val state = runCatching {
-            details.viewModelRef.get()?.let { XposedHelpers.callMethod(it, "getCurrentState") }
+            details.viewModelRef.get()?.let { binding.method("currentState").invoke(it) }
         }.getOrNull() ?: return ""
         runCatching {
-            XposedHelpers.callMethod(state, "getRelationPublisher")?.let { publisher ->
+            binding.property(state, "relationPublisher")?.let { publisher ->
                 publisherCoverUrl(listOf(publisher), publisherName).takeIf(::isRemoteCoverUrl)?.let { return it }
             }
         }
         return runCatching {
-            XposedHelpers.callMethod(state, "getBook")
+            binding.property(state, "book")
                 ?.let { callString(it, "getCover").trim() }
                 ?.takeIf(::isRemoteCoverUrl)
                 .orEmpty()
@@ -336,62 +274,31 @@ class BookDetailsAssociationActionHook(
     private fun detailStatePublishers(details: DetailContext): List<Any> =
         runCatching {
             details.viewModelRef.get()
-                ?.let { XposedHelpers.callMethod(it, "getCurrentState") }
+                ?.let { binding.method("currentState").invoke(it) }
                 ?.let(::publishersFrom)
                 ?: emptyList()
         }.getOrElse {
-            XposedBridge.log("$LOG_PREFIX failed to read details publishers: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to read details publishers: ${it.javaClass.simpleName}")
             emptyList()
         }
 
-    private fun fetchCloudInfoPublishers(repository: Any, details: DetailContext): List<Any> {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val method = repository.javaClass.hostAbiMethod(
-                "j", Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
-                classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
-            )
-            return publishersFrom(unwrapKotlinResult(invokeSuspendBlocking(method, repository, details.bookId, details.compat)))
-        }
-        val method = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
-            .firstOrNull {
-                it.name.contains("getBookCloudInfo", ignoreCase = true) &&
-                    it.parameterTypes.size == 3 &&
-                    it.parameterTypes[0] == java.lang.Long.TYPE &&
-                    it.parameterTypes[1] == java.lang.Boolean.TYPE
-            }
-            ?.apply { isAccessible = true }
-            ?: return emptyList()
-        return runCatching {
-            val info = unwrapKotlinResult(invokeSuspendBlocking(method, repository, details.bookId, details.compat))
-            publishersFrom(info)
-        }.getOrElse {
-            XposedBridge.log("$LOG_PREFIX failed to fetch cloud publishers for cover fix: ${it.stackTraceToString()}")
-            emptyList()
-        }
+    private fun fetchCloudInfoPublishers(repository: Any, details: DetailContext): List<Any> = runCatching {
+        publishersFrom(binding.unwrap(invokeSuspendBlocking(binding.method("cloudInfo"), repository, details.bookId, details.compat)))
+    }.getOrElse {
+        HookRuntime.log("$LOG_PREFIX cloud publishers unavailable: ${it.javaClass.simpleName}")
+        emptyList()
     }
 
     private fun publishersFrom(target: Any?): List<Any> {
         if (target == null) return emptyList()
-        if (HostSymbols.abiProfileId == "2.3.3-b4" &&
-            classLoader.hostClass("ReaMicroHost.CloudBookInfo").isInstance(target)) {
-            return (target.javaClass.hostAbiField("f").get(target) as List<*>).filterNotNull()
-        }
-        return runCatching {
-            (XposedHelpers.callMethod(target, "getPublishers") as? Iterable<*>)
-                ?.mapNotNull { it }
-                ?: emptyList()
-        }.getOrDefault(emptyList())
+        return (binding.property(target, "publishers") as? Iterable<*>)?.filterNotNull().orEmpty()
     }
 
     private fun publisherCoverUrl(publishers: List<Any>, publisherName: String): String {
         val covers = publishers.mapNotNull { publisher ->
-            val b4 = HostSymbols.abiProfileId == "2.3.3-b4" &&
-                classLoader.hostClass("ReaMicroHost.BookPublisherRecord").isInstance(publisher)
-            val cover = if (b4) (publisher.javaClass.hostAbiField("b").get(publisher) as String).trim()
-                else callString(publisher, "getCover").trim()
+            val cover = callString(publisher, "getCover").trim()
             if (!isRemoteCoverUrl(cover)) return@mapNotNull null
-            val name = if (b4) publisher.javaClass.hostAbiField("d").get(publisher) as String
-                else callString(publisher, "getPublisher")
+            val name = callString(publisher, "getPublisher")
             name.trim() to cover
         }
         return covers.firstOrNull { (name, _) ->
@@ -402,16 +309,22 @@ class BookDetailsAssociationActionHook(
     private fun findLocalBookForDetails(bookshelf: Any, details: DetailContext): Any? {
         details.localBookId?.let { localId ->
             val book = findLocalBookById(bookshelf, localId) ?: error("Local book no longer exists: $localId")
-            check(callLong(book, "getId") == localId) { "Local book identity changed" }
+            check(callLong(book, "getId") == localId && callLong(book, "getUid") == details.identity.accountId &&
+                (details.localBookUuid == null || callString(book, "getUuid") == details.localBookUuid)) {
+                "Local book identity changed"
+            }
             check(details.compat || callLong(book, "getCloudId") == details.bookId) {
                 "Book association changed; reopen book details"
             }
             return book
         }
         findLocalBookById(bookshelf, details.bookId)?.let { book ->
-            if (details.compat || callLong(book, "getCloudId") == details.bookId) return book
+            if (callLong(book, "getUid") == details.identity.accountId &&
+                (details.compat || callLong(book, "getCloudId") == details.bookId)) return book
         }
-        localBooksByCloudId[details.bookId]?.let { return it }
+        localBooksByCloudId[details.bookId]?.takeIf {
+            cachedAccountGeneration == details.identity.generation && callLong(it, "getUid") == details.identity.accountId
+        }?.let { return it }
         if (!details.compat) {
             findLocalBookByCloudIdFromSearch(bookshelf, details)?.let { return it }
         }
@@ -419,34 +332,21 @@ class BookDetailsAssociationActionHook(
     }
 
     private fun findLocalBookById(bookshelf: Any, bookId: Long): Any? {
-        if (HostSymbols.abiProfileId in setOf("2.3.3-b2", "2.3.3-b4")) {
-            val dao = requireNotNull(bookshelf.javaClass.hostField("bookDao").get(bookshelf))
-            val find = dao.javaClass.hostMethod(
-                if (HostSymbols.abiProfileId == "2.3.3-b4") "b" else "findById", Long::class.javaPrimitiveType,
-                classLoader.hostClass("kotlin.coroutines.Continuation"))
-            return invokeSuspendBlocking(find, dao, bookId)?.also(::cacheLocalBook)
-        }
-        val method = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-            .firstOrNull {
-                it.hostNameMatches(BOOKSHELF_FIND_BOOK_BY_ID_METHOD) &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == java.lang.Long.TYPE
-            }
-            ?.apply { isAccessible = true }
-            ?: return null
-        return invokeSuspendBlocking(method, bookshelf, bookId)?.also { cacheLocalBook(it) }
+        val dao = requireNotNull(binding.field("dao").get(bookshelf))
+        return invokeSuspendBlocking(binding.method("find"), dao, bookId)?.also(::cacheLocalBook)
     }
 
     private fun findLocalBookByCloudIdFromSearch(bookshelf: Any, details: DetailContext): Any? {
         val state = runCatching {
-            details.viewModelRef.get()?.let { XposedHelpers.callMethod(it, "getCurrentState") }
+            details.viewModelRef.get()?.let { binding.method("currentState").invoke(it) }
         }.getOrNull()
         val title = state?.let { callString(it, "getTitle") }.orEmpty()
         val author = state?.let { callString(it, "getAuthor") }.orEmpty()
         val queries = listOf(title, author, "").map { it.trim() }.distinct()
         for (query in queries) {
             val book = searchLocalBooks(bookshelf, query)
-                .firstOrNull { callLong(it, "getCloudId") == details.bookId }
+                .firstOrNull { callLong(it, "getUid") == details.identity.accountId &&
+                    callLong(it, "getCloudId") == details.bookId }
             if (book != null) {
                 cacheLocalBook(book)
                 return book
@@ -455,71 +355,34 @@ class BookDetailsAssociationActionHook(
         return null
     }
 
-    private fun searchLocalBooks(bookshelf: Any, query: String): List<Any> {
-        val method = (bookshelf.javaClass.methods.asSequence() + bookshelf.javaClass.declaredMethods.asSequence())
-            .firstOrNull {
-                it.name.contains(BOOKSHELF_SEARCH_METHOD_KEYWORD, ignoreCase = true) &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == String::class.java
-            }
-            ?.apply { isAccessible = true }
-            ?: return emptyList()
-        return runCatching {
-            val result = unwrapKotlinResult(invokeSuspendBlocking(method, bookshelf, query))
-            (result as? Iterable<*>)?.mapNotNull { it }?.onEach { cacheLocalBook(it) } ?: emptyList()
-        }.getOrElse {
-            XposedBridge.log("$LOG_PREFIX failed to search local books for unlink: ${it.stackTraceToString()}")
-            emptyList()
-        }
+    private fun searchLocalBooks(bookshelf: Any, query: String): List<Any> = runCatching {
+        val result = binding.unwrap(invokeSuspendBlocking(binding.method("search"), bookshelf, query))
+        (result as? Iterable<*>)?.filterNotNull()?.onEach(::cacheLocalBook).orEmpty()
+    }.getOrElse {
+        HookRuntime.log("$LOG_PREFIX local book search failed: ${it.javaClass.simpleName}")
+        emptyList()
     }
 
-    private fun postAssociationCover(repository: Any, book: Any, coverUrl: String): Long {
-        val api = if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            repository.javaClass.hostAbiField("h").get(repository)
-        } else fieldValue(repository, "api") ?: error("Api unavailable")
-        val requestClass = XposedHelpers.findClass(POST_USER_BOOK_REQ_CLASS, classLoader)
-        val request = requestClass.getConstructor(
-            String::class.java,
-            String::class.java,
-            String::class.java,
-            String::class.java,
-            String::class.java,
-        ).newInstance(
-            callString(book, "getTitle"),
-            callString(book, "getAuthor"),
-            callString(book, "getUuid").replace("-", ""),
-            coverUrl,
-            "",
-        )
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val post = api.javaClass.getDeclaredMethod(
-                "a1", requestClass, classLoader.hostClass("ReaMicroHost.SuspendContinuation"),
-            )
-            val envelope = invokeSuspendBlocking(post, api, request)
-            val data = classLoader.hostClass("ReaMicroHost.EnvelopeData").hostAbiMethod(
-                "b", requireNotNull(envelope).javaClass,
-            ).invoke(null, envelope)
-            return requireNotNull(data).javaClass.getDeclaredField("a").getLong(data)
+    private fun postAssociationCover(
+        repository: Any, book: Any, coverUrl: String, details: DetailContext,
+    ): Long {
+        checkDetailsCurrent(details)
+        val contract = binding
+        val api = requireNotNull(contract.field("api").get(repository))
+        val request = contract.request(callString(book, "getTitle"), callString(book, "getAuthor"),
+            callString(book, "getUuid").replace("-", ""), coverUrl)
+        val registration = pendingRequests.register(request,
+            withCurrent = { action -> withDetailsCurrent(details, action) },
+            bind = { builder -> contract.bindAuthorization(builder, details.identity.token) })
+        return registration.use {
+            checkDetailsCurrent(details)
+            val envelope = com.reamicro.fix.core.HostCoroutines.invokeTimed(classLoader, contract.method("post"),
+                api, 120_000L, request) ?: error("Cover upload returned no envelope")
+            checkDetailsCurrent(details)
+            val data = contract.method("data").invoke(null, envelope) ?: error("Cover upload returned no data")
+            check(contract.type("response").isInstance(data)) { "Unexpected cover response" }
+            contract.field("response#id").getLong(data)
         }
-        val method = (api.javaClass.methods.asSequence() + api.javaClass.declaredMethods.asSequence())
-            .first {
-                it.hostNameMatches("postUserBook") &&
-                    it.parameterTypes.size == 2 &&
-                    typeMatches(it.parameterTypes[0], POST_USER_BOOK_REQ_CLASS)
-            }
-            .apply { isAccessible = true }
-        val envelope = invokeSuspendBlocking(method, api, request)
-        val data = envelopeDataOrThrow(envelope) ?: return 0L
-        return callLong(data, "getId")
-    }
-
-    private fun envelopeDataOrThrow(envelope: Any?): Any? {
-        if (envelope == null) return null
-        val envelopeKt = XposedHelpers.findClass(ENVELOPE_KT_CLASS, classLoader)
-        val method = envelopeKt.declaredMethods.first {
-            it.hostNameMatches("dataOrThrow") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        return method.invoke(null, envelope)
     }
 
     private fun isRemoteCoverUrl(value: String): Boolean {
@@ -534,58 +397,54 @@ class BookDetailsAssociationActionHook(
     private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? =
         com.reamicro.fix.core.HostCoroutines.invoke(classLoader, method, target, *args)
 
-    private fun emptyCoroutineContext(): Any =
-        XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
-            .hostField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null) ?: error("EmptyCoroutineContext unavailable")
-
-    private fun coroutineSuspended(): Any =
-        runCatching {
-            XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
-                it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
-            }.apply { isAccessible = true }.invoke(null)
-        }.getOrElse {
-            (XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader).enumConstants ?: emptyArray())
-                .first { value -> value.toString() == "COROUTINE_SUSPENDED" }
-        }
-
-    private fun unwrapKotlinResult(value: Any?): Any? {
-        val throwOnFailure = XposedHelpers.findClass(KOTLIN_RESULT_KT_CLASS, classLoader).declaredMethods.first {
-            it.hostNameMatches("throwOnFailure") && it.parameterTypes.size == 1
-        }.apply { isAccessible = true }
-        try {
-            throwOnFailure.invoke(null, value)
-        } catch (e: InvocationTargetException) {
-            throw e.targetException ?: e
-        }
-        return value
-    }
-
-    private fun fieldValue(target: Any?, vararg names: String): Any? {
-        if (target == null) return null
-        for (name in names) {
-            var type: Class<*>? = target.javaClass
-            while (type != null) {
-                val field = runCatching { type.hostField(name) }.getOrNull()
-                if (field != null) {
-                    field.isAccessible = true
-                    return runCatching { field.get(target) }.getOrNull()
-                }
-                type = type.superclass
-            }
-        }
-        return null
-    }
-
     private fun cacheLocalBook(book: Any) {
         runCatching {
-            val id = callLong(book, "getId")
+            val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return@runCatching
+            if (callLong(book, "getUid") != identity.accountId) return@runCatching
             val cloudId = callLong(book, "getCloudId")
-            if (id > 0) localBooksById[id] = book
-            if (cloudId > 0) localBooksByCloudId[cloudId] = book
+            AccountHostRuntime.withCurrentStorage(identity) {
+                synchronized(localBooksByCloudId) {
+                    if (cachedAccountGeneration != identity.generation) {
+                        localBooksByCloudId.clear()
+                        completedCoverFixes.clear()
+                        cachedAccountGeneration = identity.generation
+                    }
+                    if (cloudId > 0L) localBooksByCloudId[cloudId] = book
+                }
+            }
         }
     }
+
+    private fun detailContext(
+        id: Long, compat: Boolean, vm: Any, repository: Any?, isOverview: Boolean = false,
+        localBookUuid: String? = null,
+    ): DetailContext? {
+        val activity = activityProvider()?.takeUnless { it.isFinishing || it.isDestroyed } ?: return null
+        val identity = AccountHostRuntime.storageSnapshot(activity) ?: return null
+        return DetailContext(id, compat, WeakReference(vm), WeakReference(repository), identity,
+            WeakReference(activity), isOverview = isOverview, localBookUuid = localBookUuid)
+    }
+
+    private fun isAccountCurrent(details: DetailContext): Boolean {
+        val activity = details.activityRef.get() ?: return false
+        return com.reamicro.fix.reload.ModuleResources.accepting && activityProvider() === activity &&
+            !activity.isFinishing && !activity.isDestroyed && AccountHostRuntime.isCurrentStorage(details.identity, activity)
+    }
+
+    private fun isDetailsCurrent(details: DetailContext): Boolean =
+        isAccountCurrent(details) && details.viewModelRef.get() != null && details.repositoryRef.get() != null &&
+            currentDetailsContext?.pageKey === details.pageKey &&
+            (!details.isOverview || overviewContexts[details.bookId]?.pageKey === details.pageKey)
+
+    private fun checkDetailsCurrent(details: DetailContext) {
+        if (!isDetailsCurrent(details)) throw java.util.concurrent.CancellationException("关联页面或账号已变化，请重新操作")
+    }
+
+    private fun <T> withDetailsCurrent(details: DetailContext, action: () -> T): T =
+        AccountHostRuntime.withCurrentStorage(details.identity, details.activityRef.get()) {
+            checkDetailsCurrent(details)
+            action()
+        }
 
     private fun limitedBookCache(): LinkedHashMap<Long, Any> =
         object : LinkedHashMap<Long, Any>(32, 0.75f, true) {
@@ -594,58 +453,29 @@ class BookDetailsAssociationActionHook(
         }
 
     private fun callLong(target: Any, methodName: String): Long =
-        (XposedHelpers.callMethod(target, methodName) as? Number)?.toLong()
-            ?: XposedHelpers.callMethod(target, methodName).toString().toLong()
+        (binding.property(target, propertyName(methodName)) as Number).toLong()
 
     private fun callString(target: Any, methodName: String): String =
-        XposedHelpers.callMethod(target, methodName)?.toString().orEmpty()
+        binding.property(target, propertyName(methodName))?.toString().orEmpty()
 
-    private fun callBoolean(target: Any, methodName: String): Boolean =
-        (XposedHelpers.callMethod(target, methodName) as? Boolean)
-            ?: XposedHelpers.callMethod(target, methodName).toString().toBoolean()
-
-    private fun targetUnit(): Any? = runCatching {
-        XposedHelpers.findClass(KOTLIN_UNIT_CLASS, classLoader)
-            .hostField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null)
-    }.getOrNull()
+    private fun propertyName(getter: String): String = getter.removePrefix("get").replaceFirstChar(Char::lowercaseChar)
 
     private data class DetailContext(
         val bookId: Long,
         val compat: Boolean,
         val viewModelRef: WeakReference<Any>,
         val repositoryRef: WeakReference<Any>,
-
+        val identity: AccountHostRuntime.Identity,
+        val activityRef: WeakReference<Activity>,
+        val pageKey: Any = Any(),
         val isOverview: Boolean = false,
         val localBookId: Long? = null,
+        val localBookUuid: String? = null,
     )
 
-    private data class CoverFixUploadResult(
-        val userBookId: Long,
-        val coverUrl: String,
-    )
+    private data class CoverFixUploadResult(val userBookId: Long, val pending: Boolean = false)
 
     private companion object {
-        const val BOOK_DETAILS_VIEW_MODEL_CLASS = HostClasses.Host.BOOK_DETAILS_VIEW_MODEL
-        const val BOOK_OVERVIEW_VIEW_MODEL_CLASS = HostClasses.Host.BOOK_OVERVIEW_VIEW_MODEL
-        const val BOOKSHELF_SCREEN_CLASS = HostClasses.Host.BOOKSHELF_SCREEN
-        const val BOOK_CLASS = HostClasses.Host.BOOK
-        const val ROUTE_BOOK_DETAIL_CLASS = "app.zhendong.reamicro.Route\$BookDetail"
-        const val ROUTE_BOOK_OVERVIEW_CLASS = "app.zhendong.reamicro.Route\$BookOverview"
-        const val POST_USER_BOOK_REQ_CLASS = HostClasses.Host.POST_USER_BOOK_REQ
-        const val ENVELOPE_KT_CLASS = HostClasses.Host.ENVELOPE_KT
-        const val BOOKSHELF_FIND_BOOK_BY_ID_METHOD = "findBookById"
-        const val BOOKSHELF_SEARCH_METHOD_KEYWORD = "search"
-        const val NAV_GRAPH_SCOPE_CLASS = HostClasses.Host.NAV_GRAPH_SCOPE
-        const val NAV_CONTROLLER_HOLDER_CLASS = HostClasses.Host.NAV_CONTROLLER_HOLDER
-        const val ANDROIDX_NAV_CONTROLLER_CLASS = HostClasses.AndroidX.NAV_CONTROLLER
-        const val KOTLIN_UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
-        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
-        const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
-        const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
         const val MAX_CACHED_LOCAL_BOOKS = 32
         const val MAX_COMPLETED_COVER_FIXES = 64
         const val LOG_PREFIX = "ReaMicro LSP"

@@ -32,6 +32,7 @@ data class ApiModuleUpdateCheck(
     val available: Boolean,
     val release: ApiModuleRelease?,
     val message: String,
+    val succeeded: Boolean = true,
 )
 
 fun checkModuleUpdate(client: ApiServerClient): ApiModuleUpdateCheck = runCatching {
@@ -50,4 +51,7 @@ fun checkModuleUpdate(client: ApiServerClient): ApiModuleUpdateCheck = runCatchi
         else -> release.buildTime > currentBuildTime
     }
     ApiModuleUpdateCheck(available, release, if (available) "发现新版本 ${release.versionName}" else "已是最新版本")
-}.getOrElse { ApiModuleUpdateCheck(false, null, it.message ?: "检查更新失败") }
+}.getOrElse {
+    com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
+    ApiModuleUpdateCheck(false, null, it.message ?: "检查更新失败", succeeded = false)
+}

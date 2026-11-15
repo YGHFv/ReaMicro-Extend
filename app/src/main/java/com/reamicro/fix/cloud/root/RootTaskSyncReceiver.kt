@@ -3,7 +3,6 @@ package com.reamicro.fix.cloud.root
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
 import android.os.Looper
 import com.reamicro.fix.logging.ModuleAndroidLog
 import java.util.concurrent.atomic.AtomicBoolean
@@ -15,7 +14,9 @@ class RootTaskSyncReceiver : BroadcastReceiver() {
         val done = AtomicBoolean(false)
         val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
         val finish = Runnable { if (done.compareAndSet(false, true)) pending.finish() }
-        main.postDelayed(finish, 25_000L)
+        // The sender uses FLAG_RECEIVER_FOREGROUND. Finish within its broadcast
+        // budget even if SU authorization or the serialized bridge is still pending.
+        if (!main.postDelayed(finish, 8_000L)) finish.run()
         try {
             RootTaskBridge.requestSync(context.applicationContext) {
                 main.removeCallbacks(finish)

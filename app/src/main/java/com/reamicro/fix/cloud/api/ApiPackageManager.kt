@@ -2,6 +2,8 @@ package com.reamicro.fix.cloud.api
 
 import android.content.Context
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.online.OnlineSourceEntry
+import com.reamicro.fix.online.OnlineSourceTask
 import com.reamicro.fix.settings.OnlineEpubStyleStore
 import com.reamicro.fix.settings.XposedModuleSettings
 import java.io.File
@@ -13,6 +15,7 @@ import java.security.spec.X509EncodedKeySpec
 import android.util.Base64
 import org.json.JSONObject
 import com.reamicro.fix.association.provider.ExternalSourceLoader
+import com.reamicro.fix.reload.TaskCancellation
 
 data class ApiPackageUpdateResult(
     val packageId: String,
@@ -32,10 +35,13 @@ data class InstalledApiPackage(
 
 class ApiPackageManager(
     private val context: Context,
-    private val client: ApiServerClient,
+    client: ApiServerClient,
     private val settings: XposedModuleSettings,
 ) {
+    private val client = client.snapshot()
+
     fun check(kind: ApiPackageKind): List<ApiContentPackage> {
+        checkModuleEnabled()
         val packages = client.packages(kind)
         return packages.filter { candidate ->
             isPackageUpdateAvailable(
@@ -48,24 +54,46 @@ class ApiPackageManager(
     }
 
     fun install(contentPackage: ApiContentPackage): ApiPackageUpdateResult = runCatching {
+        checkModuleEnabled()
         require(contentPackage.schemaVersion == 1) { "不支持的内容包格式" }
-        val bytes = client.download(contentPackage)
+        val originalSource = onlineSource(contentPackage)
+        val bytes = if (originalSource == null) client.download(contentPackage)
+            else OnlineSourceTask(originalSource).use { operation -> operation.run { client.download(contentPackage) } }
         require(sha256(bytes) == contentPackage.sha256.lowercase()) { "内容包摘要校验失败" }
         verifySignature(contentPackage, bytes)
-        val cache = cacheFile(contentPackage)
-        cache.parentFile?.mkdirs()
-        val temp = File(cache.parentFile, ".${cache.name}.tmp")
-        temp.writeBytes(bytes)
-        if (!temp.renameTo(cache)) error("内容包缓存写入失败")
-        saveCacheManifest(contentPackage)
-        val contentId = installPayload(contentPackage, bytes)
-        saveInstalledVersion(contentPackage, contentId)
+        synchronized(MUTATION_LOCK) {
+            checkModuleEnabled()
+            client.checkCurrentRequest()
+            originalSource?.let(OnlineSourceStore::requireCurrent)
+            val cache = cacheFile(contentPackage)
+            check(cache.parentFile!!.isDirectory || cache.parentFile!!.mkdirs()) { "内容包缓存目录不可用" }
+            val temp = File.createTempFile(".package-", ".tmp", cache.parentFile)
+            try {
+                temp.outputStream().use { it.write(bytes); it.fd.sync() }
+                require(temp.renameTo(cache)) { "内容包缓存写入失败" }
+            } finally {
+                temp.delete()
+            }
+            saveCacheManifest(contentPackage)
+            checkModuleEnabled()
+            val contentId = installPayload(contentPackage, bytes, originalSource,
+                contentPackage.kind == ApiPackageKind.ONLINE_SOURCE && originalSource == null)
+            checkModuleEnabled()
+            saveInstalledVersion(contentPackage, contentId)
+        }
         ApiPackageUpdateResult(contentPackage.packageId, contentPackage.version, true, "安装成功")
     }.getOrElse {
+        TaskCancellation.rethrowIfCancelled(it)
         ApiPackageUpdateResult(contentPackage.packageId, contentPackage.version, false, it.message ?: "安装失败")
     }
 
-    fun link(kind: ApiPackageKind, packageId: String, localContentId: String) {
+    private fun checkModuleEnabled() {
+        TaskCancellation.checkCurrent()
+        if (!settings.snapshot().moduleEnabled) throw java.util.concurrent.CancellationException("补全计划已关闭")
+    }
+
+    fun link(kind: ApiPackageKind, packageId: String, localContentId: String, expectedSource: OnlineSourceEntry? = null) = synchronized(MUTATION_LOCK) {
+        fun persist() {
         val packageKey = key(kind, packageId)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("kind:$packageKey", kind.wireValue)
@@ -76,6 +104,9 @@ class ApiPackageManager(
             .putString("content:$packageKey", localContentId)
             .putStringSet(KEY_INSTALLED_IDS, installedKeys() + packageKey)
             .apply()
+        }
+        checkModuleEnabled()
+        if (expectedSource == null) persist() else OnlineSourceStore.withCurrent(expectedSource, ::persist)
     }
 
     fun isRegistered(kind: ApiPackageKind, packageId: String): Boolean =
@@ -96,8 +127,8 @@ class ApiPackageManager(
         }
     }
 
-    fun uninstall(kind: ApiPackageKind, packageId: String): Boolean {
-        val item = installed().firstOrNull { it.kind == kind && it.packageId == packageId } ?: return false
+    fun uninstall(kind: ApiPackageKind, packageId: String): Boolean = synchronized(MUTATION_LOCK) {
+        val item = installed().firstOrNull { it.kind == kind && it.packageId == packageId } ?: return@synchronized false
         val removed = when (kind) {
             ApiPackageKind.ONLINE_SOURCE -> OnlineSourceStore.remove(context, item.contentId.ifBlank { packageId })
             ApiPackageKind.EPUB_STYLE -> {
@@ -110,7 +141,7 @@ class ApiPackageManager(
             }
             ApiPackageKind.ASSOCIATION_SOURCE -> {
                 val root = File(context.filesDir, "reamicro_sources")
-                val target = File(root, item.contentId)
+                val target = ApiPackagePaths.child(root, item.contentId)
                 target.setWritable(true)
                 !target.exists() || target.delete()
             }
@@ -123,31 +154,53 @@ class ApiPackageManager(
                 .apply()
             ExternalSourceLoader.invalidate()
         }
-        return removed
+        removed
     }
 
-    fun rollback(kind: ApiPackageKind, packageId: String): ApiPackageUpdateResult = runCatching {
+    fun rollback(kind: ApiPackageKind, packageId: String): ApiPackageUpdateResult = runCatching { synchronized(MUTATION_LOCK) {
         val current = installed().firstOrNull { it.kind == kind && it.packageId == packageId }
             ?: error("内容包尚未安装")
-        val directory = File(context.filesDir, "$ROOT/${kind.wireValue}/${safe(packageId)}")
-        val target = directory.listFiles()
+        val directory = File(context.filesDir, "$ROOT/${kind.wireValue}/${ApiPackagePaths.component(packageId)}")
+        val historical = directory.listFiles()
             .orEmpty()
             .filter { it.isFile && it.extension == "json" }
-            .mapNotNull { file -> runCatching { ApiContentPackage.fromJson(JSONObject(file.readText(Charsets.UTF_8))) }.getOrNull() }
-            .filter { it.version != current.version }
-            .maxWithOrNull(compareBy<ApiContentPackage> { it.buildTime }.thenBy { it.version })
+            .mapNotNull { file -> runCatching {
+                ApiContentPackage.fromJson(JSONObject(file.readText(Charsets.UTF_8)))?.let { it to file }
+            }.getOrNull() }
+            .filter { (candidate, _) ->
+                candidate.kind == kind && candidate.packageId == packageId &&
+                    isPackageUpdateAvailable(current.version, current.buildTime, candidate.version, candidate.buildTime)
+            }
+            .maxWithOrNull { a, b ->
+                comparePackageVersions(a.first.version, b.first.version).takeIf { it != 0 }
+                    ?: a.first.buildTime.compareTo(b.first.buildTime)
+            }
             ?: error("没有可回滚的历史版本")
-        val bytes = cacheFile(target).readBytes()
+        val (target, manifest) = historical
+        val originalSource = onlineSource(target)
+        val bytes = ApiPackagePaths.child(directory, "${manifest.nameWithoutExtension}.pkg").readBytes()
         require(sha256(bytes) == target.sha256.lowercase()) { "历史内容包摘要校验失败" }
         verifySignature(target, bytes)
-        val contentId = installPayload(target, bytes)
+        client.checkCurrentRequest()
+        val contentId = installPayload(target, bytes, originalSource,
+            kind == ApiPackageKind.ONLINE_SOURCE && originalSource == null)
         saveInstalledVersion(target, contentId)
         ApiPackageUpdateResult(packageId, target.version, true, "已回滚到 ${target.version}")
-    }.getOrElse { error ->
+    } }.getOrElse { error ->
+        TaskCancellation.rethrowIfCancelled(error)
         ApiPackageUpdateResult(packageId, "", false, error.message ?: "回滚失败")
     }
 
-    private fun installPayload(contentPackage: ApiContentPackage, bytes: ByteArray): String {
+    private fun onlineSource(contentPackage: ApiContentPackage): OnlineSourceEntry? {
+        if (contentPackage.kind != ApiPackageKind.ONLINE_SOURCE) return null
+        val identities = contentPackage.aliases + contentPackage.contentId + contentPackage.packageId
+        return OnlineSourceStore.list(context).firstOrNull { source ->
+            source.packageId == contentPackage.packageId || identities.any { OnlineSourceStore.matchesIdentity(source, it) }
+        }
+    }
+
+    private fun installPayload(contentPackage: ApiContentPackage, bytes: ByteArray,
+        originalSource: OnlineSourceEntry? = null, requireAbsent: Boolean = false): String {
         return when (contentPackage.kind) {
             ApiPackageKind.ONLINE_SOURCE -> {
                 OnlineSourceStore.importPackageBytes(
@@ -157,8 +210,9 @@ class ApiPackageManager(
                     packageId = contentPackage.packageId,
                     stableSourceId = contentPackage.contentId.ifBlank { contentPackage.packageId },
                     aliases = contentPackage.aliases,
-                )
-                contentPackage.contentId.ifBlank { contentPackage.packageId }
+                    expected = originalSource,
+                    requireAbsent = requireAbsent,
+                ).id
             }
             ApiPackageKind.EPUB_STYLE -> {
                 val json = JSONObject(bytes.toString(Charsets.UTF_8))
@@ -185,12 +239,15 @@ class ApiPackageManager(
                 val extension = contentPackage.payloadName.substringAfterLast('.', "rmsource").lowercase()
                 require(extension in setOf("rmsource", "apk", "jar", "dex")) { "关联源文件类型不受支持" }
                 val root = File(context.filesDir, "reamicro_sources").apply { mkdirs() }
-                val target = File(root, "${safe(contentPackage.contentId.ifBlank { contentPackage.packageId })}.$extension")
-                val temp = File(root, ".${target.name}.tmp")
-                temp.writeBytes(bytes)
-                if (target.exists()) target.setWritable(true)
-                require(temp.renameTo(target)) { "关联源文件写入失败" }
-                target.setReadOnly()
+                val target = ApiPackagePaths.child(root, "${ApiPackagePaths.component(contentPackage.contentId.ifBlank { contentPackage.packageId })}.$extension")
+                val temp = File.createTempFile(".association-", ".tmp", root)
+                try {
+                    temp.outputStream().use { it.write(bytes); it.fd.sync() }
+                    require(temp.setReadOnly()) { "关联源文件只读保护失败" }
+                    require(temp.renameTo(target)) { "关联源文件写入失败" }
+                } finally {
+                    temp.delete()
+                }
 
                 val previous = installed().firstOrNull { it.kind == contentPackage.kind && it.packageId == contentPackage.packageId }
                     ?.contentId
@@ -211,7 +268,7 @@ class ApiPackageManager(
     }
 
     private fun verifySignature(contentPackage: ApiContentPackage, bytes: ByteArray) {
-        val keyText = client.probe().meta?.signingPublicKey.orEmpty()
+        val keyText = packageSigningKey(client.probe())
         if (keyText.isBlank()) return
         require(contentPackage.signature.isNotBlank()) { "服务器要求内容包签名" }
         val keyBytes = Base64.decode(keyText, Base64.DEFAULT)
@@ -248,21 +305,24 @@ class ApiPackageManager(
     private fun key(kind: ApiPackageKind, packageId: String): String = "${kind.wireValue}:$packageId"
 
     private fun cacheFile(contentPackage: ApiContentPackage): File =
-        File(context.filesDir, "$ROOT/${contentPackage.kind.wireValue}/${safe(contentPackage.packageId)}/${safe(contentPackage.version)}.pkg")
+        File(context.filesDir, "$ROOT/${contentPackage.kind.wireValue}/${ApiPackagePaths.component(contentPackage.packageId)}/${ApiPackagePaths.cacheStem(contentPackage)}.pkg")
 
     private fun saveCacheManifest(contentPackage: ApiContentPackage) {
         val directory = cacheFile(contentPackage).parentFile ?: return
-        val manifest = File(directory, "${safe(contentPackage.version)}.json")
+        val manifest = File(directory, "${ApiPackagePaths.cacheStem(contentPackage)}.json")
         manifest.writeText(
             JSONObject()
                 .put("packageId", contentPackage.packageId)
                 .put("kind", contentPackage.kind.wireValue)
                 .put("version", contentPackage.version)
                 .put("buildTime", contentPackage.buildTime)
+                .put("schemaVersion", contentPackage.schemaVersion)
+                .put("minModuleVersion", contentPackage.minModuleVersion)
                 .put("contentId", contentPackage.contentId)
                 .put("sha256", contentPackage.sha256)
                 .put("signature", contentPackage.signature)
                 .put("payload", contentPackage.payloadName)
+                .put("aliases", org.json.JSONArray(contentPackage.aliases.toList()))
                 .toString(),
             Charsets.UTF_8,
         )
@@ -273,9 +333,8 @@ class ApiPackageManager(
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
-    private fun safe(value: String): String = value.replace(Regex("[^A-Za-z0-9_.-]"), "_")
-
     companion object {
+        private val MUTATION_LOCK = Any()
         private const val PREFS = "reamicro_api_packages"
         private const val ROOT = "reamicro_api_packages"
         private const val HIGHLIGHT_IMAGE_DIR = "reader_highlight_nine_patch"

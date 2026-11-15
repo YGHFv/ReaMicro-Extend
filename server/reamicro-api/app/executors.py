@@ -1,18 +1,26 @@
 import asyncio
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app import runtime
 from app.config_store import bounded_config_int
 from app.crypto import decrypt_secret
-from app.state import load_credentials, save_credentials
+from app.state import load_credentials
 
 
 def redact_message(value: str) -> str:
-    return value.replace("Bearer ", "Bearer ***").replace("token", "token=***")[:500]
+    value = re.sub(r"(?i)\bBearer\s+[^\s\"',;<>]+", "Bearer ***", str(value))
+    value = re.sub(
+        r"""(?i)(["']?(?:access[_-]?token|refresh[_-]?token|token|password|secret)["']?\s*[:=]\s*)"""
+        r"""(["']?)[^\s,;&}\]"']+\2""",
+        r"\1***", value,
+    )
+    return value[:500]
 
 
 def json_http_request(url: str, token: str, payload: Any, endpoint: str = "", timeout: int = 45) -> tuple[int, Any, str]:
@@ -197,14 +205,22 @@ def credential_for_task(task: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         raise ValueError("阅微凭据不存在或不属于当前账号")
     if not credential.get("enabled", True):
         raise ValueError("阅微凭据已暂停，请重新验证后再运行任务")
+    secret_encrypted = str(credential.get("secretEncrypted", ""))
+    credential_owner = str(credential.get("owner", ""))
     try:
-        secret = decrypt_secret(str(credential.get("secretEncrypted", "")))
+        secret = decrypt_secret(secret_encrypted)
     except Exception as error:
-        update_credential_health(str(credential.get("id", credential_id)), False, f"凭据解密失败：{error}")
+        update_credential_health(
+            str(credential.get("id", credential_id)), False, f"凭据解密失败：{error}",
+            expected_owner=credential_owner, expected_secret_encrypted=secret_encrypted,
+        )
         raise ValueError("阅微凭据无法解密，请重新上传")
     if not isinstance(secret, dict) or not secret.get("token"):
         raise ValueError("阅微凭据无有效 token")
-    update_credential_health(str(credential.get("id", credential_id)), True, "任务使用成功", used=True)
+    update_credential_health(
+        str(credential.get("id", credential_id)), True, "任务使用成功", used=True,
+        expected_owner=credential_owner, expected_secret_encrypted=secret_encrypted,
+    )
     return request, secret
 
 
@@ -982,23 +998,49 @@ async def verify_reamicro_secret(token: str, base_url: str) -> tuple[bool, str]:
     return False, f"HTTP {status_code} {redact_message(raw)}"
 
 
-def update_credential_health(credential_id: str, success: bool, message: str, used: bool = False) -> None:
-    credentials = load_credentials()
-    credential = credentials.get(credential_id)
-    if not credential:
-        return
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    if used:
-        credential["lastUsedAt"] = now
-    if success:
-        credential["lastVerifiedAt"] = now
-        credential["lastVerifyMessage"] = message
-        credential["verifyFailures"] = 0
-    else:
-        credential["lastFailedAt"] = now
-        credential["lastVerifyMessage"] = message
-        credential["verifyFailures"] = int(credential.get("verifyFailures", 0)) + 1
-        if credential["verifyFailures"] >= 3:
-            credential["enabled"] = False
-    credential["updatedAt"] = now
-    save_credentials(credentials)
+def update_credential_health(
+    credential_id: str, success: bool, message: str, used: bool = False, *,
+    expected_owner: str | None = None, expected_secret_encrypted: str | None = None,
+) -> bool:
+    store = runtime.get_state_store()
+    store.initialize()
+    # 读取、版本核对和单凭据更新共用数据库写事务，等待锁后也重新核对。
+    with store.lock, store.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT body FROM state_documents WHERE namespace = ? AND document_key = ?",
+            ("credentials", credential_id),
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            credential = json.loads(row[0])
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(credential, dict):
+            return False
+        if expected_owner is not None and credential.get("owner") != expected_owner:
+            return False
+        if (expected_secret_encrypted is not None
+                and str(credential.get("secretEncrypted", "")) != expected_secret_encrypted):
+            return False
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if used:
+            credential["lastUsedAt"] = now
+        if success:
+            credential["lastVerifiedAt"] = now
+            credential["lastVerifyMessage"] = message
+            credential["verifyFailures"] = 0
+        else:
+            credential["lastFailedAt"] = now
+            credential["lastVerifyMessage"] = message
+            credential["verifyFailures"] = int(credential.get("verifyFailures", 0)) + 1
+            if credential["verifyFailures"] >= 3:
+                credential["enabled"] = False
+        credential["updatedAt"] = now
+        connection.execute(
+            "UPDATE state_documents SET body = ?, updated_at = ? WHERE namespace = ? AND document_key = ?",
+            (json.dumps(credential, ensure_ascii=False, separators=(",", ":")),
+             datetime.now(timezone.utc).isoformat(), "credentials", credential_id),
+        )
+        return True

@@ -1,16 +1,13 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethodsNamed
 import com.reamicro.fix.core.HostCoroutines
-import com.reamicro.fix.core.HostSymbols
+import com.reamicro.fix.core.HostEpubRuntimeBindings
+import com.reamicro.fix.core.HostReaderWindowBindings
 import com.reamicro.fix.core.HostMutex
 import android.os.SystemClock
 import com.reamicro.fix.epub.editor.*
 import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.reader.SearchHighlightMarkDraft
-import com.reamicro.fix.xposed.XposedHelpers
 
 internal data class ResolvedSearchTarget(
     val result: FullTextSearchResult, val start: Any, val end: Any,
@@ -19,6 +16,7 @@ internal data class ResolvedSearchTarget(
 )
 
 internal class ReaderSearchResolver(private val reader: ReaderHook) {
+    private val host get() = requireNotNull(HostEpubRuntimeBindings.current) { "EPUB runtime contract unavailable" }
     private data class Chapter(val modified: Long, val length: Long, val epub: Any, val digest: String,
         val sourceMapper: HostSelectionSourceMapper, val source: SelectionSourceMap,
         val renderMapper: HostSelectionSourceMapper?, val rendered: SelectionSourceMap?,
@@ -31,13 +29,13 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
     fun clear() { cache.clear(); scroll.clear() }
     fun resolve(result: FullTextSearchResult, index: Int, vm: Any, epub: Any,
         loaded: ReaderSearchScrollBridge.Snapshot?, current: () -> Boolean): ResolvedSearchTarget {
-        val window = reader.epubWindow
+        val window = host
         for (attempt in 0..1) {
-            val styleBefore = window.callOrNull("getRootStyle")
+            val styleBefore = window.rootStyle()
             val snapshot = loaded?.takeIf { attempt == 0 && it.rootStyle === styleBefore }
             try { return resolveOnce(result, index, vm, epub, snapshot, current) }
             catch (error: Exception) {
-                if (attempt == 0 && current() && styleBefore !== window.callOrNull("getRootStyle")) {
+                if (attempt == 0 && current() && styleBefore !== window.rootStyle()) {
                     clear()
                     Thread.sleep(32)
                 } else throw error
@@ -53,8 +51,8 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
         val key = result.file.path
 
         val flip = checkNotNull(reader.currentSearchPagerMode) { "翻页布局尚未就绪，请稍后定位" }
-        val window = reader.epubWindow
-        val rootStyle = window.callOrNull("getRootStyle")
+        val window = host
+        val rootStyle = window.rootStyle()
         val cacheKey = "$flip|$key"
         val targetKey = "$index|${result.startCfi}|${result.endCfi}"
         var chapter = cache.remove(cacheKey)?.takeIf { it.epub === epub && it.digest == result.sourceDigest && it.modified == modified && it.length == length && it.rootStyle === rootStyle &&
@@ -69,16 +67,16 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
             val sourceMapper = HostSelectionSourceMapper(reader.classLoader)
             val source = sourceMapper.map(raw, key)
             val point = sourceMapper.point(sourceMapper.hostCfi(requireNotNull(result.startCfi)))
-            val items = (reader.callNoArg(epub, "getItemRefs") as? List<*>).orEmpty()
-            val spine = items.indexOfFirst { it != null && (reader.callNoArg(it, "getIndex") as? Number)?.toInt() == point.itemRef }
+            val items = host.list("epub.itemRefs", epub)
+            val spine = items.indexOfFirst { host.int("item.index", it) == point.itemRef }
             require(spine >= 0) { "搜索结果不属于当前书籍" }
-            if (flip == 3 && loaded != null && loaded.rootStyle === window.callOrNull("getRootStyle") &&
+            if (flip == 3 && loaded != null && loaded.rootStyle === window.rootStyle() &&
                 scroll.canResolve(loaded.elements, result, sourceMapper)) {
                         chapter = Chapter(modified, length, epub, digest, sourceMapper, source, null, null,
                             loaded.rootStyle, loaded.elements)
             }
             if (chapter == null) {
-                val mutex = XposedHelpers.getObjectField(vm, "virtualPageLoadMutex") ?: error("章节加载锁不可用")
+                val mutex = requireNotNull(HostReaderWindowBindings.current).field("vm.mutex").get(vm) ?: error("章节加载锁不可用")
                 val lease = HostMutex(mutex, Any())
                 var locked = false
                 try {
@@ -89,26 +87,24 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
                     }
                     check(locked && current()) { "章节正在加载，请稍后重试" }
                     if (flip == 3) {
-                        val read = epub.javaClass.hostMethodsNamed("readElements").single { it.parameterCount == 2 }
+                        val read = host.method("readElements")
                         val elements = (HostCoroutines.invoke(reader.classLoader, read, epub, spine) as? List<*>)
                             .orEmpty().filterNotNull()
                         chapter = Chapter(modified, length, epub, digest, sourceMapper, source, null, null,
-                            window.callOrNull("getRootStyle"), elements)
+                            window.rootStyle(), elements)
                     } else {
-                    val pages = (XposedHelpers.getObjectField(vm, "virtualPages") as? Map<*, *>)?.values.orEmpty()
+                    val pages = requireNotNull(HostReaderWindowBindings.current).pages(vm).values
                     var document = pages.firstNotNullOfOrNull { page ->
-                        val cfi = page?.let { reader.callNoArg(it, "getStart") }
+                        val cfi = host.value("page.start", page)
                         if (cfi != null && sourceMapper.anchorPoint(cfi).itemRef == point.itemRef)
-                            reader.callNoArg(page, "getDocument") else null
+                            host.value("page.document", page) else null
                     }
                     if (document == null) {
                         val loader = reader.classLoader
-                        val dispatcher = if (HostSymbols.isIdentity)
-                            XposedHelpers.callStaticMethod(loader.hostClass("kotlinx.coroutines.Dispatchers"), "getIO")
-                        else loader.hostClass("kotlinx.coroutines.scheduling.DefaultIoScheduler").hostField("INSTANCE").get(null)
-                        val read = epub.javaClass.hostMethodsNamed("read").single { it.parameterCount == 3 }
+                        val dispatcher = host.io
+                        val read = host.method("read")
                         val loaded = HostCoroutines.invoke(loader, read, epub, spine, dispatcher) as? List<*>
-                        document = loaded?.firstNotNullOfOrNull { it?.let { page -> reader.callNoArg(page, "getDocument") } }
+                        document = loaded?.firstNotNullOfOrNull { it?.let { page -> host.value("page.document", page) } }
                     }
                     check(reader.currentViewModelRef?.get() === vm &&
                         (reader.currentEpubStrong ?: reader.currentEpubRef?.get()) === epub) { "搜索会话已更新" }
@@ -117,7 +113,7 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
                     renderMapper.bindSearchDocument(document ?: error("目标章节没有可阅读页面"))
                     val rendered = renderMapper.map(raw, key)
                     chapter = Chapter(modified, length, epub, digest, sourceMapper, source, renderMapper, rendered,
-                        window.callOrNull("getRootStyle"))
+                        window.rootStyle())
                     }
                 } finally {
                     if (locked) lease.release()
@@ -129,11 +125,11 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
         while (cache.size > 2) cache.remove(cache.keys.first())
         check(current()) { "搜索请求已更新" }
         c.targets[targetKey]?.let { cached ->
-            check(c.rootStyle === window.callOrNull("getRootStyle")) { "排版正在更新，暂无法确认目标位置" }
+            check(c.rootStyle === window.rootStyle()) { "排版正在更新，暂无法确认目标位置" }
             return cached.copy(result = cached.result.copy(intentReceiver = result.intentReceiver))
         }
         fun remember(target: ResolvedSearchTarget): ResolvedSearchTarget {
-            check(c.rootStyle === window.callOrNull("getRootStyle")) { "排版正在更新，暂无法确认目标位置" }
+            check(c.rootStyle === window.rootStyle()) { "排版正在更新，暂无法确认目标位置" }
             c.targets[targetKey] = target
             if (c.targets.size > 64) c.targets.remove(c.targets.keys.first())
             return target

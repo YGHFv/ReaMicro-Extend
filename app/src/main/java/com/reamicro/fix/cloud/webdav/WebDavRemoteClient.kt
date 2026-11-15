@@ -1,8 +1,9 @@
 package com.reamicro.fix.cloud.webdav
 
 import android.util.Base64
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.xposed.XposedHelpers
+import android.os.SystemClock
+import com.reamicro.fix.association.network.HttpRequestPolicy
+import com.reamicro.fix.reload.TaskCancellation
 import java.io.File
 import java.net.URI
 import java.net.URL
@@ -49,9 +50,9 @@ internal class WebDavRemoteClient(
     private val log: (String) -> Unit,
     private val cleartextScope: CleartextScope,
 ) {
-    @Volatile private var httpClient: Any? = null
     private val alistTokenCache = ConcurrentHashMap<String, AlistTokenCache>()
     private val alistUnsupportedUntil = ConcurrentHashMap<String, Long>()
+    private val alistCacheSalt = ByteArray(32).also(java.security.SecureRandom()::nextBytes)
 
     fun request(
         credentials: WebDavCredentials,
@@ -62,10 +63,7 @@ internal class WebDavRemoteClient(
         headers: Map<String, String> = emptyMap(),
     ): WebDavHttpResponse {
         val response = executeOkHttpRequest(credentials, method, path, directory, body, headers)
-        return WebDavHttpResponse(
-            code = response.code,
-            bodyString = response.bodyString ?: "",
-        )
+        return response.copy(bodyString = response.bodyString.orEmpty())
     }
 
     fun requestToFile(
@@ -79,6 +77,48 @@ internal class WebDavRemoteClient(
         if (response.code !in 200..299) {
             error("WebDAV $method failed: HTTP ${response.code}")
         }
+    }
+
+    fun ensureCollection(credentials: WebDavCredentials, path: String) {
+        val normalized = normalizeWebDavPath(path)
+        val created = request(credentials, "MKCOL", normalized, directory = true)
+        if (created.code in 200..299) return
+        if (created.code != 405) throw WebDavHttpException(created.code, "WebDAV MKCOL failed: HTTP ${created.code}")
+        val existing = request(
+            credentials, "PROPFIND", normalized, directory = true,
+            body = WebDavMultistatus.COLLECTION_QUERY,
+            headers = mapOf("Depth" to "0", "Content-Type" to "application/xml; charset=utf-8"),
+        )
+        if (existing.code !in 200..299) {
+            throw WebDavHttpException(existing.code, "WebDAV collection check failed: HTTP ${existing.code}")
+        }
+        check(WebDavMultistatus.parse(existing.bodyString.orEmpty()).any {
+            it.isDirectory && normalizeWebDavPath(pathFromHref(credentials.url, it.href)) == normalized
+        }) { "WebDAV MKCOL 未创建目录，目标也不是已存在的目录" }
+    }
+
+    fun list(credentials: WebDavCredentials, path: String): List<WebDavListedResource> {
+        TaskCancellation.checkCurrent()
+        val current = normalizeWebDavPath(path.ifBlank { "/" })
+        val response = request(
+            credentials, "PROPFIND", current, directory = true,
+            body = WebDavMultistatus.DIRECTORY_QUERY,
+            headers = mapOf("Depth" to "1", "Content-Type" to "application/xml; charset=utf-8"),
+        )
+        if (response.code !in 200..299) {
+            throw WebDavHttpException(response.code, "WebDAV PROPFIND failed: HTTP ${response.code}")
+        }
+        return WebDavMultistatus.parse(response.bodyString.orEmpty()).mapNotNull { resource ->
+            TaskCancellation.checkCurrent()
+            val entryPath = normalizeWebDavPath(pathFromHref(credentials.url, resource.href))
+            if (entryPath == current || entryPath.substringBeforeLast('/').ifBlank { "/" } != current) {
+                return@mapNotNull null
+            }
+            val name = resource.displayName.ifBlank { entryPath.substringAfterLast('/') }
+            if (name.isBlank() || name.startsWith(".")) return@mapNotNull null
+            WebDavListedResource(name, entryPath, resource.isDirectory, resource.size,
+                parseWebDavDate(resource.lastModified), resource.href)
+        }.distinctBy { it.path }
     }
 
     fun requestToFileByUrl(
@@ -129,6 +169,7 @@ internal class WebDavRemoteClient(
         contentType: String,
     ): Boolean =
         runCatching {
+            TaskCancellation.checkCurrent()
             val endpoint = alistApiEndpoint(credentials.url) ?: return false
             val cacheKey = alistCacheKey(endpoint, credentials)
             if (isAlistUnsupported(cacheKey)) return false
@@ -144,10 +185,11 @@ internal class WebDavRemoteClient(
                 ),
                 requestBodyOverride = newOkHttpFileRequestBody(file, contentType),
             )
-            val ok = upload.code in 200..299 && alistResponseOk(upload.bodyString.orEmpty())
-            log("AList upload fallback path=$path code=${upload.code} ok=$ok body=${upload.bodyString.orEmpty().take(160)}")
+            val ok = upload.code in 200..299 && AlistProtocol.success(upload.bodyString.orEmpty())
+            log("AList upload fallback path=$path code=${upload.code} ok=$ok")
             ok
         }.onFailure {
+            TaskCancellation.rethrowIfCancelled(it)
             log("AList upload fallback failed path=$path error=${it.message}")
         }.getOrDefault(false)
 
@@ -158,6 +200,7 @@ internal class WebDavRemoteClient(
         onProgress: ((Int) -> Unit)? = null,
     ): Boolean =
         runCatching {
+            TaskCancellation.checkCurrent()
             val endpoint = alistApiEndpoint(credentials.url) ?: return false
             val cacheKey = alistCacheKey(endpoint, credentials)
             if (isAlistUnsupported(cacheKey)) return false
@@ -176,8 +219,8 @@ internal class WebDavRemoteClient(
                 ),
             )
             val body = response.bodyString.orEmpty()
-            if (response.code !in 200..299 || !alistResponseOk(body)) {
-                log("AList download fallback fs/get rejected path=$fsPath code=${response.code} body=${body.take(160)}")
+            if (response.code !in 200..299 || !AlistProtocol.success(body)) {
+                log("AList download fallback fs/get rejected path=$fsPath code=${response.code}")
                 return false
             }
             val rawUrl = JSONObject(body).optJSONObject("data")?.optString("raw_url").orEmpty()
@@ -185,11 +228,13 @@ internal class WebDavRemoteClient(
                 log("AList download fallback no raw_url path=$fsPath")
                 return false
             }
+            TaskCancellation.checkCurrent()
             outputFile.delete()
             requestToFileByUrl(credentials, rawUrl, outputFile, onProgress)
             log("AList download fallback ok path=$fsPath")
             true
         }.onFailure {
+            TaskCancellation.rethrowIfCancelled(it)
             log("AList download fallback failed path=$path error=${it.message}")
         }.getOrDefault(false)
 
@@ -201,6 +246,7 @@ internal class WebDavRemoteClient(
         maxPages: Int,
     ): List<AlistSearchEntry>? =
         runCatching {
+            TaskCancellation.checkCurrent()
             val endpoint = alistApiEndpoint(credentials.url) ?: return null
             val cacheKey = alistCacheKey(endpoint, credentials)
             if (isAlistUnsupported(cacheKey)) return null
@@ -209,6 +255,7 @@ internal class WebDavRemoteClient(
             var page = 1
             var total = Int.MAX_VALUE
             while (results.size < resultLimit && page <= maxPages) {
+                TaskCancellation.checkCurrent()
                 val response = executeRawOkHttpRequest(
                     url = "${endpoint.apiBase}/fs/search",
                     method = "POST",
@@ -235,8 +282,8 @@ internal class WebDavRemoteClient(
                 }
                 val body = response.bodyString.orEmpty()
                 val root = JSONObject(body)
-                if (!alistResponseOk(body) && root.optInt("code", 0) != 200) {
-                    log("OpenList/AList search rejected body=${body.take(160)}")
+                if (!AlistProtocol.success(body)) {
+                    log("OpenList/AList search rejected code=${root.optInt("code", -1)}")
                     markAlistUnsupported(cacheKey)
                     return null
                 }
@@ -248,6 +295,7 @@ internal class WebDavRemoteClient(
                 val content = data.optJSONArray("content") ?: data.optJSONArray("files") ?: JSONArray()
                 if (content.length() == 0) break
                 for (index in 0 until content.length()) {
+                    TaskCancellation.checkCurrent()
                     val item = content.optJSONObject(index) ?: continue
                     val entry = alistSearchEntry(item, endpoint.rootPath) ?: continue
                     results.add(entry)
@@ -258,12 +306,14 @@ internal class WebDavRemoteClient(
             }
             results
         }.onFailure {
+            TaskCancellation.rethrowIfCancelled(it)
             log("OpenList/AList search unavailable: ${it.message}")
         }.getOrNull()
 
     fun buildUrl(baseUrl: String, path: String, directory: Boolean = false): URL {
-        val base = URI(baseUrl.trimEnd('/') + "/")
+        val base = URI(WebDavSyncProtocol.baseUrl(baseUrl) + "/")
         val segments = normalizeWebDavPath(path).trim('/').split('/').filter { it.isNotBlank() }
+        require(segments.none { it == "." || it == ".." }) { "WebDAV 路径不能越过根目录" }
         val encodedPath = segments.joinToString("/") {
             URLEncoder.encode(it, "UTF-8").replace("+", "%20")
         }
@@ -282,9 +332,11 @@ internal class WebDavRemoteClient(
         val rawPath = runCatching { URI(href).rawPath }.getOrNull()
             ?: runCatching { URL(href).path }.getOrNull()
             ?: href
-        val decodedBase = URLDecoder.decode(basePath, "UTF-8").trimEnd('/')
-        val decodedPath = URLDecoder.decode(rawPath, "UTF-8")
-        val relative = if (decodedBase.isNotBlank() && decodedPath.startsWith(decodedBase)) {
+        // A WebDAV href is a URI path; a literal plus must not decode as a form-space.
+        val decodedBase = URLDecoder.decode(basePath.replace("+", "%2B"), "UTF-8").trimEnd('/')
+        val decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), "UTF-8")
+        val relative = if (decodedBase.isNotBlank() &&
+            (decodedPath == decodedBase || decodedPath.startsWith("$decodedBase/"))) {
             decodedPath.removePrefix(decodedBase)
         } else {
             decodedPath
@@ -299,7 +351,7 @@ internal class WebDavRemoteClient(
             }.parse(value)?.time ?: 0L
         }.getOrDefault(0L)
 
-    private val b2Http by lazy { B2HostHttp(classLoader, cleartextScope) }
+    private val nativeHttp by lazy { NativeHostHttp(classLoader, cleartextScope) }
 
     private fun executeOkHttpRequest(
         credentials: WebDavCredentials,
@@ -314,97 +366,14 @@ internal class WebDavRemoteClient(
         absoluteUrl: String? = null,
     ): WebDavHttpResponse {
         val url = absoluteUrl ?: buildUrl(credentials.url, path, directory).toString()
-        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) {
+        HttpRequestPolicy.uri(url)
+        val authorization = if (HttpRequestPolicy.sameOrigin(credentials.url, url) &&
+            (credentials.username.isNotEmpty() || credentials.password.isNotEmpty())) {
             val token = Base64.encodeToString("${credentials.username}:${credentials.password}".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-            val payload = requestBodyOverride ?: body?.let { b2Http.stringBody(it, "application/xml; charset=utf-8") }
-            return b2Http.request(url, method, mapOf("Authorization" to "Basic $token") + headers, payload, outputFile, onProgress)
-        }
-        val requestBuilder = cls(OKHTTP_REQUEST_BUILDER_CLASS).getDeclaredConstructor()
-            .apply { isAccessible = true }
-            .newInstance()
-        requestBuilder.javaClass.getDeclaredMethod("url", String::class.java)
-            .apply { isAccessible = true }
-            .invoke(requestBuilder, url)
-
-        val token = Base64.encodeToString(
-            "${credentials.username}:${credentials.password}".toByteArray(Charsets.UTF_8),
-            Base64.NO_WRAP,
-        )
-        requestBuilder.javaClass.getDeclaredMethod("header", String::class.java, String::class.java)
-            .apply { isAccessible = true }
-            .invoke(requestBuilder, "Authorization", "Basic $token")
-        headers.forEach { (name, value) ->
-            requestBuilder.javaClass.getDeclaredMethod("header", String::class.java, String::class.java)
-                .apply { isAccessible = true }
-                .invoke(requestBuilder, name, value)
-        }
-
-        val requestBody = requestBodyOverride ?: body?.let { newOkHttpRequestBody(it) }
-        requestBuilder.javaClass.getDeclaredMethod("method", String::class.java, cls(OKHTTP_REQUEST_BODY_CLASS))
-            .apply { isAccessible = true }
-            .invoke(requestBuilder, method, requestBody)
-        val request = requestBuilder.javaClass.getDeclaredMethod("build")
-            .apply { isAccessible = true }
-            .invoke(requestBuilder)
-
-        val client = okHttpClient()
-        val call = client.javaClass.getDeclaredMethod("newCall", cls(OKHTTP_REQUEST_CLASS))
-            .apply { isAccessible = true }
-            .invoke(client, request)
-        val response = cleartextScope.run {
-            call.javaClass.getDeclaredMethod("execute")
-                .apply { isAccessible = true }
-                .invoke(call)
-        }
-        try {
-            val code = response.javaClass.getDeclaredMethod("code")
-                .apply { isAccessible = true }
-                .invoke(response) as Int
-            val bodyObj = response.javaClass.getDeclaredMethod("body")
-                .apply { isAccessible = true }
-                .invoke(response)
-            val bodyString = if (outputFile == null) {
-                bodyObj?.javaClass?.methods?.firstOrNull { it.name == "string" && it.parameterTypes.isEmpty() }
-                    ?.apply { isAccessible = true }
-                    ?.invoke(bodyObj)
-                    ?.toString()
-            } else {
-                if (code in 200..299) {
-                    val input = bodyObj?.javaClass?.methods?.firstOrNull { it.name == "byteStream" && it.parameterTypes.isEmpty() }
-                        ?.apply { isAccessible = true }
-                        ?.invoke(bodyObj) as? java.io.InputStream
-                        ?: error("WebDAV $method response has no body")
-                    val totalBytes = bodyObj.javaClass.methods.firstOrNull {
-                        it.name == "contentLength" && it.parameterTypes.isEmpty()
-                    }?.apply { isAccessible = true }?.invoke(bodyObj) as? Long ?: -1L
-                    input.use { source ->
-                        outputFile.outputStream().use { sink ->
-                            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                            var copied = 0L
-                            while (true) {
-                                val read = source.read(buffer)
-                                if (read <= 0) break
-                                sink.write(buffer, 0, read)
-                                copied += read
-                                if (totalBytes > 0L) {
-                                    onProgress?.invoke(((copied * 100L) / totalBytes).toInt().coerceIn(0, 100))
-                                }
-                            }
-                            onProgress?.invoke(100)
-                        }
-                    }
-                }
-                null
-            }
-            log("$method response path=${normalizeWebDavPath(path)} code=$code")
-            return WebDavHttpResponse(code, bodyString)
-        } finally {
-            runCatching {
-                response.javaClass.getDeclaredMethod("close")
-                    .apply { isAccessible = true }
-                    .invoke(response)
-            }
-        }
+            mapOf("Authorization" to "Basic $token")
+        } else emptyMap()
+        val payload = requestBodyOverride ?: body?.let { nativeHttp.stringBody(it, "application/xml; charset=utf-8") }
+        return nativeHttp.request(url, method, authorization + headers, payload, outputFile, onProgress)
     }
 
     private fun executeRawOkHttpRequest(
@@ -412,105 +381,10 @@ internal class WebDavRemoteClient(
         method: String,
         headers: Map<String, String> = emptyMap(),
         requestBodyOverride: Any? = null,
-    ): WebDavHttpResponse {
-        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) return b2Http.request(url, method, headers, requestBodyOverride)
-        val requestBuilder = cls(OKHTTP_REQUEST_BUILDER_CLASS).getDeclaredConstructor()
-            .apply { isAccessible = true }
-            .newInstance()
-        requestBuilder.javaClass.getDeclaredMethod("url", String::class.java)
-            .apply { isAccessible = true }
-            .invoke(requestBuilder, url)
-        headers.forEach { (name, value) ->
-            requestBuilder.javaClass.getDeclaredMethod("header", String::class.java, String::class.java)
-                .apply { isAccessible = true }
-                .invoke(requestBuilder, name, value)
-        }
-        requestBuilder.javaClass.getDeclaredMethod("method", String::class.java, cls(OKHTTP_REQUEST_BODY_CLASS))
-            .apply { isAccessible = true }
-            .invoke(requestBuilder, method, requestBodyOverride)
-        val request = requestBuilder.javaClass.getDeclaredMethod("build")
-            .apply { isAccessible = true }
-            .invoke(requestBuilder)
-        val client = okHttpClient()
-        val call = client.javaClass.getDeclaredMethod("newCall", cls(OKHTTP_REQUEST_CLASS))
-            .apply { isAccessible = true }
-            .invoke(client, request)
-        val response = cleartextScope.run {
-            call.javaClass.getDeclaredMethod("execute")
-                .apply { isAccessible = true }
-                .invoke(call)
-        }
-        try {
-            val code = response.javaClass.getDeclaredMethod("code")
-                .apply { isAccessible = true }
-                .invoke(response) as Int
-            val bodyObj = response.javaClass.getDeclaredMethod("body")
-                .apply { isAccessible = true }
-                .invoke(response)
-            val bodyString = bodyObj?.javaClass?.methods?.firstOrNull {
-                it.name == "string" && it.parameterTypes.isEmpty()
-            }?.apply { isAccessible = true }?.invoke(bodyObj)?.toString()
-            return WebDavHttpResponse(code, bodyString)
-        } finally {
-            runCatching {
-                response.javaClass.getDeclaredMethod("close")
-                    .apply { isAccessible = true }
-                    .invoke(response)
-            }
-        }
-    }
+    ): WebDavHttpResponse = nativeHttp.request(url, method, headers, requestBodyOverride)
 
-    private fun okHttpClient(): Any =
-        httpClient ?: synchronized(this) {
-            httpClient ?: cls(OKHTTP_CLIENT_CLASS).getDeclaredConstructor()
-                .apply { isAccessible = true }
-                .newInstance()
-                .also { httpClient = it }
-        }
-
-    private fun newOkHttpRequestBody(content: String): Any =
-        cls(OKHTTP_REQUEST_BODY_CLASS).getDeclaredMethod(
-            "create",
-            String::class.java,
-            cls(OKHTTP_MEDIA_TYPE_CLASS),
-        ).apply { isAccessible = true }.invoke(null, content, null)
-            ?: error("OkHttp RequestBody.create returned null")
-
-    private fun newOkHttpStringRequestBody(content: String, mimeType: String): Any {
-        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) return b2Http.stringBody(content, mimeType)
-        val mediaType = cls(OKHTTP_MEDIA_TYPE_CLASS).getDeclaredMethod("get", String::class.java)
-            .apply { isAccessible = true }
-            .invoke(null, mimeType)
-        val requestBodyClass = cls(OKHTTP_REQUEST_BODY_CLASS)
-        return requestBodyClass.declaredMethods.firstOrNull {
-            it.name == "create" &&
-                it.parameterTypes.size == 2 &&
-                it.parameterTypes[0] == String::class.java
-        }?.apply { isAccessible = true }?.invoke(null, content, mediaType)
-            ?: requestBodyClass.declaredMethods.first {
-                it.name == "create" &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[1] == String::class.java
-            }.apply { isAccessible = true }.invoke(null, mediaType, content)
-    }
-
-    private fun newOkHttpFileRequestBody(file: File, mimeType: String): Any {
-        if (com.reamicro.fix.core.HostNativeAbi.hasNativeHttp(com.reamicro.fix.core.HostSymbols.profileId)) return b2Http.fileBody(file, mimeType)
-        val mediaType = cls(OKHTTP_MEDIA_TYPE_CLASS).getDeclaredMethod("get", String::class.java)
-            .apply { isAccessible = true }
-            .invoke(null, mimeType)
-        val requestBodyClass = cls(OKHTTP_REQUEST_BODY_CLASS)
-        return requestBodyClass.declaredMethods.firstOrNull {
-            it.name == "create" &&
-                it.parameterTypes.size == 2 &&
-                it.parameterTypes[0] == File::class.java
-        }?.apply { isAccessible = true }?.invoke(null, file, mediaType)
-            ?: requestBodyClass.declaredMethods.first {
-                it.name == "create" &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[1] == File::class.java
-            }.apply { isAccessible = true }.invoke(null, mediaType, file)
-    }
+    private fun newOkHttpStringRequestBody(content: String, mimeType: String): Any = nativeHttp.stringBody(content, mimeType)
+    private fun newOkHttpFileRequestBody(file: File, mimeType: String): Any = nativeHttp.fileBody(file, mimeType)
 
     private fun alistApiEndpoint(webDavUrl: String): AlistApiEndpoint? =
         runCatching {
@@ -530,9 +404,11 @@ internal class WebDavRemoteClient(
         }.getOrNull()
 
     private fun cachedAlistToken(endpoint: AlistApiEndpoint, credentials: WebDavCredentials, cacheKey: String): String? {
-        val now = System.currentTimeMillis()
+        TaskCancellation.checkCurrent()
+        val now = SystemClock.elapsedRealtime()
         alistTokenCache[cacheKey]?.takeIf { now < it.expiresAtMs }?.let { return it.token }
         val token = alistToken(endpoint.apiBase, credentials.username, credentials.password)
+        TaskCancellation.checkCurrent()
         if (token.isNullOrBlank()) {
             markAlistUnsupported(cacheKey)
             return null
@@ -546,17 +422,18 @@ internal class WebDavRemoteClient(
     }
 
     private fun alistCacheKey(endpoint: AlistApiEndpoint, credentials: WebDavCredentials): String =
-        "${endpoint.apiBase}|${endpoint.rootPath}|${credentials.username}|${credentials.password.hashCode()}"
+        AlistProtocol.sessionKey(alistCacheSalt, endpoint.apiBase, endpoint.rootPath, credentials.username, credentials.password)
 
     private fun isAlistUnsupported(cacheKey: String): Boolean {
         val until = alistUnsupportedUntil[cacheKey] ?: return false
-        if (System.currentTimeMillis() < until) return true
-        alistUnsupportedUntil.remove(cacheKey)
+        if (SystemClock.elapsedRealtime() < until) return true
+        alistUnsupportedUntil.remove(cacheKey, until)
         return false
     }
 
     private fun markAlistUnsupported(cacheKey: String) {
-        alistUnsupportedUntil[cacheKey] = System.currentTimeMillis() + ALIST_UNSUPPORTED_CACHE_TTL_MS
+        TaskCancellation.checkCurrent()
+        alistUnsupportedUntil[cacheKey] = SystemClock.elapsedRealtime() + ALIST_UNSUPPORTED_CACHE_TTL_MS
         alistTokenCache.remove(cacheKey)
     }
 
@@ -571,18 +448,11 @@ internal class WebDavRemoteClient(
             ),
         )
         if (login.code !in 200..299) {
-            log("AList login failed code=${login.code} body=${login.bodyString.orEmpty().take(160)}")
+            log("AList login failed code=${login.code}")
             return null
         }
-        return Regex(""""token"\s*:\s*"([^"]+)"""")
-            .find(login.bodyString.orEmpty())
-            ?.groupValues
-            ?.getOrNull(1)
+        return AlistProtocol.token(login.bodyString.orEmpty())
     }
-
-    private fun alistResponseOk(body: String): Boolean =
-        Regex(""""code"\s*:\s*200""").containsMatchIn(body) ||
-            Regex(""""message"\s*:\s*"success"""", RegexOption.IGNORE_CASE).containsMatchIn(body)
 
     private fun alistSearchEntry(item: JSONObject, rootPath: String): AlistSearchEntry? {
         val name = item.optString("name", "").trim()
@@ -646,9 +516,6 @@ internal class WebDavRemoteClient(
             }
     }
 
-    private fun cls(className: String): Class<*> =
-        XposedHelpers.findClass(className, classLoader)
-
     private fun String.jsonQuote(): String =
         JSONObject.quote(this)
 
@@ -663,11 +530,6 @@ internal class WebDavRemoteClient(
     )
 
     private companion object {
-        const val OKHTTP_CLIENT_CLASS = HostClasses.ThirdParty.OKHTTP_CLIENT
-        const val OKHTTP_REQUEST_CLASS = HostClasses.ThirdParty.OKHTTP_REQUEST
-        const val OKHTTP_REQUEST_BUILDER_CLASS = "okhttp3.Request\$Builder"
-        const val OKHTTP_REQUEST_BODY_CLASS = HostClasses.ThirdParty.OKHTTP_REQUEST_BODY
-        const val OKHTTP_MEDIA_TYPE_CLASS = HostClasses.ThirdParty.OKHTTP_MEDIA_TYPE
         const val ALIST_TOKEN_CACHE_TTL_MS = 10 * 60_000L
         const val ALIST_UNSUPPORTED_CACHE_TTL_MS = 10 * 60_000L
     }

@@ -5,7 +5,7 @@ import java.io.File
 import java.util.UUID
 
 internal class WebDavSyncTransport(
-    private val http: B2HostHttp,
+    private val http: NativeHostHttp,
     private val url: String,
     username: String,
     password: String,

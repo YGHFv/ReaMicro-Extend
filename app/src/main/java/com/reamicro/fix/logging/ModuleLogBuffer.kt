@@ -6,7 +6,6 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.Executors
 
 data class ModuleLogEntry(
     val at: Long,
@@ -45,8 +44,11 @@ object ModuleLogBuffer {
             while (entries.size > MAX_MEMORY_ENTRIES) entries.removeFirst()
         }
         val target = logFile ?: return
-        val line = "${timeFormat.format(Date(entry.at))} $level/$tag: $message"
-        runCatching { io.execute { appendLine(target, line) } }
+        runCatching {
+            io.execute {
+                appendLine(target, "${timeFormat.format(Date(entry.at))} $level/$tag: $message")
+            }
+        }
     }
 
     fun snapshot(): List<ModuleLogEntry> = synchronized(lock) { entries.toList() }.asReversed()

@@ -8,7 +8,7 @@ import android.os.Build
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.widget.Toast
-import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.HostPackages
 import com.reamicro.fix.logging.ModuleAndroidLog
 
 class SourceImportActivity : Activity() {
@@ -69,18 +69,20 @@ class SourceImportActivity : Activity() {
         }
 
     private fun launchHostImport(bytes: ByteArray, displayName: String) {
-        val launch = packageManager.getLaunchIntentForPackage(HOST_PACKAGE)
-            ?: Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-                setPackage(HOST_PACKAGE)
-            }.let { probe ->
-                packageManager.resolveActivity(probe, 0)?.activityInfo?.let { info ->
-                    Intent(Intent.ACTION_MAIN).apply {
-                        addCategory(Intent.CATEGORY_LAUNCHER)
-                        setClassName(info.packageName, info.name)
+        val launch = HostPackages.all.firstNotNullOfOrNull { packageName ->
+            packageManager.getLaunchIntentForPackage(packageName)
+                ?: Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_LAUNCHER)
+                    setPackage(packageName)
+                }.let { probe ->
+                    packageManager.resolveActivity(probe, 0)?.activityInfo?.let { info ->
+                        Intent(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_LAUNCHER)
+                            setClassName(info.packageName, info.name)
+                        }
                     }
                 }
-            }
+        }
         if (launch == null) {
             toast("未找到阅微，无法导入")
             ModuleAndroidLog.error(LOG_TAG, "host launch intent not found")
@@ -127,7 +129,6 @@ class SourceImportActivity : Activity() {
 
     companion object {
         private const val LOG_TAG = "ReaMicroImport"
-        const val HOST_PACKAGE = HostClasses.Host.HOST_PACKAGE_NAME
         const val EXTRA_IMPORT_PAYLOAD = "com.reamicro.fix.import.PAYLOAD"
         const val EXTRA_IMPORT_NAME = "com.reamicro.fix.import.NAME"
     }

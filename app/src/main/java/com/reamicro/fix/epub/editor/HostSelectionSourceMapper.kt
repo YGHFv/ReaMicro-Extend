@@ -1,62 +1,41 @@
 package com.reamicro.fix.epub.editor
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.HostObject
-import com.reamicro.fix.core.HostObjects
+import com.reamicro.fix.core.HostEpubSourceBindings
+import com.reamicro.fix.core.HostHighlightTextBindings
 import com.reamicro.fix.core.HostHtmlParser
 import com.reamicro.fix.core.HostHtmlNormalization
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostStaticMethod
-import com.reamicro.fix.xposed.XposedHelpers
-import java.lang.reflect.Method
-import java.lang.reflect.InvocationTargetException
-
 internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
     private val parser = HostHtmlParser(loader)
-    private val cfiType = loader.hostClass("org.epub.html.EpubCFI")
-    private val methods = HashMap<String, Method>()
+    internal val bindings get() = requireNotNull(HostEpubSourceBindings.current)
     private var sourcePositions: HostSelectionSourcePositions? = null
-    /** `org.epub.UIEpubWindow` 在混淆版被 R8 归约为纯静态类，统一走 HostObject 取排版状态。 */
-    private val epubWindow: HostObject by lazy { HostObjects.get(loader, "org.epub.UIEpubWindow") }
-
     private var reading: HostReadingContext? = null
-
+    private fun readingContext(document: Any, slices: List<SelectionRenderedSlice>) = HostReadingContext(
+        document, bindings.required("document.builder", document),
+        (bindings.required("sheets.rules", bindings.required("document.sheets", document)) as List<*>).toList(),
+        bindings.required("document.directory", document) as String,
+        bindings.method("document.fullScreen").invoke(document) as Boolean, bindings.rootStyle(), slices,
+    )
     fun bindReadingDocument(document: Any, controller: Any) {
-        fun field(target: Any, name: String) = target.javaClass.hostField(name)
-            .apply { isAccessible = true }.get(target)!!
-        val nodes = field(controller, "nodes") as Map<*, *>
-        val selection = invoke(controller, "getSelection") ?: error("选区已关闭")
-        val endpoints = listOf(invoke(selection, "getAnchor")!!, invoke(selection, "getFocus")!!)
-        val ids = endpoints.map { invoke(it, "getNodeId") as String }
+        val nodes = bindings.required("selection.nodes", controller) as Map<*, *>
+        val selection = bindings.method("selection.get").invoke(controller) ?: error("选区已关闭")
+        val endpoints = listOf(bindings.required("snapshot.anchor", selection), bindings.required("snapshot.focus", selection))
+        val ids = endpoints.map { bindings.required("endpoint.nodeId", it) as String }
         val ordered = nodes.values.filterNotNull().sortedWith { a, b ->
-            numberComparison(invoke(a, "getCfi")!!, invoke(b, "getCfi")!!)
+            numberComparison(bindings.required("selectable.cfi", a), bindings.required("selectable.cfi", b))
         }
-        val indices = ids.map { id -> ordered.indexOfFirst { invoke(it, "getId") == id } }
+        val indices = ids.map { id -> ordered.indexOfFirst { bindings.value("selectable.id", it) == id } }
         require(indices.all { it >= 0 }) { "阅读页选区片段已失效" }
         val slices = ordered.subList(indices.min(), indices.max() + 1).map { node ->
-            SelectionRenderedSlice(anchorPoint(invoke(node, "getCfi")!!),
-                invoke(invoke(node, "getText")!!, "getText") as String)
+            SelectionRenderedSlice(anchorPoint(bindings.required("selectable.cfi", node)),
+                requireNotNull(HostHighlightTextBindings.current).text(bindings.required("selectable.text", node)))
         }
-        reading = HostReadingContext(document, invoke(document, "getEpubcfi")!!,
-            (invoke(field(document, "styleSheets"), "getRuleSets") as List<*>).toList(),
-            field(document, "dir") as String, invoke(document, "isFullScreen") as Boolean,
-            requireNotNull(epubWindow.call("getRootStyle")) { "排版根样式尚未初始化" }, slices)
+        reading = readingContext(document, slices)
     }
-
-    fun bindSearchDocument(document: Any) {
-        fun field(name: String) = document.javaClass.hostField(name).apply { isAccessible = true }.get(document)!!
-        reading = HostReadingContext(document, invoke(document, "getEpubcfi")!!,
-            (invoke(field("styleSheets"), "getRuleSets") as List<*>).toList(), field("dir") as String,
-            invoke(document, "isFullScreen") as Boolean,
-            requireNotNull(epubWindow.call("getRootStyle")) { "排版根样式尚未初始化" }, emptyList())
-    }
-
+    fun bindSearchDocument(document: Any) { reading = readingContext(document, emptyList()) }
     fun checkReadingContext(document: Any? = null) {
         val context = reading ?: error("缺少真实阅读页渲染上下文，未写入")
         require((document == null || document === context.document) &&
-            epubWindow.callOrNull("getRootStyle") === context.rootStyle) {
+            bindings.rootStyle() === context.rootStyle) {
             "阅读页或排版设置已变化，请重新选择（未写入）"
         }
     }
@@ -73,71 +52,40 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         context.slices.forEach { map.verifyRenderedSlice(it) }
     }
 
-    fun hostCfi(raw: String): Any {
-        if (HostSymbols.isIdentity) return invoke(cfiType.hostField("Companion").get(null), "create", raw)
-            ?: error("宿主无法解析选区 CFI")
-        return requireNotNull(loader.hostClass("org.epub.html.EpubCFI\$Companion")
-            .hostMethod("create", String::class.java).invoke(null, raw))
-    }
+    fun hostCfi(raw: String): Any = bindings.cfi(raw)
     internal fun sourceRange(node: Any) = requireNotNull(sourcePositions).range(node)
     internal fun unescape(value: String) = requireNotNull(sourcePositions).unescape(value)
     fun point(cfi: Any): SelectionCfiPoint {
-        val offset = invoke(cfi, "getOffset") ?: error("选区缺少字符位置")
-        val steps = (invoke(cfi, "getSteps") as? List<*>).orEmpty().map { number(it!!, "getIndex") }
-        return SelectionCfiPoint(
-            number(invoke(cfi, "getSpine")!!, "getIndex"),
-            number(invoke(cfi, "getItemref")!!, "getIndex"), steps,
-            number(offset, "getOffset"), number(offset, "getIndex"), number(invoke(cfi, "getBody")!!, "getIndex"),
-        )
+        require(bindings.hasOffset(cfi)) { "选区缺少字符位置" }
+        return anchorPoint(cfi)
     }
-
-    fun anchorPoint(cfi: Any): SelectionCfiPoint {
-        val offset = invoke(cfi, "getOffset")
-        val steps = (invoke(cfi, "getSteps") as? List<*>).orEmpty().map { number(it!!, "getIndex") }
-        return SelectionCfiPoint(
-            number(invoke(cfi, "getSpine")!!, "getIndex"),
-            number(invoke(cfi, "getItemref")!!, "getIndex"), steps,
-            offset?.let { number(it, "getOffset") } ?: 0,
-            offset?.let { number(it, "getIndex") } ?: 1, number(invoke(cfi, "getBody")!!, "getIndex"),
-        )
-    }
-
+    fun anchorPoint(cfi: Any): SelectionCfiPoint = SelectionCfiPoint(
+        bindings.stepIndex(bindings.required("cfi.spine", cfi)),
+        bindings.stepIndex(bindings.required("cfi.item", cfi)), bindings.cfiSteps(cfi),
+        bindings.offsetValue(cfi), bindings.offsetIndex(cfi), bindings.stepIndex(bindings.required("cfi.body", cfi)),
+    )
     fun rangeOverlapsSelection(range: Any, start: Any, end: Any): Boolean {
-        val pageStart = invoke(range, "getStart") ?: return false
-        val pageEnd = invoke(range, "getEndExclusive") ?: return false
+        val pageStart = bindings.required("range.start", range)
+        val pageEnd = bindings.required("range.end", range)
         if (numberComparison(start, end) >= 0 || numberComparison(pageStart, pageEnd) >= 0) return false
-
         return numberComparison(start, pageEnd) < 0 && numberComparison(end, pageStart) > 0
     }
-    private fun numberComparison(left: Any, right: Any): Int =
-        (invoke(left, "compareTo", right) as Number).toInt()
-
+    private fun numberComparison(left: Any, right: Any): Int = bindings.compare(left, right)
     fun viewportSourceOffset(source: SelectionSourceMap, cfi: Any): Int? {
         val point = anchorPoint(cfi)
-        val bias = invoke(cfi, "getSideBias")
-        val afterNode = invoke(cfi, "getOffset") == null &&
-            bias != null && invoke(bias, "getAfter") == true
+        val afterNode = !bindings.hasOffset(cfi) && bindings.biasBefore(cfi) == false
         return if (afterNode) source.sourceOffsetAfterNode(point) else source.sourceOffset(point)
     }
     fun cfiForPoint(template: Any, point: SelectionCfiPoint): Any {
-        val stepType = loader.hostClass("org.epub.html.EpubCFI\$StepReference")
-        val idType = loader.hostClass("org.epub.html.EpubCFI\$IDAssertion")
-        val offsetType = loader.hostClass("org.epub.html.EpubCFI\$CharacterOffset")
-        val steps = point.steps.map { stepType.getConstructor(Int::class.javaPrimitiveType, idType).newInstance(it, null) }
-        val offset = offsetType.getConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
-            .newInstance(point.offsetIndex, point.offset)
-        require(number(invoke(template, "getSpine")!!, "getIndex") == point.spine &&
-            number(invoke(template, "getItemref")!!, "getIndex") == point.itemRef) { "CFI 章节身份不一致" }
-        val biasType = loader.hostClass("org.epub.html.EpubCFI\$SideBias")
-        val bias = if (invoke(template, "getOffset") != null) invoke(template, "getSideBias") else null
-        val translatedBias = bias?.let {
-            biasType.getConstructor(Boolean::class.javaPrimitiveType, String::class.java)
-                .newInstance(invoke(it, "getBefore"), "")
-        }
-        val result = cfiType.getDeclaredConstructor(stepType, stepType, stepType, List::class.java, offsetType, biasType)
-            .newInstance(invoke(template, "getSpine"), invoke(template, "getItemref"),
-                stepType.getConstructor(Int::class.javaPrimitiveType, idType).newInstance(point.bodyIndex, null),
-                steps, offset, translatedBias)
+        val steps = point.steps.map { bindings.step(it) }
+        val offset = bindings.offset(point.offsetIndex, point.offset)
+        require(bindings.stepIndex(bindings.required("cfi.spine", template)) == point.spine &&
+            bindings.stepIndex(bindings.required("cfi.item", template)) == point.itemRef) { "CFI 章节身份不一致" }
+        val bias = if (bindings.hasOffset(template)) bindings.biasBefore(template)?.let(bindings::bias) else null
+        val result = bindings.record("cfi", mapOf(
+            "spine" to bindings.required("cfi.spine", template), "item" to bindings.required("cfi.item", template),
+            "body" to bindings.step(point.bodyIndex), "steps" to steps, "offset" to offset, "bias" to bias,
+        ))
         require(this.point(result) == point) { "宿主 CFI 往返校验失败" }
         return result
     }
@@ -146,11 +94,10 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         val normalized = HostHtmlNormalization.normalize(source)
         val positions = NormalizedSelectionPositions(source, normalized, HostHtmlNormalization::normalize)
         val document = parser.parse(source, baseUri)
-        val body = invoke(document, "body")!!
+        val body = bindings.body(document)
         sourcePositions = HostSelectionSourcePositions(loader, normalized, body, positions)
         reading?.let { return HostReadingProjection(this, loader, it).map(source, document, positions) }
-        val nodeType = loader.hostClass("com.fleeksoft.ksoup.nodes.Node")
-        val pathMethod = loader.hostStaticMethod("org.epub.utils.NodeExtKt", "getAllSteps", nodeType)
+        val pathMethod = bindings.method("node.steps")
         val text = StringBuilder()
         val starts = SelectionInts()
         val ends = SelectionInts()
@@ -176,11 +123,11 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         }
         fun key(node: Any): String {
             val steps = pathMethod.invoke(null, node) as List<*>
-            return steps.joinToString("/") { number(it!!, "getIndex").toString() }
+            return steps.joinToString("/") { bindings.stepIndex(requireNotNull(it)).toString() }
         }
         fun visit(node: Any, inheritedGroup: String, depth: Int) {
             require(depth < 256) { "章节嵌套过深" }
-            val name = (invoke(node, "nodeName") as String).lowercase()
+            val name = bindings.nodeName(node).lowercase(java.util.Locale.ROOT)
             val nodeKey = key(node)
             if (name in ignored) return
             val block = name in blocks
@@ -192,7 +139,7 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
             val before = text.length
             when {
                 name == "#text" -> {
-                    val expected = (invoke(node, "text") as String).trim(' ', '\n')
+                    val expected = bindings.text(node).trim(' ', '\n')
                     if (expected.isNotEmpty()) {
                         val mapped = runCatching {
                             val (a, b) = sourceRange(node)
@@ -208,14 +155,14 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
                         }
                     }
                 }
-                name == "#cdata" -> add((invoke(node, "text") as String).trim(' ', '\n'), -2, -2)
+                name == "#cdata" -> add(bindings.text(node).trim(' ', '\n'), -2, -2)
                 name == "br" -> {
                     val (a, b) = sourceRange(node)
                     add("\n", a, b)
                 }
                 name in objects -> add("\ufffc")
                 else -> {
-                    val children = (invoke(node, "childNodes") as? List<*>).orEmpty()
+                    val children = bindings.children(node)
                     for (child in children) if (child != null) visit(child, group, depth + 1)
                 }
             }
@@ -230,28 +177,6 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         return SelectionSourceMap(source, text.toString(), starts.toArray(), ends.toArray(), anchors, runEnds, structuralBreaks, textNodes, nodeEnds, blockBreaks)
     }
 
-    private fun number(target: Any, name: String) = (invoke(target, name) as Number).toInt()
-    internal fun invoke(target: Any, name: String, vararg args: Any?): Any? {
-        try {
-            // 水平合并后的 Builder 与 Request 共用类名，必须按当前已知对象角色解析成员。
-            if (target.javaClass == loader.hostClass("org.epub.html.EpubCFI\$Builder") &&
-                name in setOf("newBuilder", "build")) {
-                return target.javaClass.hostMethod(HostSymbols.resolveMethodName("org.epub.html.EpubCFI\$Builder", name))
-                    .invoke(target)
-            }
-            if (name == "getHasInlineDecoration" && !HostSymbols.isIdentity) {
-                if (invoke(target, "getRequiresInlineAtomicBox") == true) return false
-                val style = requireNotNull(invoke(target, "getStyle"))
-                // 与 B1 getter 的八项判断完全一致；B2 把该 getter 内联到了布局中。
-                val spacing = listOf("getPaddingLeft", "getPaddingRight", "getMarginLeft", "getMarginRight")
-                    .any { (invoke(requireNotNull(invoke(style, it)), "getNumber") as Number).toFloat() != 0f }
-                return spacing || listOf("getBorderLeftStyle", "getBorderRightStyle", "getBackgroundColor", "getBackgroundImage")
-                    .any { invoke(requireNotNull(invoke(style, it)), "isValid") == true }
-            }
-            return XposedHelpers.callMethod(target, name, *args)
-        }
-        catch (e: InvocationTargetException) { throw e.targetException ?: e }
-    }
     private companion object {
         val ignored = setOf("#comment", "#doctype", "script", "style", "head", "noscript", "template", "rt", "rp")
         val objects = setOf("img", "svg", "image", "video", "audio", "object")

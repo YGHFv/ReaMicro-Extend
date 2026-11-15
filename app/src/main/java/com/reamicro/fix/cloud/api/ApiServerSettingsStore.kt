@@ -15,9 +15,9 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
-    fun get(): ApiServerSettings {
+    fun get(): ApiServerSettings = synchronized(WRITE_LOCK) {
         val prefs = prefs() ?: return ApiServerSettings()
-        return ApiServerSettings(
+        ApiServerSettings(
             enabled = prefs.getBoolean(KEY_ENABLED, false),
             baseUrl = prefs.getString(KEY_BASE_URL, "").orEmpty(),
             authMode = ApiAuthMode.fromWireValue(prefs.getString(KEY_AUTH_MODE, null)),
@@ -33,32 +33,44 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
     }
 
     fun save(settings: ApiServerSettings) {
-        val normalizedUrl = settings.baseUrl.trim().removeSuffix("/")
-        prefs()?.edit()
-            ?.putBoolean(KEY_ENABLED, settings.enabled)
-            ?.putString(KEY_BASE_URL, normalizedUrl)
-            ?.putString(KEY_AUTH_MODE, settings.authMode.wireValue)
-            ?.putString(KEY_API_KEY, encrypt(settings.apiKey))
-            ?.putString(KEY_ACCOUNT_NAME, settings.accountName.trim())
-            ?.putString(KEY_ACCOUNT_PASSWORD, encrypt(settings.accountPassword))
-            ?.putString(KEY_HOST_ACCOUNT_ID, settings.hostAccountId.trim())
-            ?.putBoolean(KEY_ALLOW_HTTP, settings.allowHttp)
-            ?.putInt(KEY_TIMEOUT_SECONDS, settings.timeoutSeconds.coerceIn(5, 60))
-            ?.putBoolean(KEY_AUTO_CHECK_UPDATES, settings.autoCheckUpdates)
-            ?.putString(KEY_UPDATE_CHANNEL, settings.updateChannel.wireValue)
-            ?.commit()
+        synchronized(WRITE_LOCK) {
+            val preferences = prefs() ?: error("API 服务器设置尚未就绪")
+            val normalizedUrl = settings.baseUrl.trim().removeSuffix("/")
+            // Finish both encryptions before editing preferences so a keystore failure cannot erase the saved login.
+            val encryptedKey = encrypt(settings.apiKey)
+            val encryptedPassword = encrypt(settings.accountPassword)
+            check(preferences.edit()
+                .putBoolean(KEY_ENABLED, settings.enabled)
+                .putString(KEY_BASE_URL, normalizedUrl)
+                .putString(KEY_AUTH_MODE, settings.authMode.wireValue)
+                .putString(KEY_API_KEY, encryptedKey)
+                .putString(KEY_ACCOUNT_NAME, settings.accountName.trim())
+                .putString(KEY_ACCOUNT_PASSWORD, encryptedPassword)
+                .putString(KEY_HOST_ACCOUNT_ID, settings.hostAccountId.trim())
+                .putBoolean(KEY_ALLOW_HTTP, settings.allowHttp)
+                .putInt(KEY_TIMEOUT_SECONDS, settings.timeoutSeconds.coerceIn(5, 60))
+                .putBoolean(KEY_AUTO_CHECK_UPDATES, settings.autoCheckUpdates)
+                .putString(KEY_UPDATE_CHANNEL, settings.updateChannel.wireValue)
+                .commit()) { "API 服务器设置保存失败" }
+        }
     }
 
-    fun clearCredentials() {
-        prefs()?.edit()
-            ?.remove(KEY_API_KEY)
-            ?.remove(KEY_ACCOUNT_PASSWORD)
-            ?.commit()
+    fun bindHostAccount(accountId: String) = synchronized(WRITE_LOCK) {
+        val preferences = prefs() ?: error("API 服务器设置尚未就绪")
+        check(preferences.edit().putString(KEY_HOST_ACCOUNT_ID, accountId.trim()).commit()) { "API 服务器账号绑定保存失败" }
+    }
+
+    fun clearCredentials() = synchronized(WRITE_LOCK) {
+        val preferences = prefs() ?: return@synchronized
+        check(preferences.edit().remove(KEY_API_KEY).remove(KEY_ACCOUNT_PASSWORD).commit()) {
+            "API 服务器凭据清除失败"
+        }
     }
 
     fun cachedMeta(): ApiServerMeta? = runCatching {
         val raw = prefs()?.getString(KEY_CACHED_META, null) ?: return null
         val json = JSONObject(raw)
+        if (json.optString("requestIdentity") != get().requestIdentity()) return null
         ApiServerMeta(
             apiVersion = json.optString("apiVersion"),
             serverId = json.optString("serverId"),
@@ -71,8 +83,9 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
         )
     }.getOrNull()
 
-    fun cacheMeta(meta: ApiServerMeta) {
+    fun cacheMeta(meta: ApiServerMeta, request: ApiServerSettings) {
         val json = JSONObject()
+            .put("requestIdentity", request.requestIdentity())
             .put("apiVersion", meta.apiVersion)
             .put("serverId", meta.serverId)
             .put("features", JSONArray(meta.features.toList()))
@@ -81,7 +94,12 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
             .put("serverTime", meta.serverTime)
             .put("signingPublicKey", meta.signingPublicKey)
             .put("authRequired", meta.authRequired)
-        prefs()?.edit()?.putString(KEY_CACHED_META, json.toString())?.apply()
+        synchronized(WRITE_LOCK) {
+            // A slow response from the previous server must not evict the current metadata.
+            if (get().requestIdentity() == request.requestIdentity()) {
+                prefs()?.edit()?.putString(KEY_CACHED_META, json.toString())?.apply()
+            }
+        }
     }
 
     private fun prefs(): SharedPreferences? =
@@ -99,7 +117,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
                 put(iv)
                 put(body)
             }.array(), Base64.NO_WRAP)
-        }.getOrElse { "" }
+        }.getOrElse { throw IllegalStateException("API 服务器凭据加密失败，已保留原设置", it) }
     }
 
     private fun decrypt(value: String?): String {
@@ -131,6 +149,7 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
     }
 
     companion object {
+        private val WRITE_LOCK = Any()
         const val PREFS_NAME = "reamicro_api_server"
         private const val KEY_ENABLED = "enabled"
         private const val KEY_BASE_URL = "base_url"

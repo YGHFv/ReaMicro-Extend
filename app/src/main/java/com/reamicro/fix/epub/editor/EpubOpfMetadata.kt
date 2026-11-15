@@ -52,16 +52,7 @@ internal object EpubOpfMetadata {
         }
         element.textContent = value
 
-        val output = StringWriter()
-        val factory = TransformerFactory.newInstance()
-        runCatching { factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true) }
-        factory.newTransformer().apply {
-            setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes")
-            setOutputProperty(OutputKeys.INDENT, "no")
-        }.transform(DOMSource(metadata), StreamResult(output))
-        val range = Regex("""(?s)<((?:[\w.-]+:)?metadata)\b[^>]*>.*?</\1\s*>""")
-            .find(text)?.range ?: error("无法定位 metadata 节点")
-        return text.replaceRange(range, output.toString())
+        return replaceElement(text, "metadata", metadata)
     }
 
     fun coverHref(text: String): String {
@@ -158,9 +149,13 @@ internal object EpubOpfMetadata {
             setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "yes")
             setOutputProperty(OutputKeys.INDENT, "no")
         }.transform(DOMSource(node), StreamResult(output))
-        val range = Regex("""(?s)<((?:[\w.-]+:)?${Regex.escape(name)})\b[^>]*>.*?</\1\s*>""")
-            .find(text)?.range ?: error("无法定位 $name 节点")
-        return text.replaceRange(range, output.toString())
+        val original = EpubLinkRewriter.nodes(text, html = false).firstOrNull { it.name == name }
+            ?: error("无法定位 $name 节点")
+        check(original.end > original.openEnd ||
+            text.substring(original.start, original.openEnd).trimEnd().endsWith("/>")) {
+            "无法定位完整 $name 节点"
+        }
+        return text.replaceRange(original.start, original.end, output.toString())
     }
 
     internal fun parse(text: String): Document {

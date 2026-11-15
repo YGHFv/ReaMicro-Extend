@@ -1,7 +1,7 @@
 import asyncio
 
-from app.main import (
-    get_state_store,
+from app import runtime
+from app.scheduler import (
     migrate_device_tasks_to_server,
     recover_interrupted_tasks,
     server_snapshot_loop,
@@ -10,7 +10,7 @@ from app.main import (
 
 
 async def main() -> None:
-    get_state_store()
+    runtime.get_state_store().initialize()
     recover_interrupted_tasks()
 
     migrate_device_tasks_to_server()

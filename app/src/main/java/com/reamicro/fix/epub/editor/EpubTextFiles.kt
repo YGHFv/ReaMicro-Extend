@@ -85,7 +85,16 @@ internal object EpubTextFiles {
         return LoadedEpubText(builder.toString(), EpubTextSnapshot(format, EpubFileFingerprint(size, modified, digest.digest().hex())))
     }
 
-    fun save(file: File, text: String, snapshot: EpubTextSnapshot, checkCancelled: () -> Unit = {}): EpubTextSnapshot {
+    fun save(file: File, text: String, snapshot: EpubTextSnapshot, checkCancelled: () -> Unit): EpubTextSnapshot =
+        save(file, text, snapshot, commit = { it() }, checkCancelled = checkCancelled)
+
+    fun save(
+        file: File,
+        text: String,
+        snapshot: EpubTextSnapshot,
+        commit: (() -> Unit) -> Unit = { it() },
+        checkCancelled: () -> Unit = {},
+    ): EpubTextSnapshot {
         requireCurrent(file, snapshot.fingerprint, checkCancelled)
         val parent = requireNotNull(file.parentFile)
         val temporary = File.createTempFile(".reamicro-scripta-", ".tmp", parent)
@@ -118,13 +127,27 @@ internal object EpubTextFiles {
             checkCancelled()
             requireCurrent(file, snapshot.fingerprint, checkCancelled)
             val expected = VerifiedFileIO.Digest(temporary.length(), digest.digest().hex())
-            try {
-                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            check(VerifiedFileIO.digest(temporary) == expected) { "暂存内容发生变化，未替换原文件" }
+            var committed = false
+            var saved: EpubTextSnapshot? = null
+            commit {
+                check(!committed) { "文件已经提交，不能重复替换" }
+                checkCancelled()
+                requireCurrent(file, snapshot.fingerprint, checkCancelled)
+                try {
+                    Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                } catch (_: AtomicMoveNotSupportedException) {
+                    Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
+                committed = true
+                // Verify before the caller releases its account/book commit lock.
+                // A later valid publication must not make this completed save report failure.
+                VerifiedFileIO.requireMatches(file, expected)
+                saved = EpubTextSnapshot(snapshot.format,
+                    EpubFileFingerprint(expected.size, file.lastModified(), expected.sha256))
             }
-            VerifiedFileIO.requireMatches(file, expected)
-            return EpubTextSnapshot(snapshot.format, EpubFileFingerprint(expected.size, file.lastModified(), expected.sha256))
+            check(committed) { "文件未提交，原内容已保留" }
+            return requireNotNull(saved) { "文件写入结果尚未确认" }
         } finally {
             temporary.delete()
         }

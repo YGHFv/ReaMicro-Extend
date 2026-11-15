@@ -1,6 +1,6 @@
 package com.reamicro.fix.epub.editor
 
-import com.reamicro.fix.core.hostClass
+import com.reamicro.fix.core.HostEpubServicesBindings
 
 internal object EpubBannerVariants {
     fun names(cover: String, loader: ClassLoader? = null): List<String> {
@@ -8,8 +8,8 @@ internal object EpubBannerVariants {
         if (path.isBlank()) return emptyList()
         if (loader != null) {
             val native = runCatching {
-                loader.hostClass("app.zhendong.reamicro.ui.home.BannerVariantKt")
-                    .getMethod("toBannerVariantNames", String::class.java).invoke(null, path) as? List<*>
+                val host = requireNotNull(HostEpubServicesBindings.metadata) { "宿主横幅接口尚未解析" }
+                host.method("bannerNames").invoke(null, path) as? List<*>
             }.getOrNull()?.filterIsInstance<String>()
             if (!native.isNullOrEmpty()) return native.distinct()
         }

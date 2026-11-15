@@ -44,16 +44,38 @@ import com.reamicro.fix.online.download.onlineCompletionFailedChaptersJson
 import com.reamicro.fix.online.download.onlineCompletionChapterFile
 import com.reamicro.fix.logging.logWebDav
 
+internal fun WebDavDriveHook.cacheOnlineChapterImages(target: OnlineDownloadTarget, chapter: OnlineDownloadedChapter) {
+    val cache = target.imageCache ?: return
+    OnlineChapterImageMarkup.imageUrls(chapter.content).forEach { url ->
+        com.reamicro.fix.reload.TaskCancellation.checkCurrent()
+        if (cache.get(url) != null) return@forEach
+        val payload = com.reamicro.fix.online.OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
+            downloadOnlineImageBytes(target, url)
+        }
+        val ext = onlineCoverExtFromMime(payload.mimeType)
+            ?: onlineCoverExtFromBytes(payload.bytes) ?: onlineCoverExtFromUrl(url)
+        cache.store(url, "${stableOnlineImageFileStem(url)}.$ext", coverMimeType(ext), payload.bytes) {
+            com.reamicro.fix.reload.TaskCancellation.checkCurrent()
+        }
+    }
+}
+
 internal fun WebDavDriveHook.localizeOnlineChapterImages(
     bookDir: File,
     target: OnlineDownloadTarget,
     chapter: OnlineDownloadedChapter,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
+    allowNetworkImages: Boolean = true,
 ): Map<String, String> {
+    checkCurrent()
     val urls = OnlineChapterImageMarkup.imageUrls(chapter.content)
     if (urls.isEmpty()) return emptyMap()
-    val imagesDir = File(bookDir, "OEBPS/Images").apply { mkdirs() }
+    val imagesDir = File(bookDir, "OEBPS/Images")
+    commit { checkCurrent(); imagesDir.mkdirs() }
     val imageHrefs = linkedMapOf<String, String>()
     urls.forEach { url ->
+        checkCurrent()
         val stem = stableOnlineImageFileStem(url)
         val existing = imagesDir.listFiles()?.firstOrNull { file ->
             file.isFile && file.nameWithoutExtension == stem
@@ -62,23 +84,35 @@ internal fun WebDavDriveHook.localizeOnlineChapterImages(
             imageHrefs[url] = existing.name
             return@forEach
         }
-        val payload = runCatching { downloadOnlineBytes(target.source, url) }.getOrElse { error ->
+        target.imageCache?.get(url)?.let { cached ->
+            val file = File(imagesDir, cached.fileName)
+            writeOnlineCompletionBytesAtomically(file, cached.file.readBytes(), commit = commit, checkCurrent = checkCurrent)
+            imageHrefs[url] = file.name
+            return@forEach
+        }
+        if (!allowNetworkImages) return@forEach
+        val payload = runCatching { downloadOnlineImageBytes(target, url) }.getOrElse { error ->
+            com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(error)
             logWebDav("online imported illustration download failed url=${url.take(120)} error=${error.message.orEmpty()}")
             null
         }
+        checkCurrent()
         if (payload == null || payload.bytes.isEmpty()) return@forEach
         val ext = onlineCoverExtFromMime(payload.mimeType)
             ?: onlineCoverExtFromBytes(payload.bytes)
             ?: onlineCoverExtFromUrl(url)
         val file = File(imagesDir, "$stem.$ext")
-        writeOnlineCompletionBytesAtomically(file, payload.bytes)
+        writeOnlineCompletionBytesAtomically(file, payload.bytes, commit = commit, checkCurrent = checkCurrent)
         imageHrefs[url] = file.name
     }
-    synchronizeOnlineImageManifest(bookDir)
+    synchronizeOnlineImageManifest(bookDir, commit = commit, checkCurrent = checkCurrent)
     return imageHrefs
 }
 
-internal fun WebDavDriveHook.synchronizeOnlineImageManifest(bookDir: File) {
+internal fun WebDavDriveHook.synchronizeOnlineImageManifest(
+    bookDir: File, commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {},
+) {
+    checkCurrent()
     val opfFile = File(bookDir, "OEBPS/content.opf")
     val imagesDir = File(bookDir, "OEBPS/Images")
     if (!opfFile.isFile || !imagesDir.isDirectory) return
@@ -90,7 +124,7 @@ internal fun WebDavDriveHook.synchronizeOnlineImageManifest(bookDir: File) {
     val original = opfFile.readText(Charsets.UTF_8)
     val merged = mergeOnlineEpubImageManifest(original, manifestImages)
     if (merged != original) {
-        writeOnlineCompletionTextAtomically(opfFile, merged)
+        writeOnlineCompletionTextAtomically(opfFile, merged, commit = commit, checkCurrent = checkCurrent)
         logWebDav("online completion image manifest synchronized count=${manifestImages.size}")
     }
 }
@@ -102,7 +136,10 @@ internal fun WebDavDriveHook.writeOnlineCompletionEpub(
     cover: OnlineBinaryPayload?,
     failedChapters: List<OnlineFailedChapter> = emptyList(),
     onDemandMetadata: OnlineOnDemandMetadata? = null,
+    allowNetworkImages: Boolean = true,
+    checkCurrent: () -> Unit = {},
 ) {
+    checkCurrent()
     ZipOutputStream(file.outputStream().buffered()).use { zip ->
         val styleSettings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
 
@@ -118,15 +155,41 @@ internal fun WebDavDriveHook.writeOnlineCompletionEpub(
             ONLINE_COMPLETION_DEFAULT_STYLE_PATH,
             OnlineEpubStyleCss.build(styleSettings, fontFaces),
         )
+        writeTextZipEntry(zip, com.reamicro.fix.online.epub.OnlineUpdateStyleFingerprint.PATH,
+            com.reamicro.fix.online.epub.OnlineUpdateStyleFingerprint.of(styleSettings))
         val coverExt = onlineCoverExt(cover)
         cover?.let {
             writeBytesZipEntry(zip, "OEBPS/Images/cover.$coverExt", it.bytes)
             writeTextZipEntry(zip, "OEBPS/Text/cover.xhtml", onlineCoverXhtml(target, coverExt))
         }
-        val contentImages = collectOnlineContentImages(target, chapters)
+        val diskImages = target.imageCache?.let { cache ->
+            if (allowNetworkImages) chapters.forEach { cacheOnlineChapterImages(target, it) }
+            chapters.flatMap { OnlineChapterImageMarkup.imageUrls(it.content) }.distinct().associateWith { url ->
+                requireNotNull(cache.get(url)) { "完整章节图片缓存缺失，已停止导入" }
+            }
+        }.orEmpty()
+        val contentImages = if (target.imageCache != null) {
+            diskImages.map { (url, image) -> OnlineContentImage(url, image.fileName, byteArrayOf(), image.mimeType) }
+        } else if (allowNetworkImages) collectOnlineContentImages(target, chapters) else emptyList()
+        checkCurrent()
         val imageHrefs = contentImages.associate { it.url to it.fileName }
         contentImages.forEach { image ->
-            writeBytesZipEntry(zip, "OEBPS/Images/${image.fileName}", image.bytes)
+            val cached = diskImages[image.url]
+            if (cached == null) {
+                writeBytesZipEntry(zip, "OEBPS/Images/${image.fileName}", image.bytes)
+            } else {
+                zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/Images/${image.fileName}"))
+                cached.file.inputStream().buffered().use { input ->
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        checkCurrent()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        zip.write(buffer, 0, count)
+                    }
+                }
+                zip.closeEntry()
+            }
         }
         val decor = resolveOnlineCompletionDecor(styleSettings) { fileName, bytes ->
             writeBytesZipEntry(zip, "OEBPS/Images/$fileName", bytes)
@@ -134,6 +197,7 @@ internal fun WebDavDriveHook.writeOnlineCompletionEpub(
         val volumeSegments = onlineVolumeSegments(chapters)
         val volumeFirstChapters = volumeSegments.mapTo(hashSetOf()) { it.startIndex }
         chapters.forEachIndexed { index, chapter ->
+            checkCurrent()
             writeTextZipEntry(
                 zip,
                 "OEBPS/Text/chapter_${(index + 1).toString().padStart(4, '0')}.xhtml",
@@ -196,25 +260,34 @@ internal fun WebDavDriveHook.writeOnlineCompletionEpub(
     }
 }
 
-internal fun WebDavDriveHook.writeOnlineCompletionDefaultStyle(bookDir: File) {
+internal fun WebDavDriveHook.writeOnlineCompletionDefaultStyle(
+    bookDir: File, commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {},
+) {
+    checkCurrent()
     val root = bookDir.canonicalFile
     val styleFile = File(root, ONLINE_COMPLETION_DEFAULT_STYLE_PATH).canonicalFile
     val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
     if (!styleFile.path.startsWith(rootPrefix)) error("EPUB style path escapes book dir")
-    styleFile.parentFile?.mkdirs()
-    styleFile.writeText(onlineCompletionDefaultCss(root), Charsets.UTF_8)
+    val css = onlineCompletionDefaultCss(root, commit = commit, checkCurrent = checkCurrent)
+    writeOnlineCompletionTextAtomically(styleFile, css, commit = commit, checkCurrent = checkCurrent)
 }
 
-internal fun WebDavDriveHook.onlineCompletionDefaultCss(bookDir: File?): String {
+internal fun WebDavDriveHook.onlineCompletionDefaultCss(
+    bookDir: File?, commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {},
+): String {
+    checkCurrent()
     val settings = OnlineEpubStyleStore.read(currentApplicationContext() ?: currentContext())
-    val fontFaces = bookDir?.let { embedOnlineCompletionFonts(it, settings) }.orEmpty()
+    val fontFaces = bookDir?.let { embedOnlineCompletionFonts(it, settings, commit = commit, checkCurrent = checkCurrent) }.orEmpty()
     return OnlineEpubStyleCss.build(settings, fontFaces)
 }
 
 internal fun WebDavDriveHook.embedOnlineCompletionFonts(
     bookDir: File,
     settings: OnlineEpubStyleSettings,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
 ): Map<String, OnlineEpubFontFace> {
+    checkCurrent()
     val faces = onlineCompletionFontFaces(settings)
     if (faces.isEmpty()) return emptyMap()
     val root = bookDir.canonicalFile
@@ -223,18 +296,21 @@ internal fun WebDavDriveHook.embedOnlineCompletionFonts(
     if (!fontsDir.path.startsWith(rootPrefix)) error("EPUB Fonts directory escapes book dir")
     val embedded = LinkedHashMap<String, OnlineEpubFontFace>()
     faces.forEach { (styleId, entry) ->
+        checkCurrent()
         val (face, sourceFile) = entry
         val target = File(root, "OEBPS/" + OnlineEpubFontEmbedder.manifestHref(face))
         val copied = runCatching {
             if (!target.isFile || target.length() != sourceFile.length()) {
-                fontsDir.mkdirs()
-                sourceFile.copyTo(target, overwrite = true)
+                com.reamicro.fix.online.download.copyOnlineCompletionFileAtomically(
+                    sourceFile, target, commit = commit, checkCurrent = checkCurrent,
+                )
             }
             true
         }.getOrElse { error ->
             logWebDav("online completion font embed failed font=${sourceFile.name} error=${error.message.orEmpty()}")
             false
         }
+        checkCurrent()
         if (copied) embedded[styleId] = face
     }
     if (embedded.isEmpty()) return emptyMap()
@@ -242,7 +318,7 @@ internal fun WebDavDriveHook.embedOnlineCompletionFonts(
     if (opfFile.isFile) {
         val original = opfFile.readText(Charsets.UTF_8)
         val merged = OnlineEpubFontEmbedder.mergeManifest(original, embedded.values)
-        if (merged != original) writeOnlineCompletionTextAtomically(opfFile, merged)
+        if (merged != original) writeOnlineCompletionTextAtomically(opfFile, merged, commit = commit, checkCurrent = checkCurrent)
     }
     return embedded
 }
@@ -333,14 +409,18 @@ internal fun WebDavDriveHook.onlineCompletionBookDirDecor(bookDir: File): Online
     return decor
 }
 
-internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(bookDir: File): Boolean {
+internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(
+    bookDir: File,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
+): Boolean {
+    checkCurrent()
     val root = bookDir.canonicalFile
     var changed = false
-    val nextCss = onlineCompletionDefaultCss(root)
+    val nextCss = onlineCompletionDefaultCss(root, commit = commit, checkCurrent = checkCurrent)
     val styleFile = File(root, ONLINE_COMPLETION_DEFAULT_STYLE_PATH)
     if (!styleFile.isFile || styleFile.readText(Charsets.UTF_8) != nextCss) {
-        styleFile.parentFile?.mkdirs()
-        styleFile.writeText(nextCss, Charsets.UTF_8)
+        writeOnlineCompletionTextAtomically(styleFile, nextCss, commit = commit, checkCurrent = checkCurrent)
         changed = true
     }
     val textDir = File(root, "OEBPS/Text")
@@ -351,10 +431,11 @@ internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(bookDir: File): Bo
                 ONLINE_COMPLETION_VOLUME_FILE_REGEX.matches(it.name)
         }
         ?.forEach { chapterFile ->
+            checkCurrent()
             val original = chapterFile.readText(Charsets.UTF_8)
             val migrated = migrateOnlineCompletionChapterStyle(original, decor)
             if (migrated != original) {
-                chapterFile.writeText(migrated, Charsets.UTF_8)
+                writeOnlineCompletionTextAtomically(chapterFile, migrated, commit = commit, checkCurrent = checkCurrent)
                 changed = true
             }
         }
@@ -370,7 +451,7 @@ internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(bookDir: File): Bo
             )
         }
         if (migrated != original) {
-            opfFile.writeText(migrated, Charsets.UTF_8)
+            writeOnlineCompletionTextAtomically(opfFile, migrated, commit = commit, checkCurrent = checkCurrent)
             changed = true
         }
     }
@@ -382,17 +463,21 @@ internal fun WebDavDriveHook.writeOnlineCompletionVolumePages(
     bookDir: File,
     chapters: List<OnlineDownloadedChapter>,
     decor: OnlineEpubDecor = OnlineEpubDecor(),
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
 ): Boolean {
+    checkCurrent()
     val root = bookDir.canonicalFile
-    File(root, "OEBPS/Text").mkdirs()
+    commit { checkCurrent(); File(root, "OEBPS/Text").mkdirs() }
     var changed = false
     val expectedNames = HashSet<String>()
     onlineVolumeSegments(chapters).forEach { segment ->
+        checkCurrent()
         val file = onlineCompletionChapterFile(root, onlineVolumeHref(segment.order))
         expectedNames += file.name
         val next = volumeXhtml(segment.title, decor)
         if (!file.isFile || file.readText(Charsets.UTF_8) != next) {
-            writeOnlineCompletionTextAtomically(file, next)
+            writeOnlineCompletionTextAtomically(file, next, commit = commit, checkCurrent = checkCurrent)
             changed = true
         }
     }
@@ -403,7 +488,9 @@ internal fun WebDavDriveHook.writeOnlineCompletionVolumePages(
                 file.name !in expectedNames
         }
         ?.forEach { stale ->
-            if (stale.delete()) {
+            var removed = false
+            commit { checkCurrent(); removed = stale.delete() }
+            if (removed) {
                 changed = true
                 logWebDav("online completion stale volume page removed path=${stale.absolutePath}")
             }
@@ -419,7 +506,9 @@ internal fun WebDavDriveHook.collectOnlineContentImages(
     if (urls.isEmpty()) return emptyList()
     val images = ArrayList<OnlineContentImage>(urls.size)
     urls.forEach { url ->
-        val payload = runCatching { downloadOnlineBytes(target.source, url) }.getOrElse { error ->
+        com.reamicro.fix.reload.TaskCancellation.checkCurrent()
+        val payload = runCatching { downloadOnlineImageBytes(target, url) }.getOrElse { error ->
+            com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(error)
             logWebDav("online illustration download failed url=${url.take(120)} error=${error.message.orEmpty()}")
             null
         }

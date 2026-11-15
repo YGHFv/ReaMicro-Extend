@@ -13,13 +13,17 @@ internal data class LocalTaskBridgeReply(
 internal interface LocalTaskBridgeBackend {
     fun apply(accountId: String, tasks: JSONObject, token: String, clearedAt: Long)
     fun snapshot(accountId: String?, recordLimit: Int): String
+    fun activate(enabled: Boolean): Boolean {
+        throw UnsupportedOperationException("Activation control unavailable")
+    }
 }
 
 internal object LocalTaskBridgeProtocol {
     const val SYNC = "sync"
     const val READ = "read"
+    const val ACTIVATE = "activate"
     const val MAX_BYTES = 256 * 1024
-    val allowedPackages = setOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix", "com.reamicro.fix")
+    val allowedPackages = com.reamicro.fix.core.HostPackages.all + "com.reamicro.fix"
 
     fun authorized(uid: Int, ownUid: Int, uidPackages: Collection<String>): Boolean =
         uid >= 0 && (uid == ownUid || uidPackages.any { it in allowedPackages })
@@ -49,6 +53,17 @@ internal object LocalTaskBridgeProtocol {
                     entries.forEach { backend.apply(it.id, it.tasks, it.token, it.clearedAt) }
                 }
                 READ -> require(request.accountId == null || request.accountId.length in 1..256)
+                ACTIVATE -> {
+                    require(request.accountId == null)
+                    val raw = request.payload ?: return LocalTaskBridgeReply(request.id, error = "invalid_payload")
+                    if (!fits(raw)) return LocalTaskBridgeReply(request.id, error = "payload_too_large")
+                    val payload = JSONObject(raw)
+                    require(payload.length() == 1 && payload.get("moduleEnabled") is Boolean)
+                    val actual = backend.activate(payload.getBoolean("moduleEnabled"))
+                    // A master-switch receipt must not depend on unrelated account/task payload size.
+                    return LocalTaskBridgeReply(request.id, JSONObject().put("accounts", JSONObject())
+                        .put("moduleEnabled", actual).toString())
+                }
                 else -> return LocalTaskBridgeReply(request.id, error = "unsupported_operation")
             }
             val snapshot = backend.snapshot(if (request.operation == READ) request.accountId else null,
@@ -66,7 +81,10 @@ internal object LocalTaskBridgeProtocol {
     }
 
     fun safeSnapshot(raw: String): Boolean = runCatching {
-        val accounts = JSONObject(raw).getJSONObject("accounts")
+        val snapshot = JSONObject(raw)
+        require(snapshot.keys().asSequence().all { it in setOf("accounts", "moduleEnabled") })
+        require(!snapshot.has("moduleEnabled") || snapshot.get("moduleEnabled") is Boolean)
+        val accounts = snapshot.getJSONObject("accounts")
         accounts.length() <= 128 && accounts.keys().asSequence().all { id ->
             require(id.isNotBlank() && id.length <= 256)
             val entry = accounts.getJSONObject(id)
@@ -75,10 +93,12 @@ internal object LocalTaskBridgeProtocol {
         }
     }.getOrDefault(false)
 
-    fun validateReply(expectedId: String, reply: LocalTaskBridgeReply): String? = when {
+    fun validateReply(expectedId: String, reply: LocalTaskBridgeReply, expectedModuleEnabled: Boolean? = null): String? = when {
         reply.id != expectedId -> "invalid_receipt"
         reply.error != null -> reply.error
         reply.snapshot == null || !fits(reply.snapshot) || !safeSnapshot(reply.snapshot) -> "invalid_snapshot"
+        expectedModuleEnabled != null && JSONObject(reply.snapshot).opt("moduleEnabled") != expectedModuleEnabled ->
+            "activation_unconfirmed"
         else -> null
     }
     private data class MirrorEntry(val id: String, val tasks: JSONObject, val token: String, val clearedAt: Long)

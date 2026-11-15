@@ -1,10 +1,7 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-import com.reamicro.fix.core.hostNameMatches
-
-import com.reamicro.fix.core.hostClass
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.SpannableString
@@ -14,7 +11,7 @@ import android.text.style.StyleSpan
 import android.widget.Toast
 import com.reamicro.fix.reader.SearchHighlightPlanner
 import com.reamicro.fix.settings.ReaderHighlightBookContext
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.reader.*
 
 internal fun ReaderHook.canHighlightReaderSelection(): Boolean =
@@ -36,9 +33,8 @@ internal fun ReaderHook.updateReaderHighlightBookContext(
     if (normalizedKey.isBlank()) return
     ReaderHighlightBookContext.bumpVersion("book-context:$source", requestRefresh = requestRefresh)
     if (!requestRefresh) return
-    activityProvider()?.window?.decorView?.postDelayed({
-        ReaderHighlightBookContext.bumpVersion("book-context-delayed:$source")
-    }, READER_HIGHLIGHT_CONTEXT_REFRESH_DELAY_MS)
+    highlightRefreshHandler.removeCallbacks(highlightContextRefresh)
+    highlightRefreshHandler.postDelayed(highlightContextRefresh, READER_HIGHLIGHT_CONTEXT_REFRESH_DELAY_MS)
 }
 
 internal fun ReaderHook.openReaderHighlightRuleSheet(globalRules: Boolean) {
@@ -48,11 +44,11 @@ internal fun ReaderHook.openReaderHighlightRuleSheet(globalRules: Boolean) {
         return
     }
     updateReaderHighlightBookContext(bookKey, bookTitle, "highlight sheet open")
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val receiver = bottomSearchReceiverRef?.get() ?: currentViewModelRef?.get()
         if (receiver == null) {
             Toast.makeText(activity, "\u672a\u83b7\u53d6\u5230\u9605\u8bfb\u5668\u72b6\u6001", Toast.LENGTH_SHORT).show()
-            return@runOnUiThread
+            return@runOnModuleUiThread
         }
         pendingReaderHighlightSheet = ReaderHighlightSheetRequest(globalRules, bookKey, bookTitle)
         if (!sendReaderUiSheetStatus(receiver, "EpubFamily")) {
@@ -72,30 +68,13 @@ internal fun ReaderHook.createNativeHighlightAction(icon: Any): Any? =
         "create native highlight action",
     )
 
-internal fun ReaderHook.highlightImageVector(): Any? {
-    val outlined = runCatching {
-        classLoader.hostClass(ICONS_OUTLINED_CLASS).hostField("INSTANCE").get(null)
-    }.getOrNull() ?: return null
-    return listOf(
-        HIGHLIGHT_ICON_BORDER_COLOR_CLASS to "getBorderColor",
-        HIGHLIGHT_ICON_FORMAT_COLOR_FILL_CLASS to "getFormatColorFill",
-        HIGHLIGHT_ICON_MODE_EDIT_CLASS to "getModeEdit",
-    ).firstNotNullOfOrNull { (className, methodName) ->
-        runCatching {
-            classLoader.hostClass(className).declaredMethods.firstOrNull {
-                it.hostNameMatches(methodName) && it.parameterTypes.size == 1
-            }?.apply { isAccessible = true }?.invoke(null, outlined)
-        }.getOrNull()
-    }
-}
-
 internal fun ReaderHook.highlightNativeSelection() {
     val activity = activityProvider() ?: return
     if (!canHighlightReaderSelection()) return
     val selection = currentNativeSelectionPayload()
     val controller = selection.controller
     val quote = selection.quote
-    XposedBridge.log(
+    HookRuntime.log(
         "$LOG_PREFIX selection highlight requested quote=${quote.take(160)} " +
             "start=${selection.startCfi} end=${selection.endCfi}",
     )
@@ -113,11 +92,11 @@ internal fun ReaderHook.highlightNativeSelection() {
         Toast.makeText(activity, "\u6dfb\u52a0\u9ad8\u4eae\u89c4\u5219\u5931\u8d25", Toast.LENGTH_SHORT).show()
         return
     }
-    XposedBridge.log(
+    HookRuntime.log(
         "$LOG_PREFIX selection highlight rule added id=${rule.id} book=${bookKey.take(160)} " +
             "pattern=${rule.pattern.take(160)}",
     )
-    callNoArg(controller, "clearSelection")
+    controller?.let { requireNotNull(com.reamicro.fix.core.HostSelectionBindings.current).method("clear").invoke(it) }
     refreshReaderAfterSelectionHighlight()
     Toast.makeText(activity, "\u5df2\u6dfb\u52a0\u672c\u4e66\u9ad8\u4eae", Toast.LENGTH_SHORT).show()
 }
@@ -142,62 +121,17 @@ internal fun ReaderHook.createReaderMark(
     color: String,
 ): Any? =
     runCatching {
-        val markClass = classLoader.hostClass(MARK_CLASS)
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRecordBindings.current)
         val now = System.currentTimeMillis()
-        val bookId = (callNoArg(lastCatalogContext?.book, "getId") as? Number)?.toLong() ?: 0L
-        val constructors = markClass.declaredConstructors.onEach { it.isAccessible = true }
-
-        val newCtor = constructors.firstOrNull { ctor ->
-            val params = ctor.parameterTypes
-            params.size == 14 &&
-                params[0] == Long::class.javaPrimitiveType &&
-                params[1] == Long::class.javaPrimitiveType &&
-                params[2] == Long::class.javaPrimitiveType &&
-                params[3] == String::class.java
-        }
-        if (newCtor != null) {
-            return@runCatching newCtor.newInstance(
-                id,
-                bookId,
-                0L,
-                chapter,
-                MARK_KIND_HIGHLIGHT,
-                startCfi,
-                endCfi,
-                quote,
-                "",
-                style,
-                color,
-                MARK_SYNCED_NO,
-                now,
-                now,
-            )
-        }
-
-        val oldCtor = constructors.firstOrNull { ctor ->
-            val params = ctor.parameterTypes
-            params.size == 13 &&
-                params[0] == Long::class.javaPrimitiveType &&
-                params[1] == Long::class.javaPrimitiveType &&
-                params[2] == String::class.java
-        } ?: error("No compatible Mark constructor found: ${constructors.joinToString { it.toString() }}")
-        oldCtor.newInstance(
-            id,
-            bookId,
-            chapter,
-            MARK_KIND_HIGHLIGHT,
-            startCfi,
-            endCfi,
-            quote,
-            "",
-            style,
-            color,
-            MARK_SYNCED_NO,
-            now,
-            now,
-        )
+        val bookId = (com.reamicro.fix.core.HostEpubRuntimeBindings.current?.value("book.id", lastCatalogContext?.book) as? Number)?.toLong() ?: 0L
+        symbols.record("mark", mapOf(
+            "id" to id, "bookId" to bookId, "cloudId" to 0L, "chapter" to chapter,
+            "kind" to MARK_KIND_HIGHLIGHT, "startCfi" to startCfi, "endCfi" to endCfi,
+            "quote" to quote, "note" to "", "style" to style, "color" to color,
+            "synced" to MARK_SYNCED_NO, "createdAt" to now, "updatedAt" to now,
+        ))
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX create search highlight mark failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX create search highlight mark failed: ${it.stackTraceToString()}")
     }.getOrNull()
 
 internal fun ReaderHook.refreshReaderAfterSelectionHighlight() {
@@ -213,7 +147,7 @@ internal fun ReaderHook.refreshReaderHighlightWindow(source: String) {
         decor?.requestLayout()
     }
     if (!refreshed) {
-        XposedBridge.log("$LOG_PREFIX reader highlight refresh skipped: no ReaderViewModel source=$source")
+        HookRuntime.log("$LOG_PREFIX reader highlight refresh skipped: no ReaderViewModel source=$source")
     }
 }
 
@@ -225,7 +159,9 @@ internal fun ReaderHook.clearSelectionInjectedHighlight(viewModel: Any? = curren
 }
 
 internal fun ReaderHook.isSelectionInjectedHighlightMark(mark: Any): Boolean {
-    val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return false
+    val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRecordBindings.current)
+    if (!symbols.type("mark").isInstance(mark)) return false
+    val id = symbols.field("mark.id").getLong(mark)
     return id >= SELECTION_HIGHLIGHT_MARK_ID_BASE &&
         id < SELECTION_HIGHLIGHT_MARK_ID_BASE + SELECTION_HIGHLIGHT_MARK_ID_RANGE
 }
@@ -234,7 +170,9 @@ internal fun ReaderHook.transientHighlightMarkId(mark: Any): Long? =
     searchResultHighlightMarkId(mark)
 
 internal fun ReaderHook.transientHighlightResolvedMarkId(mark: Any): Long? {
-    val id = (callNoArg(mark, "getId") as? Number)?.toLong() ?: return null
+    val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRecordBindings.current)
+    if (!symbols.type("resolved").isInstance(mark)) return null
+    val id = symbols.field("resolved.id").getLong(mark)
     return when {
         SearchHighlightPlanner.isHighlightId(id, SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE) -> id
         else -> null
@@ -248,7 +186,6 @@ internal fun ReaderHook.currentHighlightBookIdentity(): Pair<String, String>? {
     currentUiStateBook()?.let { book ->
         val title = readableBookTitle(
             readableBookTitleFromBook(book),
-            callString(currentPageRef?.get(), "getBookTitle"),
             titleFromCurrentEpubRoot(),
         ).ifBlank { fallbackCurrentBookTitle() }
         val key = bookKeyFromBook(book, title)
@@ -260,7 +197,6 @@ internal fun ReaderHook.currentHighlightBookIdentity(): Pair<String, String>? {
     }
     bottomSearchBookRef?.get()?.let { book ->
         val title = readableBookTitle(
-            callString(currentPageRef?.get(), "getBookTitle"),
             readableBookTitleFromBook(book),
             titleFromCurrentEpubRoot(),
         ).ifBlank { fallbackCurrentBookTitle() }

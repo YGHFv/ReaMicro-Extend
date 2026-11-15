@@ -21,6 +21,5 @@
     <string name="epub_structure_search_empty">没有匹配的文件</string>
     <string name="epub_structure_search_ambiguous">有多个匹配，请选择下方文件或输入完整路径</string>
     <string name="epub_structure_search_count">找到 %1$d 个文件</string>
-    <string name="epub_structure_identifier">标识</string>
     <string name="epub_structure_banner">横幅</string>
 </resources>

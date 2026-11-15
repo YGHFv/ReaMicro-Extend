@@ -37,7 +37,9 @@ data class ReaMicroCredential(
     val lastVerifyMessage: String,
 )
 
-class CloudTaskManager(private val client: ApiServerClient) {
+class CloudTaskManager(client: ApiServerClient) {
+    private val client = client.snapshot()
+
     fun create(taskType: String, scheduleSeconds: Long, request: JSONObject = JSONObject()): CloudTask {
         val body = JSONObject()
             .put("taskType", taskType)

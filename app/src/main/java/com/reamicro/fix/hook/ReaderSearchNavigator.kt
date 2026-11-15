@@ -1,18 +1,20 @@
 package com.reamicro.fix.hook
 
-import android.os.Handler
+import android.app.Activity
 import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
 import com.reamicro.fix.hook.reader.*
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookRuntime
+import com.reamicro.fix.core.HostReaderWindowBindings
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.lang.ref.WeakReference
 
-internal class ReaderSearchNavigator(private val reader: ReaderHook) {
+internal class ReaderSearchNavigator(private val reader: ReaderHook) : AutoCloseable {
     private data class Request(val result: FullTextSearchResult, val index: Int, val book: String,
-        val generation: Long, val vm: Any, val epub: Any, val mode: Int)
+        val generation: Long, val presentation: Long, val activity: WeakReference<Activity>,
+        val vm: Any, val epub: Any, val mode: Int)
     private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private data class Work(val value: Request, val ticket: LatestSearchWorker.Ticket) {
         val sequence: Long get() = ticket.sequence
@@ -30,38 +32,54 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         deadline?.let(main::removeCallbacks)
         deadline = null
         worker.cancel()
+        main.removeCallbacksAndMessages(null)
         requestedIndex = null
         cursorIndex = null
         failedIndex = null
         reader.searchScrollBridge?.clearCache()
     }
+    override fun close() {
+        cancel()
+        worker.close()
+    }
     fun submit(result: FullTextSearchResult, index: Int): Boolean {
+        val activity = reader.activeReaderActivity() ?: return false
         val vm = reader.currentViewModelRef?.get()
-            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: viewModel") }
+            ?: return false.also { HookRuntime.log("ReaMicro search jump rejected: viewModel") }
         val epub = reader.currentEpubStrong ?: reader.currentEpubRef?.get()
-            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: epub") }
+            ?: return false.also { HookRuntime.log("ReaMicro search jump rejected: epub") }
         val book = reader.searchNavigationState?.bookKey
-            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: book") }
+            ?: return false.also { HookRuntime.log("ReaMicro search jump rejected: book") }
         val mode = if (reader.currentScrollElement != null) 3 else reader.currentSearchPagerMode
-            ?: return false.also { XposedBridge.log("ReaMicro search jump rejected: pagerMode") }
+            ?: return false.also { HookRuntime.log("ReaMicro search jump rejected: pagerMode") }
         reader.currentSearchPagerMode = mode
         deadline?.let(main::removeCallbacks)
         requestedIndex = index
         cursorIndex = index
         failedIndex = null
-        val request = Request(result, index, book, reader.searchStateGeneration, vm, epub, mode)
-        val ticket = worker.submit { ticket ->
-            val work = Work(request, ticket)
-            try {
-                navigate(work)
-            } catch (error: Throwable) {
-                fail(work, error)
-            } finally {
-                finishRequest(work)
+        val request = Request(result, index, book, reader.searchStateGeneration,
+            reader.onDemandRefreshCoordinator.presentation(), WeakReference(activity), vm, epub, mode)
+        val ticket = try {
+            worker.submit { ticket ->
+                val work = Work(request, ticket)
+                try {
+                    navigate(work)
+                } catch (error: Throwable) {
+                    fail(work, error)
+                } finally {
+                    finishRequest(work)
+                }
             }
+        } catch (error: Throwable) {
+            requestedIndex = null
+            cursorIndex = null
+            failedIndex = index
+            reader.clearHostSearchJump()
+            HookRuntime.logError("ReaMicro search navigation start failed", error)
+            return false
         }
         deadline = Runnable {
-            if (ticket.isCurrent() && requestedIndex != null) {
+            if (ticket.isCurrent() && valid(request) && requestedIndex != null) {
                 worker.cancel()
                 requestedIndex = null
                 failedIndex = index
@@ -72,7 +90,10 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         reader.activityProvider()?.let { reader.ensureSearchNavigationBar(it) }
         return true
     }
-    private fun valid(r: Request): Boolean = !reader.selectionEditSaving.get() && reader.currentViewModelRef?.get() === r.vm &&
+    private fun valid(r: Request): Boolean = !reader.selectionEditSaving.get() &&
+        r.activity.get()?.let { it === reader.activeReaderActivity() } == true &&
+        reader.onDemandRefreshCoordinator.isPresentation(r.presentation) &&
+        reader.currentViewModelRef?.get() === r.vm &&
         (reader.currentEpubStrong ?: reader.currentEpubRef?.get()) === r.epub &&
         reader.searchStateGeneration == r.generation && reader.searchNavigationState?.bookKey == r.book &&
         reader.currentSearchPagerMode == r.mode
@@ -80,7 +101,10 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         val task = FutureTask(block)
         check(main.post(task)) { "阅读界面已关闭" }
         return try { task.get(3, TimeUnit.SECONDS) }
-        finally { if (!task.isDone) task.cancel(false) }
+        finally {
+            if (!task.isDone) task.cancel(false)
+            main.removeCallbacks(task)
+        }
     }
     private fun navigate(work: Work) {
         val r = work.value
@@ -96,14 +120,14 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         val resolved = try {
             resolver.resolve(r.result, r.index, r.vm, r.epub, loaded) { valid(r) && work.ticket.isCurrent() }
         } finally { resolver.clear() }
-        XposedBridge.log("ReaMicro search resolved seq=${work.sequence} index=${r.index} ms=${SystemClock.elapsedRealtime() - startedAt}")
+        HookRuntime.log("ReaMicro search resolved seq=${work.sequence} index=${r.index} ms=${SystemClock.elapsedRealtime() - startedAt}")
         if (!dispatch(work, resolved)) return
         val arrived = awaitPage(work, resolved)
         onMain {
             if (!valid(r) || !work.ticket.isCurrent()) return@onMain
             check(arrived) { "宿主未确认目标页，请重试或重新搜索" }
             acknowledge(work, resolved)
-            XposedBridge.log("ReaMicro search navigation acknowledged seq=${work.sequence} index=${r.index} ranges=${resolved.ranges.size} ms=${SystemClock.elapsedRealtime() - startedAt}")
+            HookRuntime.log("ReaMicro search navigation acknowledged seq=${work.sequence} index=${r.index} ranges=${resolved.ranges.size} ms=${SystemClock.elapsedRealtime() - startedAt}")
         }
     }
     private fun dispatch(work: Work, resolved: ResolvedSearchTarget): Boolean = onMain {
@@ -120,7 +144,7 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         val anchor = if (resolved.flipStyle == 3) resolved.start else resolved.scrollElementId ?: resolved.start
         check(reader.jumpToSearchCfi(r.result.intentReceiver, r.vm, anchor.toString(), mark,
             r.result.chapterIndex.coerceAtLeast(0), r.result.chapterTitle, r.result.snippet)) { "宿主未接受搜索跳转" }
-        XposedBridge.log("ReaMicro search navigation dispatched seq=${work.sequence} index=${r.index}")
+        HookRuntime.log("ReaMicro search navigation dispatched seq=${work.sequence} index=${r.index}")
         true
     }
     private fun acknowledge(work: Work, resolved: ResolvedSearchTarget) {
@@ -144,7 +168,7 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
     private fun fail(work: Work, error: Throwable) {
         val r = work.value
         if (!valid(r) || !work.ticket.isCurrent()) return
-        XposedBridge.logError(
+        HookRuntime.logError(
             "ReaMicro search navigation failed seq=${work.sequence} index=${r.index}",
             error.cause ?: error,
         )
@@ -165,7 +189,7 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
     private fun finishRequest(work: Work) {
         main.post {
 
-            if (!work.ticket.isCurrent()) return@post
+            if (!work.ticket.isCurrent() || !valid(work.value)) return@post
             deadline?.let(main::removeCallbacks)
             deadline = null
             if (requestedIndex == null) return@post
@@ -175,58 +199,54 @@ internal class ReaderSearchNavigator(private val reader: ReaderHook) {
         }
     }
     private fun visible(vm: Any, target: ResolvedSearchTarget): Boolean = if (target.flipStyle == 3) {
-        reader.searchScrollBridge?.visible(vm, target) == true ||
-            (target.scrollElementId != null && reader.currentScrollElement?.let {
-                reader.callNoArg(it, "getId")?.toString() == target.scrollElementId.toString()
-            } == true)
+        reader.searchScrollBridge?.visible(vm, target) == true
     } else contains(reader.searchPageBridge?.page(vm), target.start)
-    private fun contains(page: Any?, cfi: Any): Boolean {
-        val range = page?.let { reader.callNoArg(it, "getRange") } ?: return false
-        return XposedHelpers.callMethod(range, "contains", cfi) == true
-    }
+    private fun contains(page: Any?, cfi: Any): Boolean = page != null &&
+        requireNotNull(HostReaderWindowBindings.current).contains(page, cfi)
     private fun awaitPage(work: Work, target: ResolvedSearchTarget): Boolean {
         val r = work.value
         val started = SystemClock.elapsedRealtime()
         var absoluteSent = false
-        var scrollSent = false
+        var lastScroll: ReaderSearchScrollBridge.Command? = null
+        var lastScrollAt = 0L
+        var stableVisible = 0
         var diagnosticLogged = false
         while (valid(r) && work.ticket.isCurrent() && SystemClock.elapsedRealtime() - started < 8_000) {
-            if (target.flipStyle == 3 && !scrollSent && work.ticket.isCurrent()) {
-                val command = onMain { if (valid(r) && work.ticket.isCurrent()) reader.searchScrollBridge?.command(r.vm, target) else null }
-                if (command != null) {
-                    scrollSent = true
-                    reader.searchScrollBridge?.execute(command) { valid(r) && work.ticket.isCurrent() }
-                }
-            }
             val state = onMain {
                 if (!valid(r) || !work.ticket.isCurrent()) return@onMain 2
                 if (visible(r.vm, target)) return@onMain 1
-                val seed = runCatching {
-                    XposedHelpers.getObjectField(r.vm, "jumpSeed")?.let { reader.callNoArg(it, "getValue") }?.toString()
-                }.getOrNull()
+                val window = requireNotNull(HostReaderWindowBindings.current)
                 if (!diagnosticLogged) {
                     diagnosticLogged = true
                     val page = reader.searchPageBridge?.page(r.vm)
-                    XposedBridge.log(
-                        "ReaMicro search awaiting target=$target.start pageStart=${page?.let { reader.callNoArg(it, "getStart") }}" +
-                            " pageEnd=${page?.let { reader.callNoArg(it, "getEnd") }} seed=$seed",
-                    )
+                    HookRuntime.log("ReaMicro search awaiting target=${target.start} pageStart=${page?.let(window::start)}")
                 }
-                if (!absoluteSent && work.ticket.isCurrent() &&
-                    (seed == target.start.toString() || SystemClock.elapsedRealtime() - started >= 500) &&
-                    target.flipStyle != null && target.flipStyle != 3 && SystemClock.elapsedRealtime() - started >= 200) {
-                    val pages = XposedHelpers.getObjectField(r.vm, "virtualPages") as? Map<*, *>
-                    val key = pages?.entries?.firstOrNull { contains(it.value, target.start) }?.key as? Number
-                    val progress = reader.callNoArg(r.vm, "getProgress")
-                    if (key != null && progress != null) {
+                if (!absoluteSent && target.flipStyle != null && target.flipStyle != 3 &&
+                    SystemClock.elapsedRealtime() - started >= 500) {
+                    val key = window.pages(r.vm).entries.firstOrNull { it.value?.let { page -> window.contains(page, target.start) } == true }?.key as? Number
+                    if (key != null) {
                         absoluteSent = true
-                        val sent = XposedHelpers.callMethod(progress, "tryEmit", key.toInt()) == true
-                        XposedBridge.log("ReaMicro search absolute page dispatch seq=${work.sequence} target=${key.toInt()} accepted=$sent")
+                        val sent = window.emitCorrection(r.vm, key.toInt())
+                        HookRuntime.log("ReaMicro search absolute page dispatch seq=${work.sequence} target=${key.toInt()} accepted=$sent")
                     }
                 }
                 0
             }
-            if (state != 0) return state == 1
+            if (state == 2) return false
+            if (state == 1) {
+                if (++stableVisible >= 2) return true
+            } else {
+                stableVisible = 0
+                if (target.flipStyle == 3 && SystemClock.elapsedRealtime() - lastScrollAt >= 120) {
+                    val command = onMain { if (valid(r) && work.ticket.isCurrent()) reader.searchScrollBridge?.command(r.vm, target) else null }
+                    if (command != null && (lastScroll?.state !== command.state || lastScroll?.index != command.index ||
+                            lastScroll?.offset != command.offset)) {
+                        lastScroll = command
+                        lastScrollAt = SystemClock.elapsedRealtime()
+                        reader.searchScrollBridge?.execute(command) { valid(r) && work.ticket.isCurrent() }
+                    }
+                }
+            }
             Thread.sleep(60)
         }
         return false

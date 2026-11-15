@@ -21,7 +21,6 @@ import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.createLifecycleAwareWindowRecomposer
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -37,8 +36,12 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
     private var failed by mutableStateOf(false)
     private var revision by mutableIntStateOf(0)
     private var disposed = false
-    private var recomposer: Recomposer? = null
     private val view = ComposeView(InjectedModuleContext.create(activity))
+    private val ui = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    private val attachListener = object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) = Unit
+        override fun onViewDetachedFromWindow(v: View) { dispose(removeFromParent = false) }
+    }
 
     private val placement = ReaderSearchBarPlacement()
     private var parentDecor: ViewGroup? = null
@@ -46,11 +49,11 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
     private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updatePlacement() }
     private val iconSize = 22.dp
     private var themeSnapshot by mutableStateOf(reader.readerSearchTheme ?:
-        StructureHost232Colors.snapshot(activity, StructureHome130Style.isDark(activity)))
+        HostThemeColors.snapshot(activity, HostEmbeddedStyle.isDark(activity)))
 
-    fun updateTheme(snapshot: StructureHost232Colors.Snapshot) {
+    fun updateTheme(snapshot: HostThemeColors.Snapshot) {
         if (disposed || themeSnapshot == snapshot) return
-        view.post {
+        ui.post {
 
             if (!disposed && reader.readerSearchTheme == snapshot) themeSnapshot = snapshot
         }
@@ -115,29 +118,24 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
             view.setViewTreeLifecycleOwner(owner)
             view.setViewTreeSavedStateRegistryOwner(owner)
 
-            recomposer = view.createLifecycleAwareWindowRecomposer(lifecycle = owner.lifecycle)
-            view.setParentCompositionContext(recomposer)
+            owner.attach(view)
             view.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(v: View) = Unit
-
-                override fun onViewDetachedFromWindow(v: View) { dispose(removeFromParent = false) }
-            })
+            view.addOnAttachStateChangeListener(attachListener)
             view.setContent { this@ReaderSearchNavigationBar.BarContent() }
             parentDecor = decor
             decor.addOnLayoutChangeListener(layoutListener)
             view.addOnLayoutChangeListener(layoutListener)
 
             ViewCompat.setOnApplyWindowInsetsListener(view) { _, insets ->
-                view.removeCallbacks(reposition)
-                view.post(reposition)
+                ui.removeCallbacks(reposition)
+                ui.post(reposition)
                 insets
             }
             decor.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.TOP or Gravity.LEFT
             })
             ViewCompat.requestApplyInsets(view)
-            view.post(reposition)
+            ui.post(reposition)
             reader.searchNavigationBarRef = WeakReference(view)
             reader.searchNavigationBarActivityRef = WeakReference(activity)
         } catch (error: Exception) {
@@ -163,7 +161,8 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
     private fun dispose(removeFromParent: Boolean) {
         if (disposed) return
         disposed = true
-        view.removeCallbacks(reposition)
+        ui.removeCallbacksAndMessages(null)
+        view.removeOnAttachStateChangeListener(attachListener)
         view.removeOnLayoutChangeListener(layoutListener)
         ViewCompat.setOnApplyWindowInsetsListener(view, null)
         parentDecor?.removeOnLayoutChangeListener(layoutListener)
@@ -172,8 +171,6 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
         try {
             view.disposeComposition()
         } finally {
-            recomposer?.cancel()
-            recomposer = null
             try {
                 if (removeFromParent) (view.parent as? ViewGroup)?.removeView(view)
             } finally {
@@ -189,12 +186,12 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
     }
     @Composable private fun BarContent() {
         revision
-        val p = StructureHome130Style.Palette(themeSnapshot)
+        val p = HostEmbeddedStyle.Palette(themeSnapshot)
 
         val iconColors = IconButtonDefaults.iconButtonColors(contentColor = p.text,
             disabledContentColor = p.text.copy(alpha = .38f))
-        val fonts = remember { StructureHome130Style.fonts(activity) }
-        MaterialTheme(colorScheme = p.controlsScheme(), typography = StructureHome130Style.typography(fonts)) {
+        val fonts = remember { HostEmbeddedStyle.fonts(activity) }
+        MaterialTheme(colorScheme = p.controlsScheme(), typography = HostEmbeddedStyle.typography(fonts)) {
             Surface(modifier = Modifier.pointerInput(Unit) {
 
                 detectDragGesturesAfterLongPress(
@@ -209,10 +206,10 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
                 border = BorderStroke(.5.dp, p.borderVariant), tonalElevation = 0.dp) {
                 Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(modifier = Modifier.size(48.dp), colors = iconColors, onClick = { reader.openBottomSearchPage() }) {
-                        Icon(StructureHome130Icons.SearchResults, "搜索结果列表", Modifier.size(iconSize), tint = p.text)
+                        Icon(HostEmbeddedIcons.SearchResults, "搜索结果列表", Modifier.size(iconSize), tint = p.text)
                     }
                     IconButton(modifier = Modifier.size(48.dp), colors = iconColors, enabled = index > 0, onClick = { reader.jumpRelativeSearchResult(-1) }) {
-                        Icon(StructureHome130Icons.Back, "上一处", Modifier.size(iconSize), tint = if (index > 0) p.text else p.text.copy(alpha = .38f))
+                        Icon(HostEmbeddedIcons.Back, "上一处", Modifier.size(iconSize), tint = if (index > 0) p.text else p.text.copy(alpha = .38f))
                     }
                     TextButton(modifier = Modifier.weight(1f, fill = false), colors = ButtonDefaults.textButtonColors(contentColor = p.primary), onClick = { reader.returnToSearchOrigin() }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -221,10 +218,10 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
                         }
                     }
                     IconButton(modifier = Modifier.size(48.dp), colors = iconColors, enabled = index < count - 1, onClick = { reader.jumpRelativeSearchResult(1) }) {
-                        Icon(StructureHome130Icons.Back, "下一处", Modifier.size(iconSize).rotate(180f), tint = if (index < count - 1) p.text else p.text.copy(alpha = .38f))
+                        Icon(HostEmbeddedIcons.Back, "下一处", Modifier.size(iconSize).rotate(180f), tint = if (index < count - 1) p.text else p.text.copy(alpha = .38f))
                     }
                     IconButton(modifier = Modifier.size(48.dp), colors = iconColors, onClick = { reader.clearStaleSearchNavigation() }) {
-                        Icon(StructureHome130Icons.SearchNavigationClose, "结束搜索导航", Modifier.size(iconSize), tint = p.text)
+                        Icon(HostEmbeddedIcons.SearchNavigationClose, "结束搜索导航", Modifier.size(iconSize), tint = p.text)
                     }
                 }
             }

@@ -3,9 +3,6 @@ package com.reamicro.fix.hook.reader
 import android.app.Dialog
 import android.content.Context
 import android.content.res.Configuration
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.view.View
 import android.widget.TextView
 import java.io.File
 import com.reamicro.fix.hook.reader.*

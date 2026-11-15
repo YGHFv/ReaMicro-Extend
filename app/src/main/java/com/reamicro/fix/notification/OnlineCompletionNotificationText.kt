@@ -1,7 +1,6 @@
 package com.reamicro.fix.notification
 
 import android.app.NotificationManager
-import android.os.Handler
 import android.os.Looper
 import android.text.SpannableString
 import android.text.Spanned
@@ -12,7 +11,8 @@ fun onlineCompletionDownloadTitle(progress: Int, status: String): CharSequence =
 
 fun onlineCompletionDownloadText(bookName: String, status: String): CharSequence {
     val displayName = bookName.ifBlank { ONLINE_COMPLETION_FALLBACK_TITLE }
-    return SpannableString(displayName).apply {
+    val detail = compactNotificationStatus(status)
+    return SpannableString(if (detail.isBlank()) displayName else "$displayName · $detail").apply {
         setSpan(
             RelativeSizeSpan(0.82f),
             0,
@@ -24,23 +24,34 @@ fun onlineCompletionDownloadText(bookName: String, status: String): CharSequence
 
 fun onlineCompletionDownloadBigText(bookName: String, status: String, progress: Int): CharSequence {
     val displayName = bookName.ifBlank { ONLINE_COMPLETION_FALLBACK_TITLE }
-    return displayName
+    return listOf(displayName, compactNotificationStatus(status)).filter(String::isNotBlank).joinToString("\n")
 }
 
-fun cancelOnlineCompletionNotificationIfDone(manager: NotificationManager, id: Int, done: Boolean) {
-    if (!done) return
-    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({ manager.cancel(id) }, DONE_NOTIFICATION_VISIBLE_MS)
+fun cancelOnlineCompletionNotificationIfDone(
+    manager: NotificationManager, id: Int, done: Boolean, status: String,
+) {
+    if (!shouldDismissOnlineCompletionNotification(done, status)) return
+    val version = OnlineNotificationEventOrder.version(id)
+    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
+        if (OnlineNotificationEventOrder.version(id) == version) manager.cancel(id)
+    }, DONE_NOTIFICATION_VISIBLE_MS)
 }
+
+internal fun shouldDismissOnlineCompletionNotification(done: Boolean, status: String): Boolean =
+    done && !compactNotificationStatus(status).startsWith("失败：") &&
+        !compactNotificationStatus(status).contains("暂停") && failedCountLabel(status).isEmpty()
 
 private fun onlineCompletionProgressLabel(progress: Int, status: String): String {
     val compactStatus = compactNotificationStatus(status)
     val percent = progress.coerceIn(0, 100)
     val failedSuffix = failedCountLabel(compactStatus)
+    if (compactStatus.startsWith("失败：")) return STATUS_FAILED
+    if (compactStatus.startsWith("已暂停") || compactStatus.startsWith("更新已暂停")) return "已暂停"
+    if (compactStatus.contains("取消")) return "已取消"
+    if (compactStatus.startsWith("已导入")) return "已导入$failedSuffix"
+    if (percent == 100) return "已完成$failedSuffix"
     chapterProgressRegex.find(compactStatus)?.let { match ->
-        val current = match.groupValues[1].toIntOrNull() ?: 0
-        val total = match.groupValues[2].toIntOrNull() ?: 0
-        val chapterPercent = chapterPercent(current, total).takeIf { total > 0 } ?: percent
-        return "${match.groupValues[1]}/${match.groupValues[2]} - $chapterPercent%$failedSuffix"
+        return "${match.groupValues[1]}/${match.groupValues[2]} - $percent%$failedSuffix"
     }
     return when {
         compactStatus.contains(STATUS_DONE) -> STATUS_DONE
@@ -57,20 +68,17 @@ private fun onlineCompletionProgressLabel(progress: Int, status: String): String
 }
 
 private fun compactNotificationStatus(status: String): String =
-    status.replace(Regex("\\s+"), " ").trim()
+    status.replace(whitespaceRegex, " ").trim()
 
 private fun failedCountLabel(status: String): String {
-    val count = failedCountRegex.find(status)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+    val count = failedCountRegex.find(status)?.groupValues?.drop(1)
+        ?.firstNotNullOfOrNull(String::toIntOrNull) ?: 0
     return if (count > 0) " · \u5931\u8d25${count}\u7ae0" else ""
 }
 
 private val chapterProgressRegex = Regex("(?:\u4e0b\u8f7d|\u91cd\u8bd5)?(?:\u65b0\u589e)?\u7ae0\u8282\\s*(\\d+)\\s*/\\s*(\\d+)")
-private val failedCountRegex = Regex("\u5931\u8d25\\s*(\\d+)\\s*\u7ae0")
-
-private fun chapterPercent(current: Int, total: Int): Int {
-    if (total <= 0) return 0
-    return ((current.coerceAtLeast(0) * 100L) / total).toInt().coerceIn(0, 100)
-}
+private val failedCountRegex = Regex("(?:失败\\s*(\\d+)\\s*章|(\\d+)\\s*章失败)")
+private val whitespaceRegex = Regex("\\s+")
 
 private const val DOWNLOAD_NOTIFICATION_PREFIX = "\u4e0b\u8f7d\uff1a"
 private const val ONLINE_COMPLETION_FALLBACK_TITLE = "\u5728\u7ebf\u8865\u5168"

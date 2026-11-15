@@ -6,6 +6,9 @@ import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.association.model.withAllowedAssociationPlatform
 import com.reamicro.fix.association.provider.AssociationSearchProviderRegistry
 import com.reamicro.fix.association.provider.BookAssociationSearchProvider
+import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.reload.TaskCancellation
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReferenceArray
@@ -33,79 +36,98 @@ class AssociationSearchService(
     fun search(keyword: String, limitPerSource: Int = 10): List<BookSearchResult> {
         val activeProviders = activeProviders()
         if (activeProviders.isEmpty()) return emptyList()
-
-        val resultsByProvider = AtomicReferenceArray<List<BookSearchResult>>(activeProviders.size)
-        val latch = CountDownLatch(activeProviders.size)
-        activeProviders.forEachIndexed { index, provider ->
-            com.reamicro.fix.reload.ModuleResources.thread {
-                try {
-                    runCatching {
-                        provider.search(keyword, providerFetchLimit(limitPerSource))
-                    }.onSuccess { providerResults ->
-                        resultsByProvider.set(
-                            index,
-                            providerResults.sanitizePlatforms()
-                                .rankForKeyword(keyword)
-                                .take(limitPerSource.coerceAtLeast(1)),
-                        )
-                    }.onFailure {
-                        onProviderError(provider.source, it)
-                    }
-                } finally {
-                    latch.countDown()
-                }
-            }.apply {
-                name = "ReaMicroSearch-${provider.source.id}"
-                isDaemon = true
-                start()
-            }
+        val window = SearchWindow(activeProviders.size, PROVIDER_WAIT_TIMEOUT_MS)
+        return try {
+            startProviders(window, activeProviders, keyword, limitPerSource) { _, _, _ -> }
+            window.await()
+            window.cancellation.check()
+            orderedResults(window.results).orderExactTitleMatchesFirst(keyword)
+        } finally {
+            window.close()
         }
-        latch.await(PROVIDER_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        return orderedResults(resultsByProvider).orderExactTitleMatchesFirst(keyword)
     }
 
+    /**
+     * Closing cancels workers and stops callback admission without waiting for an
+     * already admitted callback. Callers keep their owner/generation check.
+     */
     fun searchProgressively(
         keyword: String,
         limitPerSource: Int = 10,
         maxWaitMs: Long = PROVIDER_WAIT_TIMEOUT_MS,
         onProviderResults: (BookSource, List<BookSearchResult>, Long) -> Unit,
         onComplete: (List<BookSearchResult>, Long) -> Unit = { _, _ -> },
-    ) {
-        val startedAt = System.currentTimeMillis()
+    ): AutoCloseable {
         val activeProviders = activeProviders()
         if (activeProviders.isEmpty()) {
             onComplete(emptyList(), 0L)
-            return
+            return AutoCloseable { }
         }
-        val resultsByProvider = AtomicReferenceArray<List<BookSearchResult>>(activeProviders.size)
-        val latch = CountDownLatch(activeProviders.size)
-        activeProviders.forEachIndexed { index, provider ->
-            com.reamicro.fix.reload.ModuleResources.thread {
-                val providerStartedAt = System.currentTimeMillis()
+        val window = SearchWindow(activeProviders.size, maxWaitMs)
+        try {
+            startProviders(window, activeProviders, keyword, limitPerSource, onProviderResults)
+            ModuleResources.thread {
                 try {
-                    runCatching {
-                        provider.search(keyword, providerFetchLimit(limitPerSource))
+                    window.await()
+                    if (window.complete()) {
+                        window.cancellation.cancel()
+                        runCatching {
+                            onComplete(
+                                orderedResults(window.results).orderExactTitleMatchesFirst(keyword),
+                                window.elapsedMs(),
+                            )
+                        }
+                    }
+                } catch (_: CancellationException) {
+                    // Caller cancellation ends the search without a completion callback.
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                } finally {
+                    window.close()
+                }
+            }.apply {
+                name = "ReaMicroSearch-complete"
+                isDaemon = true
+                start()
+            }
+        } catch (failure: Throwable) {
+            window.close()
+            throw failure
+        }
+        return window
+    }
+
+    private fun startProviders(
+        window: SearchWindow,
+        activeProviders: List<BookAssociationSearchProvider>,
+        keyword: String,
+        limitPerSource: Int,
+        onProviderResults: (BookSource, List<BookSearchResult>, Long) -> Unit,
+    ) {
+        activeProviders.forEachIndexed { index, provider ->
+            ModuleResources.thread {
+                val providerStartedAt = System.nanoTime()
+                val interruption = window.cancellation.register(Thread.currentThread()::interrupt)
+                try {
+                    window.cancellation.run {
+                        val providerResults = provider.search(keyword, providerFetchLimit(limitPerSource))
                             .sanitizePlatforms()
                             .rankForKeyword(keyword)
                             .take(limitPerSource.coerceAtLeast(1))
-                    }.onSuccess { providerResults ->
-                        resultsByProvider.set(index, providerResults)
-                        if (providerResults.isNotEmpty()) {
-                            runCatching {
-                                onProviderResults(
-                                    provider.source,
-                                    providerResults,
-                                    System.currentTimeMillis() - providerStartedAt,
-                                )
-                            }.onFailure {
-                                onProviderError(provider.source, it)
-                            }
+                        if (window.publish(index, providerResults) && providerResults.isNotEmpty()) {
+                            onProviderResults(provider.source, providerResults,
+                                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - providerStartedAt))
                         }
-                    }.onFailure {
-                        onProviderError(provider.source, it)
                     }
+                } catch (_: CancellationException) {
+                    // Expected when a query expires, its owner leaves, or a parent is cancelled.
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                } catch (failure: Throwable) {
+                    if (window.acceptsCallbacks()) runCatching { onProviderError(provider.source, failure) }
                 } finally {
-                    latch.countDown()
+                    interruption.close()
+                    window.latch.countDown()
                 }
             }.apply {
                 name = "ReaMicroSearch-${provider.source.id}"
@@ -113,18 +135,48 @@ class AssociationSearchService(
                 start()
             }
         }
-        com.reamicro.fix.reload.ModuleResources.thread {
-            latch.await(maxWaitMs, TimeUnit.MILLISECONDS)
-            runCatching {
-                onComplete(
-                    orderedResults(resultsByProvider).orderExactTitleMatchesFirst(keyword),
-                    System.currentTimeMillis() - startedAt,
-                )
+    }
+
+    private class SearchWindow(size: Int, maxWaitMs: Long) : AutoCloseable {
+        val cancellation = TaskCancellation.current()?.child() ?: TaskCancellation()
+        val results = AtomicReferenceArray<List<BookSearchResult>>(size)
+        val latch = CountDownLatch(size)
+        private val startedAt = System.nanoTime()
+        private val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(maxWaitMs.coerceAtLeast(0L))
+        private var open = true
+
+        fun elapsedMs(): Long = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+
+        @Synchronized fun acceptsCallbacks(): Boolean =
+            open && !cancellation.isCancelled && System.nanoTime() - startedAt < timeoutNanos
+
+        @Synchronized fun publish(index: Int, value: List<BookSearchResult>): Boolean {
+            if (!acceptsCallbacks()) return false
+            results.set(index, value)
+            return true
+        }
+
+        fun await() {
+            val interruption = cancellation.register(Thread.currentThread()::interrupt)
+            try {
+                cancellation.check()
+                latch.await((timeoutNanos - (System.nanoTime() - startedAt)).coerceAtLeast(0L), TimeUnit.NANOSECONDS)
+                cancellation.check()
+            } finally {
+                interruption.close()
             }
-        }.apply {
-            name = "ReaMicroSearch-complete"
-            isDaemon = true
-            start()
+        }
+
+        @Synchronized fun complete(): Boolean {
+            if (!open || cancellation.isCancelled) return false
+            open = false
+            return true
+        }
+
+        override fun close() {
+            synchronized(this) { open = false }
+            // Do not hold the callback admission lock while disconnecting or interrupting IO.
+            cancellation.cancel()
         }
     }
 
@@ -180,7 +232,7 @@ class AssociationSearchService(
 
     private fun providerFetchLimit(limitPerSource: Int): Int =
         limitPerSource.coerceAtLeast(1).let { limit ->
-            maxOf(limit, minOf(MAX_PROVIDER_FETCH_LIMIT, limit * PROVIDER_FETCH_MULTIPLIER + 1))
+            maxOf(limit, minOf(MAX_PROVIDER_FETCH_LIMIT.toLong(), limit.toLong() * PROVIDER_FETCH_MULTIPLIER + 1).toInt())
         }
 
     private fun orderedResults(resultsByProvider: AtomicReferenceArray<List<BookSearchResult>>): List<BookSearchResult> =

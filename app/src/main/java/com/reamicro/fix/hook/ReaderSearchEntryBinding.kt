@@ -31,7 +31,7 @@ internal fun ReaderHook.replaceReaderThemeIcon(args: Array<Any?>, name: String) 
 internal fun ReaderHook.bindReaderThemeClick(original: Any): Any {
     if (!canReplaceReaderThemeControl() || !isReaderBottomBarDarkLightToggleClick(original)) return original
     return readerInlineSearchClick ?: nativeFunction0 {
-        com.reamicro.fix.xposed.XposedBridge.logAlways("ReaMicro reader menu module search clicked")
+        com.reamicro.fix.xposed.HookRuntime.logAlways("ReaMicro reader menu module search clicked")
         openBottomSearchPage()
     }
         .also { readerInlineSearchClick = it }

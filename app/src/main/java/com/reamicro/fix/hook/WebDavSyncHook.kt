@@ -3,28 +3,23 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.os.Looper
 import android.widget.Toast
-import com.reamicro.fix.cloud.webdav.B2HostHttp
+import com.reamicro.fix.cloud.webdav.NativeHostHttp
 import com.reamicro.fix.cloud.webdav.CleartextScope
 import com.reamicro.fix.cloud.webdav.WebDavSyncProtocol
 import com.reamicro.fix.cloud.webdav.WebDavSyncTransport
-import com.reamicro.fix.core.B2NativeUi
 import com.reamicro.fix.core.HostCoroutines
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostReleaseClass
-import com.reamicro.fix.core.hostReleaseField
-import com.reamicro.fix.core.hostReleaseMethodByArity
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.HookInstallReport
+import com.reamicro.fix.core.HostSyncBindings
+import com.reamicro.fix.core.HostUiBindings
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
-import java.lang.ref.WeakReference
-import java.lang.reflect.Method
+import java.lang.reflect.Executable
+import io.github.libxposed.api.XposedInterface
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** 2.3.3 正式版经 REA/MT 双重核实的同步存储接口；不重写书架合并算法。 */
+/** 动态绑定宿主同步存储契约，沿用原生书架清单与合并流程。 */
 internal class WebDavSyncHook(
     private val loader: ClassLoader,
     private val activityProvider: () -> Activity?,
@@ -34,212 +29,201 @@ internal class WebDavSyncHook(
     private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { Thread(it, "ReaMicroWebDavSync").apply { isDaemon = true } }
     private val configuring = AtomicBoolean()
+    private val handles = arrayListOf<XposedInterface.HookHandle>()
     private val nativeRoutes = HostWebDavConfigurationRoute(loader, activityProvider)
-    @Volatile private var session = WeakReference<Any>(null)
-    private val extraRow = ThreadLocal<Boolean>()
-    private val ui = B2NativeUi(loader)
+    private val configurationUi by lazy { HostWebDavConfigurationUi(loader) }
     private val http by lazy {
-        B2HostHttp(loader, object : CleartextScope {
+        NativeHostHttp(loader, object : CleartextScope {
             override fun <T> run(block: () -> T): T = drive.withWebDavCleartextAllowed(block)
         })
     }
-    private val configType by lazy { raw("dd9") }
-    private val transportType by lazy { raw("uk6") }
+    private val contract by lazy { requireNotNull(HostSyncBindings.current) { "Sync contract unavailable" } }
+    private val nativeUi by lazy { requireNotNull(HostUiBindings.current) { "Native sync UI unavailable" } }
+    private val configType get() = contract.type("config")
     private val unit by lazy { drive.targetUnit() }
 
-    private fun raw(name: String) = loader.hostReleaseClass(name)
-    private fun method(owner: String, name: String, count: Int): Method =
-        raw(owner).hostReleaseMethodByArity(name, count).apply { isAccessible = true }
-    private fun field(value: Any, name: String): Any? =
-        value.javaClass.hostReleaseField(name).apply { isAccessible = true }.get(value)
+    private fun hook(member: Executable, callback: HookCallback) {
+        handles += HookRuntime.hookMethod(member, callback)
+    }
 
     fun install() {
-        check(HostSymbols.usesReleaseLayout)
-        check(raw("bf9").declaredMethods.count { !java.lang.reflect.Modifier.isStatic(it.modifiers) } == 8)
-        check(configType.declaredConstructors.any { it.parameterCount == 7 && it.parameterTypes[0] == raw("he9") })
-        XposedBridge.hookAllConstructors(raw("w1a"), object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                session = WeakReference(param.thisObject)
-            }
-        })
-        hookEntry()
-        nativeRoutes.install()
-        hookTransport()
-        hookLocalConfigSave()
-        // 关闭扩展后暂停标记配置，不能落回 AWS 签名并把 WebDAV 密码发给别的服务。
-        XposedBridge.hookMethod(method("dd9", "b", 0), object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (marked(param.thisObject) && !settingsProvider().canRunWebDavSync) param.result = false
-            }
-        })
-        XposedBridge.logAlways("ReaMicro WebDAV shelf sync installed: native manifest/merge/transport")
+        check(handles.isEmpty()) { "WebDAV sync hooks already installed" }
+        check(nativeUi.composerClass == contract.type("composer") &&
+            nativeUi.type("function2") == contract.type("function2") &&
+            nativeUi.method("clickable").parameterTypes[4] == contract.type("function0")) {
+            "WebDAV sync and native UI contracts disagree"
+        }
+        try {
+            configurationUi.install(::hook)
+            hookTransport()
+            hookLocalConfigSave()
+            // 关闭扩展后暂停标记配置，不能落回 AWS 签名并把 WebDAV 密码发给别的服务。
+            hook(contract.method("isConfigured"), object : HookCallback() {
+                override fun before(param: Call) {
+                    if (marked(param.thisObject) && !settingsProvider().canRunWebDavSync) param.result = false
+                }
+            })
+            HookRuntime.deoptimize(contract.method("isConfigured"))
+            nativeRoutes.install(::hook)
+            check(HookInstallReport.snapshot().any {
+                it.feature == "WebDavSyncHook" && it.name == "nativeConfigurationRoute" && it.ok
+            }) { "Native WebDAV configuration route did not install" }
+            hookEntry()
+            HookRuntime.logAlways("ReaMicro WebDAV shelf sync installed: native manifest/merge/transport")
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            handles.clear()
+            throw error
+        }
     }
 
     private fun hookEntry() {
-        val other = method("zua", "b", 3)
-        XposedBridge.hookMethod(other, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (extraRow.get() == true || !settingsProvider().canRunWebDavSync) return
-                val composer = param.args[1] ?: return
-                EmbeddedHostUi.captureTypography(loader, composer)
-                BookImageDialogStyle.capture(loader, composer)
-                WebDavSyncPageStyle.capture(loader, composer)
-                extraRow.set(true)
+        val other = contract.method("otherProvider")
+        hook(other, object : HookCallback() {
+            override fun before(param: Call) {
+                if (configurationUi.renderingEntry) return
+                val composer = param.args.getOrNull(1)?.takeIf(nativeUi.composerClass::isInstance) ?: return
+                // 总是保持该组的位置；开关只改变组内容，避免后续原生槽位错位。
+                nativeUi.instance("startGroup", composer, 0x524D5753)
                 try {
-                    val callback = drive.functionProxy("WebDavSyncConfigure", "kotlin.jvm.functions.Function0") {
-                        showConfiguration()
-                        unit
+                    if (settingsProvider().canRunWebDavSync) {
+                        renderEntry(composer)
+                        configurationUi.entryGap(composer)
                     }
-                    other.invoke(null, callback, composer, 0)
-                    ui.spacer(ui.height(ui.modifier(), ui.dp(12)), composer)
                 } finally {
-                    extraRow.remove()
+                    nativeUi.instance("endGroup", composer, false)
                 }
             }
         })
-        XposedBridge.hookMethod(method("z6b", "b", 20), object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val label = param.args[0] as? String ?: return
-                if (extraRow.get() == true && label == "其他 S3 服务") param.args[0] = "使用 WebDAV"
-            }
-        })
-        XposedBridge.hookMethod(method("vl4", "a", 7), object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (extraRow.get() == true && param.args[1] == "其他 S3 服务") param.args[1] = "使用 WebDAV"
-            }
-        })
-        val card = method("p1e", "a", 9)
-        XposedBridge.hookMethod(card, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (extraRow.get() != true) return
-                val original = requireNotNull(param.args[5])
-                param.args[5] = ui.lambda(0x524d5744,
-                    drive.functionProxy("WebDavSyncRowContent", "kotlin.jvm.functions.Function3") { args ->
-                        val previous = extraRow.get()
-                        extraRow.set(true)
-                        try {
-                            loader.hostClass("kotlin.jvm.functions.Function3").hostMethod(
-                                "invoke", Any::class.java, Any::class.java, Any::class.java,
-                            ).invoke(original, *requireNotNull(args))
-                        } finally {
-                            if (previous == null) extraRow.remove() else extraRow.set(previous)
-                        }
-                        unit
-                    })
-            }
-        })
-        listOf(other, card, method("ip1", "r", 3)).forEach(XposedBridge::deoptimize)
+        HookRuntime.deoptimize(other)
+        HookRuntime.deoptimize(contract.method("providerChoices"))
+    }
+
+    private fun renderEntry(composer: Any) {
+        val click = nativeUi.callback(contract.type("function0")) { showConfiguration() }
+        configurationUi.renderEntry(click, composer)
     }
 
     private fun marked(config: Any?): Boolean = configType.isInstance(config) &&
-        field(requireNotNull(config), "c") == WebDavSyncProtocol.BUCKET
+        contract.config(requireNotNull(config), "bucket") == WebDavSyncProtocol.BUCKET
 
     private fun transport(config: Any): WebDavSyncTransport {
-        val username = field(config, "e") as String
-        val password = field(config, "f") as String
-        val url = field(config, "b") as String
+        val username = contract.config(config, "accessKey") as String
+        val password = contract.config(config, "secretKey") as String
+        val url = contract.config(config, "endpoint") as String
         drive.rememberCleartextHost(url)
         return WebDavSyncTransport(http, url,
             if (username == WebDavSyncProtocol.ANONYMOUS) "" else username,
             if (password == WebDavSyncProtocol.ANONYMOUS) "" else password,
         ) { code ->
-            throw raw("za9").getConstructor(Int::class.javaPrimitiveType, String::class.java)
+            throw contract.constructor("httpError")
                 .newInstance(code, "WebDAV 同步请求失败：HTTP $code") as Throwable
         }
     }
 
-    private fun suspendOperation(param: XC_MethodHook.MethodHookParam, operation: () -> Any?) {
-        val continuation = requireNotNull(param.args.last())
-        worker.execute {
-            val result = runCatching {
-                HostCoroutines.runBlocking(loader) { operation() }
-            }.getOrElse { error ->
-                loader.hostClass("kotlin.ResultKt").hostMethod("createFailure", Throwable::class.java).invoke(null, error)
+    private fun suspendOperation(param: HookCallback.Call, operation: () -> Any?) {
+        try {
+            val continuation = requireNotNull(param.args.last())
+            val runtime = requireNotNull(com.reamicro.fix.core.HostRuntimeBindings.coroutines)
+            val resume = runtime.method("resumeWith")
+            val failure = runtime.constructor("failure")
+            val suspended = runtime.suspended
+            check(resume.declaringClass.isInstance(continuation)) { "Invalid native sync continuation" }
+            worker.execute {
+                val result = runCatching {
+                    HostCoroutines.runBlocking(loader) { operation() }
+                }.getOrElse { error -> failure.newInstance(error) }
+                runCatching { resume.invoke(continuation, result) }
+                    .onFailure { HookRuntime.logError("ReaMicro WebDAV sync continuation failed", it) }
             }
-            runCatching {
-                loader.hostClass("kotlin.coroutines.Continuation").hostMethod("resumeWith", Any::class.java)
-                    .invoke(continuation, result)
-            }.onFailure { XposedBridge.logError("ReaMicro WebDAV sync continuation failed", it) }
+            param.result = suspended
+        } catch (error: Throwable) {
+            // Adapter logs thrown before-hook errors and runs the original; retain an explicit failure here.
+            param.throwable = error
         }
-        param.result = loader.hostClass("kotlin.coroutines.intrinsics.CoroutineSingletons")
-            .enumConstants!!.single { (it as Enum<*>).name == "COROUTINE_SUSPENDED" }
     }
 
     private fun hookLocalConfigSave() {
         // 原生 S3 编辑页面也可能保存当前配置，不能把标记的 WebDAV 凭据上传到账号。
-        val save = method("ad9", "c", 3)
-        XposedBridge.hookMethod(save, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val save = contract.method("saveLocal")
+        hook(save, object : HookCallback() {
+            override fun before(param: Call) {
                 val config = param.args[1] ?: return
                 if (!marked(config)) return
-                val current = requireNotNull(field(requireNotNull(param.thisObject), "b"))
+                val identity = AccountHostRuntime.storageSnapshot(activityProvider())
+                if (identity == null) {
+                    param.throwable = IllegalStateException("账号状态已变化，未保存同步配置")
+                    return
+                }
                 suspendOperation(param) {
+                    val current = requireNotNull(contract.field("saveSession").get(requireNotNull(param.thisObject)))
+                    check(current === identity.session && AccountHostRuntime.isCurrent(identity, activityProvider())) {
+                        "账号状态已变化，未保存同步配置"
+                    }
                     check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
-                    val names = listOf("provider", "endpoint", "bucket", "region", "access_key", "secret_key", "prefix")
-                    val values = names.mapIndexed { index, name ->
-                        val value = field(config, ('a' + index).toString())
-                        "s3_sync_$name" to if (value is Enum<*>) value.name else value
+                    val names = mapOf("provider" to "provider", "endpoint" to "endpoint", "bucket" to "bucket",
+                        "region" to "region", "access_key" to "accessKey", "secret_key" to "secretKey", "prefix" to "prefix")
+                    val values = names.map { (key, property) ->
+                        val value = contract.config(config, property)
+                        "s3_sync_$key" to if (value is Enum<*>) value.name else value
                     }.toMap() + ("s3_sync_cloud_config_enabled" to false)
-                    saveValues(current, values)
+                    saveValues(current, values, identity)
                     unit
                 }
             }
         })
-        XposedBridge.deoptimize(save)
+        HookRuntime.deoptimize(save)
     }
 
     private fun hookTransport() {
-        val api = raw("bf9")
-        api.declaredMethods.filterNot { java.lang.reflect.Modifier.isStatic(it.modifiers) }.forEach { contract ->
-            val implementation = transportType.getDeclaredMethod(contract.name, *contract.parameterTypes)
-            XposedBridge.hookMethod(implementation, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+        HostSyncBindings.OPERATIONS.forEach { operation ->
+            val implementation = contract.method(operation)
+            hook(implementation, object : HookCallback() {
+                override fun before(param: Call) {
                     val target = param.thisObject ?: return
-                    val config = field(target, "c") ?: return
+                    val config = contract.field("transportConfig").get(target) ?: return
                     if (!marked(config)) return
-                    check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
                     val args = param.args.clone()
                     // 使用宿主协程恢复协议，不在主线程执行同步网络请求。
                     suspendOperation(param) {
                         check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
-                        execute(contract.name, transport(config), args)
+                        execute(operation, transport(config), args)
                     }
                 }
             })
-            XposedBridge.deoptimize(implementation)
+            HookRuntime.deoptimize(implementation)
         }
     }
 
     private fun execute(name: String, remote: WebDavSyncTransport, args: Array<Any?>): Any? {
         val key = args[0] as String
         return when (name) {
-            "c" -> remote.get(key)?.let { response ->
-                raw("gb9").getConstructor(String::class.java, ByteArray::class.java)
+            "getContent" -> remote.get(key)?.let { response ->
+                contract.constructor("content")
                     .newInstance(response.headers["ETag"], requireNotNull(response.bodyBytes))
             }
-            "f" -> remote.head(key)?.let { response ->
+            "head" -> remote.head(key)?.let { response ->
                 val size = response.headers["Content-Length"]?.toLongOrNull() ?: error("WebDAV 缺少对象大小")
-                raw("hb9").getConstructor(Long::class.javaPrimitiveType, String::class.java)
+                contract.constructor("head")
                     .newInstance(size, response.headers["ETag"])
             }
-            "i" -> remote.get(key)?.bodyBytes ?: throw raw("za9")
-                .getConstructor(Int::class.javaPrimitiveType, String::class.java)
+            "getBytes" -> remote.get(key)?.bodyBytes ?: throw contract.constructor("httpError")
                 .newInstance(404, "WebDAV 同步对象不存在") as Throwable
-            "d" -> { remote.delete(key); unit }
-            "e", "g" -> {
+            "delete" -> { remote.delete(key); unit }
+            "putBytes", "putProgress" -> {
                 val bytes = args[1] as ByteArray
                 remote.put(key, bytes, null, args[2] as String, args[3] as? String)
-                if (name == "g") progress(args[4], bytes.size.toLong())
+                if (name == "putProgress") progress(args[4], bytes.size.toLong())
                 unit
             }
-            "b" -> {
-                val file = raw("dn7").getMethod("toFile").invoke(args[1]) as File
+            "putFile" -> {
+                val file = contract.method("toFile").invoke(args[1]) as File
                 remote.put(key, null, file, args[2] as String, args[3] as? String)
                 progress(args[4], file.length())
                 unit
             }
-            "h" -> {
-                val file = raw("dn7").getMethod("toFile").invoke(args[1]) as File
+            "getFile" -> {
+                val file = contract.method("toFile").invoke(args[1]) as File
                 remote.download(key, file)
                 progress(args[2], file.length())
                 unit
@@ -250,9 +234,7 @@ internal class WebDavSyncHook(
 
     private fun progress(callback: Any?, size: Long) {
         if (callback == null) return
-        val invoke = loader.hostClass("kotlin.jvm.functions.Function3").hostMethod(
-            "invoke", Any::class.java, Any::class.java, Any::class.java,
-        )
+        val invoke = contract.method("progressInvoke")
         // Function3 是 suspend (copied, total, continuation)，第三参不是进度值。
         HostCoroutines.runBlocking(loader) { continuation ->
             invoke.invoke(callback, size, size, continuation)
@@ -260,42 +242,49 @@ internal class WebDavSyncHook(
     }
 
     private fun preferences(session: Any): Any {
-        val store = requireNotNull(field(session, "a"))
-        val flow = XposedHelpers.callMethod(store, "getData")
+        val store = requireNotNull(contract.field("datastore").get(session))
+        val flow = contract.method("getData").invoke(store)
         return requireNotNull(HostCoroutines.invokeTimed(loader,
-            method("avd", "c", 2), null, 15_000L, flow))
+            contract.method("first"), null, 15_000L, flow))
     }
 
     private fun nativeValues(session: Any): Map<String, Any?> {
         val prefs = preferences(session)
         return KEYS.associateWith { key ->
-            val k = raw("cx7").getConstructor(String::class.java).newInstance(key)
-            method("tn6", "c", 1).invoke(prefs, k)
+            val k = contract.preferenceKey(key)
+            contract.method("preferenceGet").invoke(prefs, k)
         }
     }
 
-    private fun saveValues(session: Any, values: Map<String, Any?>, beforeWrite: () -> Unit = {}) {
-        val change = WebDavPreferencesEdit.create(loader, beforeWrite) { prefs ->
+    private fun saveValues(session: Any, values: Map<String, Any?>, identity: AccountHostRuntime.Identity, beforeWrite: () -> Unit = {}) {
+        val change = WebDavPreferencesEdit.create(loader, contract.method("editInvoke"), beforeWrite) { prefs ->
+            check(session === identity.session && AccountHostRuntime.isCurrent(identity, activityProvider()) &&
+                (contract.method("preferenceGet").invoke(prefs, contract.preferenceKey("token")) as? String).orEmpty() == identity.token) {
+                "账号状态已变化，未保存同步配置"
+            }
             val scopeChanged = listOf("provider", "endpoint", "bucket", "prefix").any { name ->
                 val keyName = "s3_sync_$name"
-                val key = raw("cx7").getConstructor(String::class.java).newInstance(keyName)
-                values.containsKey(keyName) && method("tn6", "c", 1).invoke(prefs, key) != values[keyName]
+                val key = contract.preferenceKey(keyName)
+                values.containsKey(keyName) && contract.method("preferenceGet").invoke(prefs, key) != values[keyName]
             }
             // 与原生 Session 保存一致：切换存储根后移除旧基线，避免按旧远端状态误判删除。
-            if (scopeChanged && !values.containsKey("s3_sync_baseline_cbor")) {
-                method("tn6", "d", 1).invoke(prefs,
-                    raw("cx7").getConstructor(String::class.java).newInstance("s3_sync_baseline_cbor"))
+            if (scopeChanged) {
+                for (name in listOf("s3_sync_baseline_cbor", "s3_sync_pending_deletions")) {
+                    if (!values.containsKey(name)) contract.method("preferenceRemove").invoke(prefs, contract.preferenceKey(name))
+                }
             }
             values.forEach { (name, value) ->
-                val key = raw("cx7").getConstructor(String::class.java).newInstance(name)
-                if (value == null) method("tn6", "d", 1).invoke(prefs, key)
-                else method("tn6", "e", 2).invoke(prefs, key, value)
+                val key = contract.preferenceKey(name)
+                if (value == null) contract.method("preferenceRemove").invoke(prefs, key)
+                else contract.method("preferenceSet").invoke(prefs, key, value)
             }
             prefs
         }
-        HostCoroutines.invokeTimed(loader, method("nzd", "e", 3), null, 15_000L,
-            requireNotNull(field(session, "a")), change)
+        HostCoroutines.invokeTimed(loader, contract.method("edit"), null, 15_000L,
+            requireNotNull(contract.field("datastore").get(session)), change)
+        check(AccountHostRuntime.isCurrent(identity, activityProvider())) { "账号已切换，同步配置验证已停止" }
         val actual = nativeValues(session)
+        check(AccountHostRuntime.isCurrent(identity, activityProvider())) { "账号已切换，同步配置验证已停止" }
         check(values.all {
             val read = actual[it.key]
             if (read is ByteArray && it.value is ByteArray) read.contentEquals(it.value as ByteArray) else read == it.value
@@ -304,16 +293,17 @@ internal class WebDavSyncHook(
 
     private fun showConfiguration() {
         val activity = activityProvider() ?: return
-        val current = session.get() ?: return toast("同步设置尚未就绪")
+        val identity = AccountHostRuntime.storageSnapshot(activity) ?: return toast("同步账号状态尚未就绪")
+        val current = identity.session
         if (!configuring.compareAndSet(false, true)) return
         worker.execute {
             runCatching { nativeValues(current) }.onSuccess { values ->
                 main.post {
-                    if (activity.isFinishing || activity.isDestroyed || session.get() !== current ||
+                    if (activity.isFinishing || activity.isDestroyed || !AccountHostRuntime.isCurrent(identity, activity) ||
                         !settingsProvider().canRunWebDavSync) {
                         configuring.set(false)
                     } else {
-                        runCatching { renderConfiguration(activity, current, values) }
+                        runCatching { renderConfiguration(activity, identity, values) }
                             .onFailure { configuring.set(false); toast("打开同步设置失败") }
                     }
                 }
@@ -321,7 +311,8 @@ internal class WebDavSyncHook(
         }
     }
 
-    private fun renderConfiguration(activity: Activity, current: Any, values: Map<String, Any?>) {
+    private fun renderConfiguration(activity: Activity, identity: AccountHostRuntime.Identity, values: Map<String, Any?>) {
+        val current = identity.session
         val connected = values["s3_sync_bucket"] == WebDavSyncProtocol.BUCKET
         fun stored(key: String): String = if (connected) (values[key] as? String).orEmpty()
             .takeUnless { it == WebDavSyncProtocol.ANONYMOUS }.orEmpty() else ""
@@ -332,14 +323,14 @@ internal class WebDavSyncHook(
         lateinit var page: WebDavSyncConfigurationPage
         fun valid() {
             check(!dismissed.get()) { "配置已取消，未保存" }
-            check(session.get() === current) { "账号已切换，未保存" }
+            check(AccountHostRuntime.isCurrent(identity, activity)) { "账号已切换，未保存" }
             check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
         }
         fun submit(draft: WebDavSyncConfigurationPage.Credentials) {
             if (busy.get() || dismissed.get()) return
             val url = runCatching { valid(); WebDavSyncProtocol.baseUrl(draft.address) }
                 .getOrElse { page.error(it.message ?: "WebDAV 地址无效"); return }
-            if (draft.username.contains(':') || draft.username.contains('\n')) {
+            if (draft.username.any { it == ':' || it == '\n' || it == '\r' }) {
                 page.error("用户名不能包含冒号或换行")
                 return
             }
@@ -356,23 +347,23 @@ internal class WebDavSyncHook(
                 val writeStarted = AtomicBoolean()
                 val result = runCatching {
                     valid()
-                    val config = configType.getConstructor(raw("he9"), *Array(6) { String::class.java })
-                        .newInstance(raw("he9").enumConstants!![0], url, WebDavSyncProtocol.BUCKET, "auto",
-                            next["s3_sync_access_key"], next["s3_sync_secret_key"], "reamicro")
+                    val config = contract.newConfig(url, WebDavSyncProtocol.BUCKET, "auto",
+                        requireNotNull(next["s3_sync_access_key"]) as String,
+                        requireNotNull(next["s3_sync_secret_key"]) as String, "reamicro")
                     transport(config).verify()
                     valid()
                     try {
-                        saveValues(current, next) { valid(); writeStarted.set(true) }
+                        saveValues(current, next, identity) { valid(); writeStarted.set(true) }
                     } catch (error: Throwable) {
                         if (writeStarted.get()) {
-                            runCatching { saveValues(current, values) }.onFailure(error::addSuppressed)
+                            runCatching { valid(); saveValues(current, values, identity) { valid() } }.onFailure(error::addSuppressed)
                         }
                         throw error
                     }
                 }
                 main.post {
                     busy.set(false)
-                    if (!dismissed.get()) {
+                    if (!dismissed.get() && AccountHostRuntime.isCurrent(identity, activity)) {
                         result.onSuccess {
                             page.dismiss()
                             toast("WebDAV 已启用，返回书架即可使用原生同步")
@@ -381,10 +372,12 @@ internal class WebDavSyncHook(
                 }
             }
         }
-        page = WebDavSyncConfigurationPage(activity, initial, ::submit) {
+        page = WebDavSyncConfigurationPage(activity, initial, ::submit, {
             dismissed.set(true)
             configuring.set(false)
-        }
+        }, configurationUi, {
+            !dismissed.get() && AccountHostRuntime.isCurrent(identity, activity) && settingsProvider().canRunWebDavSync
+        })
         if (!nativeRoutes.open(page)) {
             page.closeEmbedded()
             toast("同步页面尚未就绪，请重新进入同步设置")
@@ -398,6 +391,6 @@ internal class WebDavSyncHook(
     private companion object {
         val KEYS = listOf("s3_sync_provider", "s3_sync_endpoint", "s3_sync_bucket", "s3_sync_region",
             "s3_sync_access_key", "s3_sync_secret_key", "s3_sync_prefix", "s3_sync_cloud_config_enabled",
-            "s3_sync_baseline_cbor")
+            "s3_sync_baseline_cbor", "s3_sync_pending_deletions")
     }
 }

@@ -2,9 +2,7 @@ package com.reamicro.fix.online
 
 import android.content.Context
 import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import com.reamicro.fix.reload.TaskCancellation
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,10 +35,16 @@ data class OnlineSourceEntry(
     val variableComment: String = "",
     val packageId: String = "",
     val aliases: Set<String> = emptySet(),
+    val knownNames: Set<String> = emptySet(),
 
     val exploreUrl: String = "",
 
     val ruleExplore: String = "",
+    /** Content digest and installation generation; copies retain the source they were loaded from. */
+    val revision: String = "",
+    internal val storageKey: String = "",
+    /** Full source document for the upstream parser, including fields unknown to the legacy engine. */
+    val rawJson: String = "",
 ) {
     val hasLoginConfig: Boolean
         get() = loginUrl.isNotBlank() || loginUi.isNotBlank() || loginCheckJs.isNotBlank()
@@ -72,6 +76,7 @@ data class OnlineConcurrentRecord(
 object OnlineConcurrentRateLimiter {
     private val records = java.util.concurrent.ConcurrentHashMap<String, OnlineConcurrentRecord>()
     private val cooldownUntilMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    fun clear(sourceId: String) { records.remove(sourceId); cooldownUntilMs.remove(sourceId) }
 
     fun updateConcurrentRate(key: String, concurrentRate: String) {
         records.compute(key) { _, record ->
@@ -82,21 +87,23 @@ object OnlineConcurrentRateLimiter {
     }
 
     fun waitTurn(source: OnlineSourceEntry): OnlineConcurrentRecord? {
+        OnlineSourceStore.requireCurrent(source)
         val concurrentRate = OnlineSourceDownloadPolicyStore.effectiveConcurrentRate(source)
-        if (concurrentRate.isBlank() || concurrentRate == "0") {
-            records.remove(source.id)
-            return null
-        }
         updateConcurrentRate(source.id, concurrentRate)
         while (true) {
+            OnlineSourceStore.requireCurrent(source)
             val cooldownWait = (cooldownUntilMs[source.id] ?: 0L) - System.currentTimeMillis()
             if (cooldownWait > 0L) {
-                Thread.sleep(cooldownWait)
+                Thread.sleep(minOf(cooldownWait, 100L))
                 continue
+            }
+            if (concurrentRate.isBlank() || concurrentRate == "0") {
+                records.remove(source.id)
+                return null
             }
             val waitTime = waitTime(source.id, concurrentRate)
             if (waitTime <= 0L) return records[source.id]
-            Thread.sleep(waitTime)
+            Thread.sleep(minOf(waitTime, 100L))
         }
     }
 
@@ -165,24 +172,77 @@ object OnlineConcurrentRateLimiter {
 object OnlineSourceStore {
     private const val SOURCE_DIR = "reamicro_online_sources"
     private val sourceExtensions = setOf("rmonline", "json", "txt")
+    private val mutationLock = Any()
+    private val sequence = java.util.concurrent.atomic.AtomicLong()
+    private val snapshots = java.util.concurrent.ConcurrentHashMap<String, List<OnlineSourceEntry>>()
+    private val revisions = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val listeners = java.util.concurrent.CopyOnWriteArraySet<() -> Unit>()
+
+    /** Hot request guards never reopen source files or parse JSON. */
+    fun isCurrent(source: OnlineSourceEntry): Boolean =
+        source.storageKey.isNotBlank() && source.revision.isNotBlank() &&
+            revisions[source.storageKey] == source.revision
+
+    fun requireCurrent(source: OnlineSourceEntry) {
+        TaskCancellation.checkCurrent()
+        if (!isCurrent(source)) throw java.util.concurrent.CancellationException("在线源已更新或删除，请重试")
+    }
+
+    /** Only short preference/result commits belong here, never network or image/file reads. */
+    fun <T> withCurrent(source: OnlineSourceEntry, action: () -> T): T = synchronized(mutationLock) {
+        requireCurrent(source)
+        action()
+    }
+
+    fun observeChanges(listener: () -> Unit): AutoCloseable {
+        listeners += listener
+        return AutoCloseable { listeners -= listener }
+    }
+
+    private fun notifyChanged() {
+        listeners.forEach { listener -> runCatching(listener) }
+    }
+
+    fun cached(context: Context?): List<OnlineSourceEntry>? {
+        context ?: return null
+        return snapshots[sourceDir(context).absolutePath]?.map { OnlineSourceDownloadPolicyStore.attach(context, it) }
+    }
 
     fun list(context: Context?): List<OnlineSourceEntry> {
         context ?: return emptyList()
-        return sourceDir(context)
-            .listFiles()
-            ?.filter { it.isFile && it.extension.lowercase() in sourceExtensions }
-            ?.mapNotNull { file ->
-                runCatching {
-                    OnlineSourceDownloadPolicyStore.attach(
-                        context,
-                        parseSingleSource(file.readBytes(), file.nameWithoutExtension, file.name)
-                            .copy(fileName = file.name),
-                    )
-                }.getOrNull()
+        cached(context)?.let { return it }
+        val dir = sourceDir(context)
+        val root = dir.absolutePath
+        while (true) {
+            TaskCancellation.checkCurrent()
+            val before = sequence.get()
+            // The first scan is performed by callers' background workers. No lock spans disk I/O.
+            val loaded = dir.listFiles().orEmpty()
+                .filter { it.isFile && it.extension.lowercase() in sourceExtensions }
+                .sortedWith(compareBy<File> { it.extension != "rmonline" }.thenBy { it.name })
+                .mapNotNull { file ->
+                    runCatching {
+                        val bytes = file.inputStream().use(::readOnlineSourceBytes)
+                        val parsed = parseSingleSource(bytes, file.nameWithoutExtension, file.name)
+                        parsed.copy(
+                            storageKey = "$root/${onlineSourceFileName(parsed.id)}",
+                            revision = digest(bytes),
+                        )
+                    }.onFailure(TaskCancellation::rethrowIfCancelled).getOrNull()
+                }.distinctBy { it.id }.sortedBy { it.name.lowercase() }
+            val committed = synchronized(mutationLock) {
+                if (sequence.get() != before) null else {
+                    snapshots[root] ?: loaded.map { source ->
+                        val revision = revisions[source.storageKey]?.takeIf {
+                            it.substringBefore(':') == source.revision
+                        } ?: "${source.revision}:${sequence.incrementAndGet()}"
+                        revisions[source.storageKey] = revision
+                        source.copy(revision = revision)
+                    }.also { snapshots[root] = it }
+                }
             }
-            ?.distinctBy { it.id }
-            ?.sortedBy { it.name.lowercase() }
-            .orEmpty()
+            if (committed != null) return committed.map { OnlineSourceDownloadPolicyStore.attach(context, it) }
+        }
     }
 
     fun importFromUrl(context: Context, rawUrl: String): OnlineSourceEntry {
@@ -190,17 +250,57 @@ object OnlineSourceStore {
         if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
             error("剪贴板中没有在线源链接")
         }
+        list(context)
+        val startedAt = sequence.get()
         val bytes = download(url)
-        return importBytes(context, bytes, url.substringAfterLast('/').ifBlank { "online_source.json" }, url)
+        return importBytes(context, bytes, url.substringAfterLast('/').ifBlank { "online_source.json" }, url, startedAt)
     }
 
-    fun importBytes(context: Context, bytes: ByteArray, displayName: String, origin: String = ""): OnlineSourceEntry {
-        val parsed = parseSingleSource(bytes, displayName.substringBeforeLast('.', displayName), displayName)
+    fun importBytes(context: Context, bytes: ByteArray, displayName: String, origin: String = "",
+        startedAt: Long? = null, expected: OnlineSourceEntry? = null, requireAbsent: Boolean = false): OnlineSourceEntry {
+        val installed = list(context)
+        val before = startedAt ?: sequence.get()
+        val incoming = parseSingleSource(bytes, displayName.substringBeforeLast('.', displayName), displayName)
+        val existing = installed.firstOrNull { matchesIdentity(it, incoming.id) }
+        if (requireAbsent && existing != null) throw java.util.concurrent.CancellationException("在线源已安装，请重新检查更新")
+        val payload = if (existing != null && (existing.id != incoming.id ||
+                existing.packageId.isNotBlank() && incoming.packageId.isBlank())) {
+            injectPackageIdentity(bytes, existing.id, existing.packageId,
+                existing.aliases + incoming.aliases + incoming.id + existing.id, existing.knownNames)
+        } else bytes
+        val parsed = parseSingleSource(payload, displayName.substringBeforeLast('.', displayName), displayName)
             .copy(origin = origin)
         val dir = sourceDir(context).apply { mkdirs() }
-        val target = File(dir, "${safeFileName(parsed.id)}.rmonline")
-        FileOutputStream(target).use { it.write(bytes) }
-        return OnlineSourceDownloadPolicyStore.attach(context, parsed.copy(fileName = target.name))
+        val target = File(dir, "${onlineSourceFileName(parsed.id)}.rmonline")
+        val key = target.absolutePath.removeSuffix(".rmonline")
+        require(expected == null || expected.id == parsed.id && expected.storageKey == key) {
+            "在线源身份不一致"
+        }
+        val fingerprint = digest(payload)
+        var revision = ""
+        writeOnlineSourceAtomically(target, payload, commit = { action ->
+            synchronized(mutationLock) {
+                expected?.let(::requireCurrent)
+                if (existing != null) requireCurrent(existing)
+                // An import that began before this source was removed must not resurrect it.
+                val current = revisions[key]
+                if (existing == null && current != null && !current.startsWith("removed:")) {
+                    throw java.util.concurrent.CancellationException("在线源已变化，请重新导入")
+                }
+                if (current != null &&
+                    current.substringAfterLast(':').toLongOrNull()?.let { it > before } == true) {
+                    throw java.util.concurrent.CancellationException("在线源已变化，请重新导入")
+                }
+                action()
+                revision = "$fingerprint:${sequence.incrementAndGet()}"
+                revisions[key] = revision
+                snapshots.remove(dir.absolutePath)
+            }
+        })
+        notifyChanged()
+        return OnlineSourceDownloadPolicyStore.attach(context, parsed.copy(
+            fileName = target.name, storageKey = key, revision = revision,
+        ))
     }
 
     fun importPackageBytes(
@@ -210,15 +310,24 @@ object OnlineSourceStore {
         packageId: String,
         stableSourceId: String,
         aliases: Set<String>,
+        expected: OnlineSourceEntry? = null,
+        requireAbsent: Boolean = false,
     ): OnlineSourceEntry {
+        require(packageId.isNotBlank()) { "在线源内容包缺少身份" }
         val incoming = parseSingleSource(bytes, displayName.substringBeforeLast('.', displayName), displayName)
         val knownAliases = (aliases + stableSourceId + incoming.id).filterTo(linkedSetOf()) { it.isNotBlank() }
         val existing = list(context).firstOrNull { source ->
             source.packageId == packageId || source.id in knownAliases || source.aliases.any(knownAliases::contains)
         }
+        require(existing == null || existing.packageId.isBlank() || existing.packageId == packageId) {
+            "在线源已关联其他内容包，未覆盖"
+        }
+        if (requireAbsent && existing != null) throw java.util.concurrent.CancellationException("在线源已安装，请重新检查更新")
+        expected?.let(::requireCurrent)
         val effectiveId = existing?.id ?: stableSourceId.ifBlank { incoming.id }
-        val payload = injectPackageIdentity(bytes, effectiveId, packageId, knownAliases + effectiveId)
-        return importBytes(context, payload, displayName, "api:$packageId")
+        val payload = injectPackageIdentity(bytes, effectiveId, packageId,
+            knownAliases + existing?.aliases.orEmpty() + effectiveId, existing?.knownNames.orEmpty())
+        return importBytes(context, payload, displayName, "api:$packageId", expected = expected, requireAbsent = requireAbsent)
     }
 
     fun linkPackage(
@@ -227,69 +336,79 @@ object OnlineSourceStore {
         packageId: String,
         aliases: Set<String>,
         names: Set<String> = emptySet(),
+        expected: OnlineSourceEntry? = null,
     ): Boolean {
+        require(packageId.isNotBlank()) { "在线源内容包缺少身份" }
         val dir = sourceDir(context)
-        val file = dir.listFiles()
-            ?.firstOrNull { candidate ->
-                candidate.isFile && candidate.extension.lowercase() in sourceExtensions && runCatching {
-                    parseSingleSource(candidate.readBytes(), candidate.nameWithoutExtension, candidate.name).id == sourceId
-                }.getOrDefault(false)
-            }
-            ?: return false
+        val existing = list(context).firstOrNull { it.id == sourceId } ?: return false
+        require(existing.packageId.isBlank() || existing.packageId == packageId) {
+            "在线源已关联其他内容包，未覆盖"
+        }
+        val file = File(dir, existing.fileName)
         return runCatching {
-            val merged = (aliases + sourceId).filterTo(linkedSetOf()) { it.isNotBlank() }
-            val payload = injectPackageIdentity(file.readBytes(), sourceId, packageId, merged, names)
-            val temp = File(dir, ".${file.name}.tmp")
-            FileOutputStream(temp).use { it.write(payload) }
-            if (file.exists()) file.setWritable(true)
-            temp.renameTo(file)
-        }.getOrDefault(false)
+            expected?.let { require(it.id == sourceId); requireCurrent(it) }
+            val merged = (aliases + existing.aliases + sourceId).filterTo(linkedSetOf()) { it.isNotBlank() }
+            val payload = injectPackageIdentity(file.inputStream().use(::readOnlineSourceBytes), sourceId, packageId, merged, names)
+            val fingerprint = digest(payload)
+            writeOnlineSourceAtomically(file, payload, commit = { action ->
+                synchronized(mutationLock) {
+                    expected?.let(::requireCurrent)
+                    requireCurrent(existing)
+                    action()
+                    revisions[existing.storageKey] = "$fingerprint:${sequence.incrementAndGet()}"
+                    snapshots.remove(dir.absolutePath)
+                }
+            })
+            notifyChanged()
+            true
+        }.onFailure(TaskCancellation::rethrowIfCancelled).getOrDefault(false)
     }
 
     fun knownNames(context: Context?, sourceId: String): Set<String> {
-        context ?: return emptySet()
-        val file = sourceDir(context).listFiles()
-            ?.firstOrNull { candidate ->
-                candidate.isFile && candidate.extension.lowercase() in sourceExtensions && runCatching {
-                    parseSingleSource(candidate.readBytes(), candidate.nameWithoutExtension, candidate.name).id == sourceId
-                }.getOrDefault(false)
-            }
-            ?: return emptySet()
-        return runCatching {
-            val text = file.readBytes().toString(Charsets.UTF_8).trim()
-            val root = if (text.startsWith("[")) JSONArray(text).optJSONObject(0) else JSONObject(text)
-            buildSet {
-                val array = root?.optJSONArray("reamicroSourceNames")
-                if (array != null) for (index in 0 until array.length()) {
-                    array.optString(index).takeIf(String::isNotBlank)?.let(::add)
-                }
-            }
-        }.getOrDefault(emptySet())
+        return list(context).firstOrNull { it.id == sourceId }?.knownNames.orEmpty()
     }
 
     fun matchesIdentity(source: OnlineSourceEntry, candidate: String): Boolean =
         candidate.isNotBlank() && (source.id == candidate || candidate in source.aliases)
 
-    fun remove(context: Context?, sourceId: String): Boolean {
+    fun remove(context: Context?, sourceId: String, expected: OnlineSourceEntry? = null): Boolean {
         context ?: return false
+        require(expected == null || expected.id == sourceId) { "在线源身份不一致" }
         val dir = sourceDir(context)
-        val safeId = safeFileName(sourceId)
-        val direct = File(dir, "$safeId.rmonline")
-        if (direct.isFile && direct.delete()) return true
-        return dir.listFiles()
-            ?.firstOrNull { file ->
-                file.isFile && runCatching {
-                    parseSingleSource(file.readBytes(), file.nameWithoutExtension, file.name).id == sourceId
-                }.getOrDefault(false)
+        val current = expected ?: list(context).firstOrNull { it.id == sourceId }
+        current?.let(::requireCurrent)
+        val files = dir.listFiles().orEmpty().filter { file ->
+            file.isFile && file.extension.lowercase() in sourceExtensions && runCatching {
+                parseSingleSource(file.inputStream().use(::readOnlineSourceBytes), file.nameWithoutExtension, file.name).id == sourceId
+            }.onFailure(TaskCancellation::rethrowIfCancelled).getOrDefault(false)
+        }
+        if (files.isEmpty()) return false
+        var changed = false
+        val removed = synchronized(mutationLock) {
+            current?.let(::requireCurrent)
+            TaskCancellation.checkCurrent()
+            val results = files.map { file -> file.delete().also { if (it) changed = true } }
+            if (changed) {
+                revisions["${dir.absolutePath}/${onlineSourceFileName(sourceId)}"] = "removed:${sequence.incrementAndGet()}"
+                snapshots.remove(dir.absolutePath)
             }
-            ?.delete()
-            ?: false
+            if (results.all { it }) {
+                OnlineSourceAuth.clearSourceData(context, sourceId)
+                OnlineSourceDownloadPolicyStore.clear(context, sourceId)
+                OnlineConcurrentRateLimiter.clear(sourceId)
+            }
+            results.all { it }
+        }
+        if (changed) notifyChanged()
+        return removed
     }
 
     private fun sourceDir(context: Context): File =
         File(context.filesDir, SOURCE_DIR)
 
     private fun parseSingleSource(bytes: ByteArray, fallbackName: String, fileName: String): OnlineSourceEntry {
+        require(bytes.size <= MAX_ONLINE_SOURCE_BYTES) { "在线源文件过大" }
+        TaskCancellation.checkCurrent()
         val text = bytes.toString(Charsets.UTF_8).trim()
         if (text.isBlank()) error("在线源为空")
         val json = when {
@@ -361,8 +480,15 @@ object OnlineSourceStore {
             variableComment = variableComment,
             packageId = firstString(json, "reamicroPackageId"),
             aliases = aliases,
+            knownNames = buildSet {
+                val names = json.optJSONArray("reamicroSourceNames")
+                if (names != null) for (index in 0 until names.length()) {
+                    names.optString(index).takeIf(String::isNotBlank)?.let(::add)
+                }
+            },
             exploreUrl = exploreUrl,
             ruleExplore = ruleExplore,
+            rawJson = json.toString(),
         )
     }
 
@@ -387,8 +513,8 @@ object OnlineSourceStore {
             .joinToString("") { "%02x".format(it) }
             .take(16)
 
-    private fun safeFileName(value: String): String =
-        value.replace(Regex("[^A-Za-z0-9_.-]+"), "_").ifBlank { "online_source" }
+    private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it.toInt() and 255) }
 
     private fun injectPackageIdentity(
         bytes: ByteArray,
@@ -417,22 +543,5 @@ object OnlineSourceStore {
         return root.toString(2).toByteArray(Charsets.UTF_8)
     }
 
-    private fun download(url: String): ByteArray {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            setRequestProperty("User-Agent", "ReaMicro-Extend/online-source")
-            setRequestProperty("Accept", "application/json,text/plain,*/*")
-        }
-        return try {
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
-            if (code !in 200..299) error("下载在线源失败：HTTP $code")
-            bytes
-        } finally {
-            connection.disconnect()
-        }
-    }
+    private fun download(url: String): ByteArray = downloadOnlineSourceBytes(url)
 }

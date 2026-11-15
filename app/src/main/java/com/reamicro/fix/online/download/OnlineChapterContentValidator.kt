@@ -48,6 +48,7 @@ internal object OnlineChapterContentValidator {
             compact.startsWith("本章下载失败，已按在线源重试") -> "检测到历史下载失败占位正文"
             compact.startsWith("本章正在后台下载中") -> "检测到历史后台下载占位正文"
             compact.startsWith("本章尚未下载，当前在线源今日额度已用完") -> "检测到日限额未完成占位正文"
+            compact.startsWith("本章尚未下载。") -> "检测到待下载占位正文"
             compact.contains("批量请求重试") && compact.contains("后仍失败") -> summarize(compact)
             compact.startsWith("批量API返回空响应") -> summarize(compact)
             else -> null

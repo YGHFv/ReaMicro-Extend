@@ -1,26 +1,21 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
-import androidx.core.view.WindowCompat
 import androidx.compose.ui.graphics.toArgb
-import android.app.Dialog
 import android.content.ComponentCallbacks
 import android.content.Intent
 import android.content.res.Configuration
 import android.database.Cursor
 import android.graphics.BitmapFactory
 
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.os.Build
 import android.provider.OpenableColumns
-import android.view.KeyEvent
 import android.view.View
-import android.view.Window
 import android.widget.FrameLayout
 
 import android.widget.Toast
 import com.reamicro.fix.epub.editor.EpubStorageFiles
+import com.reamicro.fix.epub.editor.AccountBookCoverFiles
 import com.reamicro.fix.epub.editor.CommittedFileFeedback
 import kotlinx.coroutines.*
 import com.reamicro.fix.epub.editor.HostOpfIdentifier
@@ -31,7 +26,9 @@ import com.reamicro.fix.epub.editor.canEditEpubSource
 import com.reamicro.fix.epub.editor.EpubNavigation
 import com.reamicro.fix.settings.FontSettingsSnapshot
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
+import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.reload.ModuleUiRuntime
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -43,25 +40,29 @@ internal class EpubBookPanel(
     private val root: File,
     private val bookTitle: String,
     private var book: Any?,
+    private val accountIdentity: AccountHostRuntime.Identity,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
     private val fontSettingsProvider: () -> FontSettingsSnapshot = { FontSettingsSnapshot() },
 ) {
-    private val dialog by lazy { Dialog(com.reamicro.fix.core.InjectedModuleContext.create(activity), com.reamicro.fix.R.style.EpubFullScreenDialog) }
     private var nativeEditor: EpubScriptaPanel? = null
     private var structure: EpubStructureView? = null
     private var structureView: View? = null
     @Volatile private var disposed = false
-    private val storage = EpubStorageFiles(root)
+    // First accessed by the IO bridge. Canonical paths and stat calls do not belong in AndroidView.factory.
+    private val storage by lazy { EpubStorageFiles(root) }
     private var currentBookTitle = bookTitle.trim().ifBlank { root.name }
     private var listingSnapshot: List<File>? = null
-    private val panelScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var panelTasks: ModuleUiRuntime.OwnedScope? = null
+    private val panelScope: CoroutineScope get() = requireNotNull(panelTasks).scope
     private val bridge by lazy { Bridge() }
     private lateinit var container: FrameLayout
 
-    private var appliedWindowPalette: Pair<Int, Boolean>? = null
+    private var appliedSurfaceColor: Int? = null
+    private var canAccess: () -> Boolean = { false }
+    private var isActive: () -> Boolean = { false }
     private val themeCallbacks = object : ComponentCallbacks {
         override fun onConfigurationChanged(newConfig: Configuration) {
-            updateWindowTheme((newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES)
+            updateSurfaceTheme((newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES)
         }
         override fun onLowMemory() = Unit
     }
@@ -71,127 +72,134 @@ internal class EpubBookPanel(
     @Volatile private var metadataChanged: Boolean = false
     private val globalUiFontFile: File? by lazy { resolveGlobalUiFontFile() }
 
-    fun show() {
-        com.reamicro.fix.reload.ModuleUiReloadGuard.markUsed()
-        synchronized(activePanels) {
-            if (activePanels[activity]?.dialog?.isShowing == true) return
-        }
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        container = FrameLayout(activity).apply { setBackgroundColor(pageBackground()) }
-        structure = EpubStructureView(
-            activity = activity,
-            root = root,
-            bookTitle = currentBookTitle,
-            request = { name, args ->
-                synchronized(bridge) {
-                    when (name) {
-                        "initialData" -> bridge.initialData()
-                        "initialMetadata" -> bridge.initialMetadata()
-                        "cssRules" -> bridge.cssRules(args.getOrNull(0))
-                        "cssSource" -> bridge.cssSource(args.getOrNull(0))
-                        "saveCssValue" -> bridge.saveCssValue(args.getOrNull(0), args.getOrNull(1), args.getOrNull(2),
-                            args.getOrNull(3), args.getOrNull(4))
-                        "saveCssSelector" -> bridge.saveCssSelector(args.getOrNull(0), args.getOrNull(1),
-                            args.getOrNull(2), args.getOrNull(3))
-                        "saveCssSource" -> bridge.saveCssSource(args.getOrNull(0), args.getOrNull(1), args.getOrNull(2))
-                        "getMetadata" -> bridge.getMetadata(args.getOrNull(0))
-                        "navigation" -> bridge.navigation(args.getOrNull(0))
-                        "saveMetadataField" -> bridge.saveMetadataField(args.getOrNull(0), args.getOrNull(1), args.getOrNull(2), args.getOrNull(3))
-                        "renameFile" -> bridge.renameFile(args.getOrNull(0), args.getOrNull(1))
-                        "deleteFile" -> bridge.deleteFile(args.getOrNull(0))
-                        "createTextFile" -> bridge.createTextFile(args.getOrNull(0), args.getOrNull(1))
-                        "setCover" -> bridge.setCover(args.getOrNull(0))
-                        "setBanner" -> bridge.setBanner(args.getOrNull(0))
-                        "pickFile" -> { bridge.pickFile(args.getOrNull(0)); "" }
-                        else -> error("不支持的书籍存储操作：$name")
-                    }
-                }
-            },
-            openScripta = ::openScripta,
-            close = { dialog.dismiss() },
-            uiFontFileProvider = { globalUiFontFile },
-            onSurfaceChanged = { background ->
-                applyWindowPalette(background, StructureHome130Style.palette(activity, isNightMode()).dark)
-            },
-        )
-        structureView = structure!!.create()
-        container.addView(structureView, FrameLayout.LayoutParams(-1, -1))
-        dialog.setContentView(container)
-        structure?.bindWindow(dialog.window)
-        dialog.setOnKeyListener { _, keyCode, event ->
-            if (keyCode != KeyEvent.KEYCODE_BACK || event.action != KeyEvent.ACTION_UP) return@setOnKeyListener false
-            if (structure?.handleBack() != true) dialog.dismiss()
-            true
-        }
-        dialog.setOnDismissListener {
-            disposed = true
-            pendingImportGroupPath = null
-            panelScope.cancel()
-            nativeEditor?.dismissForHostShutdown()
-            nativeEditor = null
-            structure?.dispose()
-            structure = null
-            structureView = null
-            synchronized(activePanels) { activePanels.remove(activity) }
-            runCatching { activity.unregisterComponentCallbacks(themeCallbacks) }
-
-            if (metadataChanged && !activity.isFinishing && !activity.isDestroyed) {
-                activity.window?.decorView?.postDelayed({
-                    runCatching {
-                        if (!activity.isFinishing && !activity.isDestroyed) activity.recreate()
-                    }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX metadata refresh failed: ${it.stackTraceToString()}")
-                    }
-                }, 250L)
-            }
-        }
-        synchronized(activePanels) { activePanels[activity] = this }
-        activity.registerComponentCallbacks(themeCallbacks)
+    fun createEmbeddedView(
+        close: () -> Unit,
+        canAccess: () -> Boolean,
+        isActive: () -> Boolean,
+    ): View {
+        if (!disposed && ::container.isInitialized) return container
+        check(!disposed && panelTasks == null) { "图书结构面板已经关闭或显示" }
+        this.canAccess = canAccess
+        this.isActive = isActive
+        requireAccountAccess()
+        panelTasks = ModuleUiRuntime.scope("图书结构")
         try {
-            dialog.show()
-            configureWindow()
-            if (Build.VERSION.SDK_INT >= 33) {
-                dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                ) { if (structure?.handleBack() != true) dialog.dismiss() }
-            }
-        } catch (e: Throwable) {
-            disposed = true
-            panelScope.cancel()
-            structure?.dispose()
-            synchronized(activePanels) { activePanels.remove(activity) }
-            runCatching { activity.unregisterComponentCallbacks(themeCallbacks) }
-            throw e
+            container = FrameLayout(activity).apply { setBackgroundColor(pageBackground()) }
+            structure = EpubStructureView(
+                activity = activity,
+                root = root,
+                bookTitle = currentBookTitle,
+                request = { name, args ->
+                    synchronized(bridge) {
+                        requireAccountAccess()
+                        when (name) {
+                            "initialData" -> bridge.initialData()
+                            "initialMetadata" -> bridge.initialMetadata()
+                            "cssRules" -> bridge.cssRules(args.getOrNull(0))
+                            "cssSource" -> bridge.cssSource(args.getOrNull(0))
+                            "saveCssValue" -> bridge.saveCssValue(args.getOrNull(0), args.getOrNull(1), args.getOrNull(2),
+                                args.getOrNull(3), args.getOrNull(4))
+                            "saveCssSelector" -> bridge.saveCssSelector(args.getOrNull(0), args.getOrNull(1),
+                                args.getOrNull(2), args.getOrNull(3))
+                            "saveCssSource" -> bridge.saveCssSource(args.getOrNull(0), args.getOrNull(1), args.getOrNull(2))
+                            "getMetadata" -> bridge.getMetadata(args.getOrNull(0))
+                            "navigation" -> bridge.navigation(args.getOrNull(0))
+                            "saveMetadataField" -> bridge.saveMetadataField(args.getOrNull(0), args.getOrNull(1), args.getOrNull(2), args.getOrNull(3))
+                            "renameFile" -> bridge.renameFile(args.getOrNull(0), args.getOrNull(1))
+                            "deleteFile" -> bridge.deleteFile(args.getOrNull(0))
+                            "createTextFile" -> bridge.createTextFile(args.getOrNull(0), args.getOrNull(1))
+                            "setCover" -> bridge.setCover(args.getOrNull(0))
+                            "setBanner" -> bridge.setBanner(args.getOrNull(0))
+                            "pickFile" -> { bridge.pickFile(args.getOrNull(0)); "" }
+                            else -> error("不支持的书籍存储操作：$name")
+                        }
+                    }
+                },
+                openScripta = ::openScripta,
+                close = close,
+                uiFontFileProvider = { globalUiFontFile },
+                onSurfaceChanged = { background ->
+                    applySurfacePalette(background)
+                },
+            )
+            structureView = structure!!.create()
+            container.addView(structureView, FrameLayout.LayoutParams(-1, -1))
+            synchronized(activePanels) { activePanels[activity] = this }
+            activity.registerComponentCallbacks(themeCallbacks)
+            return container
+        } catch (error: Throwable) {
+            runCatching { cleanup(refreshMetadata = false) }.onFailure(error::addSuppressed)
+            throw error
         }
     }
 
-    private fun configureWindow() {
-        val nativePalette = StructureHome130Style.palette(activity, isNightMode())
-        val background = nativePalette.page.toArgb()
-        val dark = nativePalette.dark
-        configureEpubEdgeToEdgeWindow(dialog.window, background, dark)
-        appliedWindowPalette = background to dark
-    }
-    private fun applyWindowPalette(background: Int, dark: Boolean) {
-        if (!dialog.isShowing) return
-        val next = background to dark
-        if (appliedWindowPalette == next) return
-        appliedWindowPalette = next
-        if (::container.isInitialized) container.setBackgroundColor(background)
+    fun handleBack(): Boolean = !disposed && isActive() && structure?.handleBack() == true
 
-        dialog.window?.let { window ->
-            window.setBackgroundDrawable(ColorDrawable(background))
-            WindowCompat.getInsetsController(window, window.decorView).apply {
-                isAppearanceLightStatusBars = !dark
-                isAppearanceLightNavigationBars = !dark
+    fun release() { cleanup() }
+
+    private fun isStorageOwnerCurrent(): Boolean =
+        !activity.isFinishing && !activity.isDestroyed &&
+            AccountHostRuntime.isCurrentStorage(accountIdentity, activity)
+
+    private fun isAccountOwnerCurrent(): Boolean = canAccess() && isStorageOwnerCurrent()
+
+    private fun requireAccountAccess() {
+        check(!disposed && isAccountOwnerCurrent()) {
+            "账号或设置已变化，请返回后重新打开图书结构"
+        }
+    }
+
+    private fun <T> commitForAccount(action: () -> T): T =
+        com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.resourceEdit(root) {
+            // Directory publication and multi-file resource edits take these locks
+            // in the same order. resourceEdit is reentrant for rename/delete.
+            AccountHostRuntime.withCurrentStorage(accountIdentity, activity) {
+                requireAccountAccess()
+                action()
+            }
+        }
+
+    private fun cleanup(refreshMetadata: Boolean = true) {
+        if (disposed) return
+        disposed = true
+        pendingImportGroupPath = null
+        fun release(action: () -> Unit) {
+            runCatching(action).onFailure {
+                ModuleUiRuntime.recordFailure("图书结构面板资源未能完整回收")
+                HookRuntime.logError("ReaMicro book panel cleanup failed", it)
+            }
+        }
+        release { panelTasks?.close() }
+        panelTasks = null
+        release { nativeEditor?.dismissForHostShutdown() }
+        nativeEditor = null
+        release { structure?.dispose() }
+        structure = null
+        structureView = null
+        synchronized(activePanels) { if (activePanels[activity] === this) activePanels.remove(activity) }
+        release { activity.unregisterComponentCallbacks(themeCallbacks) }
+        if (refreshMetadata && metadataChanged && isStorageOwnerCurrent()) {
+            ModuleResources.handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    if (ModuleResources.accepting && isStorageOwnerCurrent()) activity.recreate()
+                }.onFailure {
+                    HookRuntime.log("$LOG_PREFIX metadata refresh failed: ${it.stackTraceToString()}")
+                }
             }
         }
     }
-    private fun updateWindowTheme(dark: Boolean) {
+
+    private fun applySurfacePalette(background: Int) {
+        if (disposed || !::container.isInitialized || appliedSurfaceColor == background) return
+        appliedSurfaceColor = background
+        container.setBackgroundColor(background)
+    }
+
+    private fun updateSurfaceTheme(dark: Boolean) {
         activity.runOnUiThread {
+            if (disposed) return@runOnUiThread
             structure?.updateTheme()
-            val nativePalette = StructureHome130Style.palette(activity, dark)
-            applyWindowPalette(nativePalette.page.toArgb(), nativePalette.dark)
+            applySurfacePalette(HostEmbeddedStyle.palette(activity, dark).page.toArgb())
         }
     }
 
@@ -199,9 +207,10 @@ internal class EpubBookPanel(
         (activity.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES
     private fun openScripta(path: String, startWithSearch: Boolean) {
-        if (!dialog.isShowing || nativeEditor != null || activity.isFinishing) return
+        if (disposed || !isActive() || !canAccess() || nativeEditor != null || activity.isFinishing) return
         require(canEditEpubSource(path)) { "不是可编辑的章节或目录资源" }
         runCatching {
+            requireAccountAccess()
             EpubScriptaPanel(
                 activity = activity,
                 root = root,
@@ -211,26 +220,35 @@ internal class EpubBookPanel(
                 openedFilesContent = { onOpen, onClose -> structure?.OpenedFilesContent(onOpen, onClose) },
                 onFileClosed = { path -> structure?.closeOpened(path) },
                 onFileOpened = { path -> structure?.recordOpenedText(path) },
-                onShowStructureHome = { structure?.showHome() },
+                onShowStructureHome = { if (!disposed) structure?.showHome(animated = false) },
                 filePaths = { structure?.filePaths().orEmpty() },
                 fileSearchLabels = { structure?.fileSearchLabels().orEmpty() },
-                onOpenStructureFile = { path -> structure?.requestOpenFile(path) },
+                onFileSearchOpened = { structure?.requestFileSearchIndex() },
+                onOpenStructureFile = { path ->
+                    if (!disposed) structure?.requestOpenFile(path, animated = false)
+                },
+                onPageVisible = { visible -> if (!disposed) structure?.setEditorVisible(visible) },
                 startWithSearch = startWithSearch,
                 uiFontFileProvider = { globalUiFontFile },
+                commit = { action -> commitForAccount(action) },
+                checkCurrent = ::requireAccountAccess,
                 onSaved = { committedPaths ->
+                    requireAccountAccess()
                     require(committedPaths.isNotEmpty())
                     try {
-                        withContext(Dispatchers.IO) { synchronized(bridge) { refreshBookFileCache() } }
+                        withContext(ModuleUiRuntime.io) {
+                            synchronized(bridge) { requireAccountAccess(); refreshBookFileCache() }
+                        }
                     } finally {
-
-                        structure?.refresh()
+                        if (!disposed && isAccountOwnerCurrent()) structure?.refresh()
                     }
+                    requireAccountAccess()
                 },
                 onClosed = { nativeEditor = null },
             ).also { nativeEditor = it }.show()
         }.onFailure {
             nativeEditor = null
-            XposedBridge.log("$LOG_PREFIX Scripta open failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX Scripta open failed: ${it.stackTraceToString()}")
             activity.toast("编辑器打开失败：${it.message}")
         }
     }
@@ -241,7 +259,8 @@ internal class EpubBookPanel(
             com.reamicro.fix.epub.editor.editableCssPreview(activity.classLoader, file).toString()
         }
         fun cssSource(path: String?): String = safeJson {
-            val loaded = com.reamicro.fix.epub.editor.EpubCssEditor.load(resolveChild(path.orEmpty()), sourceDialog = true)
+            val loaded = com.reamicro.fix.epub.editor.EpubCssEditor.load(resolveChild(path.orEmpty()), sourceDialog = true,
+                checkCurrent = ::requireAccountAccess)
             JSONObject().put("ok", true).put("text", loaded.text)
                 .put("sourceHash", loaded.snapshot.fingerprint.sha256).toString()
         }
@@ -249,18 +268,21 @@ internal class EpubBookPanel(
             val file = resolveChild(path.orEmpty())
             val saved = com.reamicro.fix.epub.editor.EpubCssEditor.saveValue(file, hash.orEmpty(),
                 rule?.toIntOrNull() ?: error("CSS 规则位置无效"),
-                declaration?.toIntOrNull() ?: error("CSS 声明位置无效"), value.orEmpty())
+                declaration?.toIntOrNull() ?: error("CSS 声明位置无效"), value.orEmpty(),
+                commit = { action -> commitForAccount(action) }, checkCurrent = ::requireAccountAccess)
             cssSaveResult(file, saved)
         }
         fun saveCssSelector(path: String?, hash: String?, rule: String?, value: String?): String = safeJson {
             val file = resolveChild(path.orEmpty())
             val saved = com.reamicro.fix.epub.editor.EpubCssEditor.saveSelector(file, hash.orEmpty(),
-                rule?.toIntOrNull() ?: error("CSS 规则位置无效"), value.orEmpty())
+                rule?.toIntOrNull() ?: error("CSS 规则位置无效"), value.orEmpty(),
+                commit = { action -> commitForAccount(action) }, checkCurrent = ::requireAccountAccess)
             cssSaveResult(file, saved)
         }
         fun saveCssSource(path: String?, hash: String?, value: String?): String = safeJson {
             val file = resolveChild(path.orEmpty())
-            val saved = com.reamicro.fix.epub.editor.EpubCssEditor.saveSource(file, hash.orEmpty(), value.orEmpty())
+            val saved = com.reamicro.fix.epub.editor.EpubCssEditor.saveSource(file, hash.orEmpty(), value.orEmpty(),
+                commit = { action -> commitForAccount(action) }, checkCurrent = ::requireAccountAccess)
             cssSaveResult(file, saved)
         }
         private fun cssSaveResult(file: File, saved: com.reamicro.fix.epub.editor.EpubCssEditor.Saved): String =
@@ -306,7 +328,8 @@ internal class EpubBookPanel(
             if (changed) {
                 val next = EpubOpfMetadata.update(loaded.text, key, nextValue)
                 check(EpubOpfMetadata.read(next)[key] == nextValue) { "元数据修改未通过预校验，未写入" }
-                EpubTextFiles.save(file, next, loaded.snapshot)
+                EpubTextFiles.save(file, next, loaded.snapshot,
+                    commit = { action -> commitForAccount(action) }, checkCancelled = ::requireAccountAccess)
             }
             val data = JSONObject()
             committedResult(if (changed) "元数据已保存" else "内容未变化，无需保存",
@@ -330,11 +353,11 @@ internal class EpubBookPanel(
             }.toString()
         }
         fun initialData(): String = safeJson {
-            val files = allFiles()
-            listingSnapshot = files
+            val files = storage.visibleEntries().filter { StructureFileVisibility.isVisible(it.path) }
+            listingSnapshot = files.map { it.file }
             JSONObject()
                 .put("title", currentBookTitle)
-                .put("status", "已解包 ${files.count { StructureFileVisibility.isVisible(relativePath(it)) }} 个可见文件")
+                .put("status", "已解包 ${files.size} 个可见文件")
                 .put("files", filesJson(files))
                 .toString()
         }
@@ -345,18 +368,25 @@ internal class EpubBookPanel(
         private fun editResource(path: String, nextName: String?): String = safeJson {
             val previousBook = book
             val oldCover = callBookString("getCover")
-            val oldSize = runCatching { previousBook?.javaClass?.getMethod("getSize")?.invoke(previousBook) as? Number }.getOrNull()?.toLong()
-                ?: bookDirectorySize()
+            val oldSize = previousBook?.let {
+                requireNotNull(com.reamicro.fix.core.HostBookBindings.current).field("book#size").getLong(it)
+            } ?: bookDirectorySize()
             val result = com.reamicro.fix.online.download.OnlineOnDemandMetadataStore.resourceEdit(root) {
                 val storageIdentity = HostOpfIdentifier.read(activity.classLoader, root).value
-                com.reamicro.fix.epub.editor.EpubResourceTransaction.execute(storage, path, nextName,
+                com.reamicro.fix.epub.editor.EpubResourceTransaction.executeGuarded(storage, path, nextName,
                     File(activity.filesDir, "reamicro-resource-backups"), oldCover,
                     commitBook = { cover ->
                         check(HostOpfIdentifier.read(activity.classLoader, root).value == storageIdentity) { "宿主存储标识发生变化，联动已取消" }
                         if (book != null) syncPatch(BookMetadataPatch(cover = cover, size = bookDirectorySize()))
                     },
-                    rollbackBook = { if (previousBook != null) { book = previousBook; syncPatch(BookMetadataPatch(cover = oldCover, size = oldSize)) } },
-                    checkpoint = { if (disposed) throw CancellationException("图书结构已关闭") })
+                    rollbackBook = { if (previousBook != null) {
+                        requireAccountAccess()
+                        book = previousBook
+                        syncPatch(BookMetadataPatch(cover = oldCover, size = oldSize))
+                    } },
+                    commit = { action -> commitForAccount(action) },
+                    checkCurrent = ::requireAccountAccess,
+                    checkpoint = { requireAccountAccess() })
             }
             val data = JSONObject().put("path", result.path.orEmpty()).put("linkedFiles", result.changedPaths.size)
                 .put("resourceBackup", result.backup.path).put("renamedPaths", JSONObject(result.renamedPaths))
@@ -368,7 +398,7 @@ internal class EpubBookPanel(
         fun deleteFile(path: String?): String = editResource(path.orEmpty(), null)
 
         fun createTextFile(groupPath: String?, name: String?): String = safeJson {
-            val target = storage.create(groupPath.orEmpty(), name.orEmpty())
+            val target = commitForAccount { storage.create(groupPath.orEmpty(), name.orEmpty()) }
             committedResult("已新建文件", data = JSONObject().put("path", storage.relative(target))).toString()
         }
 
@@ -377,12 +407,22 @@ internal class EpubBookPanel(
             require(image.isFile) { "文件不存在" }
             require(fileKind(image) == "image") { "不是图片文件" }
             requireImageReadable(image)
-            val coverPath = relativePath(image)
-            updateCoverHref(image)
-            val data = JSONObject()
+            val repository = requireNotNull(ReaMicroBookMetadataSync.currentBookshelfRepository()) { "书架暂时不可用" }
+            val original = requireNotNull(book) { "没有可同步的书架记录" }
+            val latest = requireNotNull(ReaMicroBookMetadataSync.latestBook(repository, original)) { "图书已变化" }
+            requireAccountAccess()
+            val oldCover = (requireNotNull(com.reamicro.fix.core.HostReaderExtrasBindings.importMetadata)
+                .read("book.cover", latest) as? String).orEmpty()
+            val plan = AccountBookCoverFiles.nativePlan(activity.classLoader, oldCover, image.name)
+            val target = AccountBookCoverFiles.copy(storage.root, image, plan, ::requireAccountAccess,
+                commit = { action -> commitForAccount(action) })
+            val data = JSONObject().put("path", relativePath(target))
             committedResult("已设为封面", data = data) { feedback ->
                 feedback.followUp("书架同步失败") {
-                    syncPatch(BookMetadataPatch(cover = coverPath, size = bookDirectorySize()))
+                    book = HostBookCoverContentSync.replace(activity, accountIdentity, repository, latest,
+                        oldCover, plan.path, ::requireAccountAccess)
+                    listingSnapshot = null
+                    metadataChanged = true
                 }
                 feedback.followUp("封面预览刷新失败") { data.put("metadata", metadataJson()) }
             }.toString()
@@ -395,12 +435,14 @@ internal class EpubBookPanel(
             requireImageReadable(image)
             val coverPath = bannerBaseCoverPath()
             val target = resolveChild(com.reamicro.fix.epub.editor.EpubBannerVariants.primary(coverPath, activity.classLoader))
-            target.parentFile?.mkdirs()
+            commitForAccount { requireInsideRoot(target); target.parentFile?.mkdirs() }
             requireInsideRoot(target)
-            com.reamicro.fix.epub.editor.VerifiedFileIO.copyAtomic(image, target)
+            com.reamicro.fix.epub.editor.VerifiedFileIO.copyAtomic(image, target,
+                commit = { action -> commitForAccount { requireInsideRoot(target); action() } },
+                checkCurrent = { requireAccountAccess(); requireInsideRoot(target) })
             committedResult("已设为横幅", data = JSONObject().put("path", relativePath(target))) { feedback ->
                 feedback.followUp("横幅时间戳更新失败") {
-                    check(target.setLastModified(System.currentTimeMillis()))
+                    commitForAccount { check(target.setLastModified(System.currentTimeMillis())) }
                 }
                 feedback.followUp("书架同步失败") { refreshBookFileCache(coverPathOverride = coverPath) }
             }.toString()
@@ -414,11 +456,14 @@ internal class EpubBookPanel(
                     type = "*/*"
                 }
                 runCatching {
+                    requireAccountAccess()
+                    check(isActive()) { "请重新打开当前图书结构" }
+                    storage.directory(pendingImportGroupPath.orEmpty())
                     activity.startActivityForResult(intent, REQUEST_IMPORT_FILE)
                 }.onFailure {
                     pendingImportGroupPath = null
                     activity.toast("无法打开文件选择器")
-                    XposedBridge.log("$LOG_PREFIX file editor import picker failed: ${it.stackTraceToString()}")
+                    HookRuntime.log("$LOG_PREFIX file editor import picker failed: ${it.stackTraceToString()}")
                 }
             }
         }
@@ -426,7 +471,7 @@ internal class EpubBookPanel(
         private fun safeJson(block: () -> String): String =
             runCatching(block).getOrElse {
                 if (it is CancellationException) throw it
-                XposedBridge.log("$LOG_PREFIX file panel bridge failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX file panel bridge failed: ${it.stackTraceToString()}")
                 JSONObject()
                     .put("ok", false)
                     .put("committed", it is com.reamicro.fix.epub.editor.EpubWriteNotConfirmed)
@@ -441,35 +486,44 @@ internal class EpubBookPanel(
         val group = pendingImportGroupPath ?: return
         pendingImportGroupPath = null
         if (resultCode != Activity.RESULT_OK || importInProgress) return
+        if (!canAccess() || !isActive() || !AccountHostRuntime.isCurrentStorage(accountIdentity, activity)) {
+            activity.toast("账号或设置已变化，请重新打开图书结构")
+            return
+        }
         val uri = data?.data ?: return activity.toast("未选择文件")
         importInProgress = true
         structure?.setExternalBusy(true)
         panelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
+                val result = withContext(ModuleUiRuntime.io) {
                     val ctx = coroutineContext
                     synchronized(bridge) {
+                        requireAccountAccess()
                         val name = displayName(uri).ifBlank { "imported-file" }
                         val target = activity.contentResolver.openInputStream(uri).use { input ->
                             requireNotNull(input) { "无法读取文件" }
-                            storage.importFile(group, name, input) { ctx.ensureActive() }
+                            storage.importFile(group, name, input,
+                                commit = { action -> commitForAccount(action) },
+                                checkCancelled = { ctx.ensureActive(); requireAccountAccess() },
+                            )
                         }
                         committedResult("已导入：${storage.relative(target)}")
                     }
                 }
-                if (!disposed) {
+                if (!disposed && isAccountOwnerCurrent()) {
                     structure?.refresh()
-
-                    panelScope.launch { structure?.showWriteFeedback(result) }
+                    panelScope.launch {
+                        if (!disposed && isAccountOwnerCurrent()) structure?.showWriteFeedback(result)
+                    }
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
-                if (!disposed) panelScope.launch {
-                    structure?.showFeedback("导入失败：${e.message}", warning = true)
+                if (!disposed && isAccountOwnerCurrent()) panelScope.launch {
+                    if (!disposed && isAccountOwnerCurrent()) structure?.showFeedback("导入失败：${e.message}", warning = true)
                 }
             } finally {
                 importInProgress = false
-                structure?.setExternalBusy(false)
+                if (!disposed && isAccountOwnerCurrent()) structure?.setExternalBusy(false)
             }
         }
     }
@@ -487,9 +541,9 @@ internal class EpubBookPanel(
             metadataChanged = true
         }
         val feedback = CommittedFileFeedback(message, changed) { error ->
-            XposedBridge.log("$LOG_PREFIX post-commit refresh failed: ${error.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX post-commit refresh failed: ${error.stackTraceToString()}")
         }
-        feedback.followUp("后续刷新未完成") { followUp(feedback) }
+        feedback.followUp("后续刷新未完成") { requireAccountAccess(); followUp(feedback) }
         return data.put("ok", true).put("committed", changed).put("changed", changed)
             .put("message", feedback.message).put("warning", feedback.warning)
     }
@@ -504,36 +558,21 @@ internal class EpubBookPanel(
         }
     }
 
-    private fun updateCoverHref(newCover: File) {
-        val opf = opfFile() ?: error("未找到 OPF 文件")
-        val relative = newCover.relativeTo(opf.parentFile ?: root).invariantSeparatorsPath
-        val href = java.net.URI(null, null, relative, null).toASCIIString()
-        val loaded = EpubTextFiles.load(opf)
-        val next = EpubOpfMetadata.updateCover(loaded.text, href, mimeType(newCover))
-        check(EpubOpfMetadata.coverHref(next) == href) { "封面引用修改未通过预校验，未写入" }
-        EpubTextFiles.save(opf, next, loaded.snapshot)
-    }
-
-    private fun filesJson(files: List<File> = allFiles()): JSONArray =
+    private fun filesJson(files: List<EpubStorageFiles.Entry>): JSONArray =
         JSONArray().apply {
-            val visible = files.filter { StructureFileVisibility.isVisible(relativePath(it)) }
-            val navigationPaths = EpubNavigation.paths(root, visible.map(::relativePath))
-            visible.forEach { file -> put(fileJson(file, relativePath(file) in navigationPaths)) }
+            val navigationPaths = EpubNavigation.paths(root, files.map { it.path })
+            files.forEach { entry -> put(fileJson(entry, entry.path in navigationPaths)) }
         }
 
-    private fun fileJson(file: File, navigation: Boolean = file.extension.equals("ncx", true)): JSONObject {
-        val relative = relativePath(file)
-        val groupPath = relative.substringBeforeLast("/", "")
-        val kind = fileKind(file)
-        val size = file.length()
+    private fun fileJson(entry: EpubStorageFiles.Entry, navigation: Boolean): JSONObject {
         return JSONObject()
-            .put("path", relative)
-            .put("name", file.name)
-            .put("groupPath", groupPath)
-            .put("kind", if (navigation) "navigation" else kind)
-            .put("size", size)
-            .put("sizeText", formatFileSize(size))
-            .put("nativeEditor", !navigation && usesScriptaEpubEditor(relative))
+            .put("path", entry.path)
+            .put("name", entry.file.name)
+            .put("groupPath", entry.group)
+            .put("kind", if (navigation) "navigation" else fileKind(entry.file))
+            .put("size", entry.size)
+            .put("sizeText", formatFileSize(entry.size))
+            .put("nativeEditor", !navigation && usesScriptaEpubEditor(entry.path))
     }
 
     private fun metadataJson(opfOverride: File? = null, files: List<File>? = null): JSONObject {
@@ -594,15 +633,19 @@ internal class EpubBookPanel(
     }
 
     private fun syncPatch(patch: BookMetadataPatch) {
+        requireAccountAccess()
         listingSnapshot = null
         metadataChanged = true
         val original = book ?: error("文件已保存，但没有可同步的书架记录")
         val repository = ReaMicroBookMetadataSync.currentBookshelfRepository()
-        check(ReaMicroBookMetadataSync.syncBookMetadata(repository, original, patch)) {
+        check(ReaMicroBookMetadataSync.syncBookMetadata(repository, original, patch, ::requireAccountAccess)) {
             "文件已保存，但书架数据库回读未确认；请刷新后检查，不要重复提交"
         }
-        book = repository?.let { ReaMicroBookMetadataSync.latestBook(it, original) }
+        requireAccountAccess()
+        val stored = repository?.let { ReaMicroBookMetadataSync.latestBook(it, original) }
             ?: error("文件已保存，但无法刷新书架记录")
+        requireAccountAccess()
+        book = stored
     }
 
     private fun bookDirectorySize(): Long = storage.byteSize()
@@ -628,13 +671,14 @@ internal class EpubBookPanel(
             !Regex("^[A-Za-z]:[\\\\/]").containsMatchIn(value)
 
     private fun callBookString(methodName: String): String =
-        runCatching {
-            book?.javaClass?.methods?.firstOrNull { it.name == methodName && it.parameterTypes.isEmpty() }
-                ?.apply { isAccessible = true }
-                ?.invoke(book)
-                ?.toString()
-                .orEmpty()
-        }.getOrDefault("")
+        book?.let {
+            val role = when (methodName) {
+                "getCover" -> "cover"
+                "getUuid" -> "uuid"
+                else -> error("Unknown book property: $methodName")
+            }
+            requireNotNull(com.reamicro.fix.core.HostBookBindings.current).field("book#$role").get(it) as String
+        }.orEmpty()
 
     private fun findCoverFile(opf: File, files: List<File>? = null, content: String = EpubTextFiles.load(opf).text): File? {
         val href = EpubOpfMetadata.coverHref(content)
@@ -677,43 +721,26 @@ internal class EpubBookPanel(
         }
     }
 
-    private fun resolveChild(path: String): File = storage.child(path)
+    private fun resolveChild(path: String): File {
+        requireAccountAccess()
+        return storage.child(path)
+    }
 
     private fun requireInsideRoot(file: File) { storage.relative(file) }
 
     private fun relativePath(file: File): String = storage.relative(file)
 
-    private fun pageBackground(): Int = StructureHome130Style.palette(activity, isNightMode()).page.toArgb()
+    private fun pageBackground(): Int = HostEmbeddedStyle.palette(activity, isNightMode()).page.toArgb()
     private fun resolveGlobalUiFontFile(): File? {
         if (!settingsProvider().canUseFontSettings) return null
         val selection = fontSettingsProvider().globalFamily.trim()
         if (selection.isBlank() || selection == GLOBAL_FONT_SYSTEM || selection == GLOBAL_FONT_SERIF) return null
-        val direct = File(selection)
-        if (direct.isFile && isGlobalFontFile(direct.name)) return direct
-        val name = direct.name
-        if (!isGlobalFontFile(name)) return null
-        return fontDirectories(activity.filesDir)
-            .asSequence()
-            .flatMap { it.listFiles()?.asSequence() ?: emptySequence() }
-            .firstOrNull { it.isFile && it.name == name && isGlobalFontFile(it.name) }
+        val account = root.parentFile?.parentFile?.name?.toLongOrNull() ?: return null
+        return com.reamicro.fix.epub.editor.AccountFontFiles.resolve(activity.filesDir, account, selection)
     }
-
-    private fun fontDirectories(filesDir: File): List<File> {
-        val dirs = filesDir.listFiles()
-            ?.filter { it.isDirectory && it.name.toLongOrNull() != null }
-            ?.map { File(it, "fonts") }
-            ?.toMutableList()
-            ?: mutableListOf()
-        val defaultDir = File(File(filesDir, "0"), "fonts")
-        if (dirs.none { it.absolutePath == defaultDir.absolutePath }) dirs.add(defaultDir)
-        return dirs.filter { it.exists() && it.isDirectory }.distinctBy { it.absolutePath }
-    }
-
-    private fun isGlobalFontFile(name: String): Boolean =
-        name.endsWith(".ttf", ignoreCase = true) || name.endsWith(".otf", ignoreCase = true)
 
     private fun Activity.toast(message: String) {
-        runOnUiThread { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
+        runOnUiThread { if (isAccountOwnerCurrent()) Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
     }
 
     companion object {

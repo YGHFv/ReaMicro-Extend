@@ -2,9 +2,7 @@ package com.reamicro.fix.ui
 
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -26,43 +24,44 @@ internal fun RootEnhancementDialog(
     primaryLabel: String? = null, onPrimary: (() -> Unit)? = null,
     primaryEnabled: Boolean = true, dangerous: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
-) = AppWindowDialog(show, title, onClose, primaryLabel, onPrimary, primaryEnabled, dangerous, content)
+) = AppWindowDialog(show, title, onClose, primaryLabel, onPrimary, primaryEnabled, dangerous, content = content)
 
 @Composable
-internal fun RootEnhancementCard(
+internal fun RootEnhancementPreference(
+    row: ModuleRootPreferenceRow,
     enabled: Boolean, busy: Boolean, status: RootModuleStatus?,
     checking: Boolean, syncing: Boolean, syncedAt: Long, syncError: String,
     onToggle: (Boolean) -> Unit, onInspect: () -> Unit,
     onManage: () -> Unit, onSync: () -> Unit,
 ) {
-    Card(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp), insideMargin = PaddingValues(0.dp)) {
-        SwitchPreference(
+    when (row) {
+        ModuleRootPreferenceRow.Enable -> SwitchPreference(
             title = stringResource(R.string.root_enable_switch),
             summary = stringResource(if (enabled) R.string.root_enhancement_on_summary else R.string.root_enhancement_off_summary),
             checked = enabled, enabled = !busy, onCheckedChange = onToggle,
         )
-        BasicComponent(
+        ModuleRootPreferenceRow.Access -> BasicComponent(
             title = stringResource(R.string.root_access_title),
             summary = if (checking) stringResource(R.string.execution_status_checking)
                 else status?.let { stringResource(it.accessResource()) + checkedTime(it) }
                     ?: stringResource(R.string.root_not_checked),
             endActions = { if (checking) CircularProgressIndicator(size = 22.dp, strokeWidth = 2.dp) },
         )
-        ArrowPreference(
+        ModuleRootPreferenceRow.Inspect -> ArrowPreference(
             title = stringResource(R.string.root_inspect),
             summary = stringResource(R.string.root_inspect_hint), enabled = !busy, onClick = onInspect,
         )
-        ArrowPreference(
+        ModuleRootPreferenceRow.Manage -> ArrowPreference(
             title = stringResource(R.string.root_module_title),
             summary = if (busy && !checking && !syncing) stringResource(R.string.root_module_busy)
                 else moduleSummary(status),
             enabled = !busy, onClick = onManage,
         )
-        BasicComponent(
+        ModuleRootPreferenceRow.Daemon -> BasicComponent(
             title = stringResource(R.string.root_daemon_title),
             summary = taskSummary(status, enabled),
         )
-        ArrowPreference(
+        ModuleRootPreferenceRow.Sync -> ArrowPreference(
             title = stringResource(R.string.root_sync),
             summary = when {
                 !enabled -> stringResource(R.string.root_sync_disabled)
@@ -76,6 +75,8 @@ internal fun RootEnhancementCard(
         )
     }
 }
+
+internal enum class ModuleRootPreferenceRow { Enable, Access, Inspect, Manage, Daemon, Sync }
 
 @Composable
 internal fun RootModuleDialog(

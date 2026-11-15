@@ -1,222 +1,187 @@
 package com.reamicro.fix.core
 
-import com.highcapable.kavaref.KavaRef.Companion.resolve
-import com.highcapable.kavaref.resolver.processor.MemberProcessor
-import java.lang.reflect.Constructor
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 
 /**
  * 宿主反射的唯一入口。
  *
- * 业务代码始终写未混淆的逻辑名；命中 profile 时改写为真实名，未命中或宿主未混淆时
- * 原样透传。改写失败一定回退逻辑名再试一次，避免单个 profile 错误放大成整模块失效。
+ * 业务代码始终写未混淆的逻辑名；动态查询命中时改写为真实名，未命中或宿主未混淆时
+ * 原样透传。已经解析的契约缺失、歧义或链接失败时终止该次绑定，不猜测其他成员。
  */
 
-/** 逻辑名加载宿主类；profile 过期时回退原始名。 */
-fun ClassLoader.hostClass(name: String): Class<*> {
-    val resolved = HostSymbols.resolveClass(name)
-    return runCatching { Class.forName(resolved, false, this) }
-        .recoverCatching {
-            if (resolved == name) throw it
-            Class.forName(name, false, this)
-        }
-        .getOrThrow()
-}
+private val sharedHostMembers by lazy { HostMembers() }
 
-fun ClassLoader.hostClassOrNull(name: String): Class<*>? =
-    runCatching { hostClass(name) }.getOrNull()
+/** 缓存实际 Class 与成员；逻辑映射仍在每次调用时解析，热重载释放旧代际缓存。 */
+internal fun hostMembers(): HostMembers = sharedHostMembers
 
-/**
- * 运行期类型名与逻辑类型名是否等价。
- *
- * 大量「找方法」的调用点靠 `parameterTypes[n].name == "kotlin.coroutines.Continuation"` 识别
- * 挂起函数。混淆版里该类型已被改名（2.3.3-b2 为 `tx1`），直接比名字永远不成立，
- * 于是整条 hook 静默失效。这里把两侧都过一遍符号解析，未命中 profile 时退化为原比较。
- */
+/** 未登记的稳定名称原样加载；显式映射失效时保留 ClassNotFoundException。 */
+fun ClassLoader.hostClass(name: String): Class<*> =
+    hostMembers().namedClass(HostSymbols.resolveClass(name), this)
+
+/** 通过当前查询结果和类型别名比较逻辑类型，兼容宿主混淆后的名称。 */
 fun typeMatches(type: Class<*>?, logicalName: String): Boolean {
     if (type == null) return false
-    if (type.name == logicalName) return true
     val resolved = HostSymbols.resolveClass(logicalName)
-    if (type.name == resolved) return true
-    // R8 也会收窄未改名的 List/Reader；允许接口和抽象类的实现，不放宽 Object。
-    if (resolved == "java.lang.Object") return false
-    return runCatching {
-        val expected = Class.forName(resolved, false, type.classLoader)
-        (expected.isInterface || java.lang.reflect.Modifier.isAbstract(expected.modifiers)) && expected.isAssignableFrom(type)
-    }.getOrDefault(false)
+    return try {
+        val expected = hostMembers().namedClass(resolved, type.classLoader)
+        expected == type ||
+            // R8 可收窄接口和抽象类。描述符绑定另行使用严格 Class 相等，不采用此规则。
+            (expected != Any::class.java && (expected.isInterface || Modifier.isAbstract(expected.modifiers)) &&
+                expected.isAssignableFrom(type))
+    } catch (_: ClassNotFoundException) {
+        false
+    }
 }
 
-/** 兼容 Kotlin 值类后缀与 profile 改名；必须继续用参数签名过滤重载。 */
+/** 使用动态解析的完整实际名称；包括 Kotlin 值类后缀，调用方仍需过滤参数签名。 */
 fun Method.hostNameMatches(logicalName: String): Boolean =
-    // declaringClass 通常是混淆后的实际类名，先反查逻辑 owner 才能命中 profile 的成员映射。
-    name == HostSymbols.resolveMethodName(declaringClass, logicalName) || name == logicalName
-
-fun Method.hostNameStartsWith(logicalName: String): Boolean =
-    name.startsWith(logicalName) || name in HostSymbols.methodNames(declaringClass, logicalName.removeSuffix("-"))
+    // declaringClass 通常是混淆后的实际类名，先反查逻辑 owner 再查成员映射。
+    name == HostSymbols.resolveMethodName(declaringClass, logicalName)
 
 fun Field.hostNameMatches(logicalName: String): Boolean =
-    name == HostSymbols.resolveFieldName(
-        HostSymbols.logicalClass(declaringClass.name),
-        logicalName,
-    ) || name == logicalName
+    name == HostSymbols.resolveFieldName(declaringClass, logicalName)
 
-/** 挂起函数的尾参就是解析后的 Continuation，用它判断比数参数个数可靠。 */
-fun Method.isSuspendingContinuationParameter(index: Int, logicalName: String): Boolean =
-    parameterTypes.getOrNull(index)?.let { parameter ->
-        typeMatches(parameter, logicalName) || runCatching {
-            declaringClass.classLoader?.hostClass(logicalName)?.isAssignableFrom(parameter) == true
-        }.getOrDefault(false)
-    } == true
+/** 精确参数类型优先；继承、接口和 bridge 的消歧统一由 HostMembers 处理。 */
+fun Class<*>.hostMethod(name: String, vararg types: Class<*>): Method =
+    findHostMethod(name, HostMethodParameters.Exact(types.toList()), hostMembers())
+        ?: throw NoSuchMethodException("${this.name}#$name")
 
-/** 声明方法优先，其次公开方法，与 getDeclaredMethod/getMethod 的并集语义一致。 */
-fun Class<*>.hostMethod(name: String, vararg types: Class<*>?): Method {
-    val parameters = types.map { requireNotNull(it) { "Missing parameter type for ${this.name}#$name" } }.toTypedArray()
-    for (logicalOwner in HostSymbols.logicalClassesOf(this.name)) {
-        val owner = HostSymbols.resolveMethodOwner(logicalOwner, name)
-        if (owner != this.name && owner != logicalOwner) {
-            val redirected = Class.forName(owner, false, classLoader)
-            val actualName = HostSymbols.resolveMethodName(logicalOwner, name)
-            redirected.findMethodExact(actualName, parameters)?.let {
-                require(java.lang.reflect.Modifier.isStatic(it.modifiers)) { "Relocated method must be static: $it" }
-                return it
-            }
-        }
-    }
-    val resolved = HostSymbols.resolveMethodName(this, name)
-    for (candidate in listOf(resolved, name).distinct()) {
-        findMethodExact(candidate, parameters)?.let { return it }
-    }
-    throw NoSuchMethodException("${this.name}#$name")
-}
+/** DEX 允许仅返回类型不同的重载；没有描述符的调用点也可指定完整签名。 */
+fun Class<*>.hostMethodReturning(name: String, returnType: Class<*>, vararg types: Class<*>): Method =
+    findHostMethod(name, HostMethodParameters.Exact(types.toList()), hostMembers(), returnType)
+        ?: throw NoSuchMethodException("${this.name}#$name -> ${returnType.name}")
 
-/** 门面本身被删除时，不先加载逻辑类，直接加载方法的实际持有者。 */
-fun ClassLoader.hostStaticMethod(owner: String, name: String, vararg types: Class<*>?): Method {
-    val target = Class.forName(HostSymbols.resolveMethodOwner(owner, name), false, this)
-    val actualName = HostSymbols.resolveMethodName(owner, name)
-    return target.hostMethod(actualName, *types).also {
-        require(java.lang.reflect.Modifier.isStatic(it.modifiers)) { "Expected static host method: $it" }
-    }
-}
-fun Class<*>.hostMethodOrNull(name: String, vararg types: Class<*>): Method? =
-    runCatching { hostMethod(name, *types) }.getOrNull()
-
-/** 按方法名收集同名重载（含继承与接口方法），供 hookAllMethods 一类调用使用。 */
+/** 返回真正的同名重载；映射名命中后不混入原名或旧门面的无关短名。 */
 fun Class<*>.hostMethodsNamed(name: String): List<Method> {
-    val resolved = HostSymbols.resolveMethodName(this, name)
-    val wanted = listOf(resolved, name).distinct()
-    val result = LinkedHashMap<List<Class<*>>, Method>()
-    for (logicalOwner in HostSymbols.logicalClassesOf(this.name)) {
-        val owner = HostSymbols.resolveMethodOwner(logicalOwner, name)
-        if (owner == this.name || owner == logicalOwner) continue
-        val target = Class.forName(owner, false, classLoader)
-        val actualName = HostSymbols.resolveMethodName(logicalOwner, name)
-        target.declaredMethods.filter { it.name == actualName && java.lang.reflect.Modifier.isStatic(it.modifiers) }
-            .forEach { result.putIfAbsent(it.parameterTypes.toList(), it) }
+    val members = hostMembers()
+    HostSymbols.methodDescriptor(this, name)?.let { descriptor ->
+        return listOf(requireNotNull(members.describedMethod(descriptor, classLoader)
+            .matchHostContract(HostMethodParameters.All, receiver = this)))
     }
-    // 已迁移的方法不再混入旧门面上的同短名函数，避免误选无关重载。
-    if (result.isNotEmpty()) return result.values.onEach { it.isAccessible = true }.toList()
-    var current: Class<*>? = this
-    while (current != null) {
-        for (method in current.declaredMethods) {
-            if (method.name in wanted) result.putIfAbsent(method.parameterTypes.toList(), method)
-        }
-        current = current.superclass
+    val relocated = relocatedMethods(name, HostMethodParameters.All, members)
+    if (relocated != null) return HostMembers.distinctOverloads(relocated, "${this.name}#$name")
+    val names = mappedMethodNames(name)
+    if (names.isNotEmpty()) {
+        return HostMembers.distinctOverloads(names.flatMap { members.methods(this, it) }, "${this.name}#$name")
     }
-    for (method in methods) {
-        if (method.name in wanted) result.putIfAbsent(method.parameterTypes.toList(), method)
-    }
-    return result.values.onEach { it.isAccessible = true }.toList()
+    return members.methods(this, name)
 }
 
-fun Class<*>.hostField(name: String): Field {
-    val resolved = HostSymbols.resolveFieldName(this, name)
-    for (candidate in listOf(resolved, name).distinct()) {
-        findFieldExact(candidate)?.let { return it }
-    }
-    throw NoSuchFieldException("${this.name}#$name")
-}
+fun Class<*>.hostField(name: String): Field = findHostField(name, hostMembers())
+    ?: throw NoSuchFieldException("${this.name}#$name")
 
-fun Class<*>.hostFieldOrNull(name: String): Field? = runCatching { hostField(name) }.getOrNull()
-
-fun Class<*>.hostConstructor(vararg types: Class<*>): Constructor<*> {
-    findConstructorExact(types.toList())?.let { return it }
-    // 只重定位 profile 明确改名的类型；同名但不同 ClassLoader 的类不能互换。
-    val mapped = types.map { type ->
-        val resolved = HostSymbols.resolveClass(type.name)
-        if (resolved == type.name) type else Class.forName(resolved, false, classLoader)
-    }
-    if (mapped != types.toList()) findConstructorExact(mapped)?.let { return it }
-    throw NoSuchMethodException("${this.name}#<init>")
+fun Class<*>.hostFieldOrNull(name: String): Field? = try {
+    hostField(name)
+} catch (_: NoSuchFieldException) {
+    null
 }
 
 fun Any?.hostField(name: String): Field? {
     val target = this ?: return null
-    return runCatching { target.javaClass.hostField(name) }.getOrNull()
+    return target.javaClass.hostFieldOrNull(name)
 }
 
-private fun Class<*>.findMethodExact(methodName: String, types: Array<out Class<*>>): Method? {
-    val expected = types.toList()
-    val declared = resolve().optional(silent = true).method {
-        name(methodName)
-        // parameters() 的空集合表示「不约束」，必须显式匹配零参数。
-        parameters { it == expected }
-        superclass()
-    }.map { it.self }
-    val candidates = declared.ifEmpty {
-        // 保留 getMethod 的公开接口 fallback，不依赖接口枚举顺序选第一个。
-        resolve().processor(PublicHostMembers).optional(silent = true).method {
-            name(methodName)
-            parameters { it == expected }
-        }.map { it.self }
+/** 映射必须在缓存之外解析，以便新安装的 DexKit 描述符立刻生效。 */
+private fun Class<*>.findHostMethod(
+    name: String,
+    parameters: HostMethodParameters,
+    members: HostMembers,
+    returnType: Class<*>? = null,
+): Method? {
+    HostSymbols.methodDescriptor(this, name)?.let { descriptor ->
+        return members.describedMethod(descriptor, classLoader).matchHostContract(
+            parameters, receiver = this, expectedReturnType = returnType,
+        )
     }
-    return selectExactMethod(candidates, "${this.name}#$methodName")?.apply { isAccessible = true }
+    relocatedMethods(name, parameters, members, returnType)?.let {
+        return HostMembers.uniqueMethod(it, "${this.name}#$name")
+    }
+    return findRawHostMethod(mappedMethodNames(name), name, parameters, members, returnType)
 }
 
-private fun Class<*>.findFieldExact(fieldName: String): Field? {
-    val declared = resolve().optional(silent = true).field {
-        name(fieldName)
-        superclass()
-    }.map { it.self }
-    val candidates = declared.ifEmpty {
-        resolve().processor(PublicHostMembers).optional(silent = true).field {
-            name(fieldName)
-        }.map { it.self }
+private fun Method.matchHostContract(
+    parameters: HostMethodParameters,
+    receiver: Class<*>? = null,
+    expectedReturnType: Class<*>? = null,
+): Method? {
+    val isStatic = Modifier.isStatic(modifiers)
+    require(isStatic || receiver == null || declaringClass.isAssignableFrom(receiver)) {
+        "Host method owner ${declaringClass.name} is incompatible with ${receiver?.name}: $this"
     }
-    return candidates.distinct().uniqueOrNull("${this.name}#$fieldName")?.apply { isAccessible = true }
+    if (receiver != null && declaringClass != receiver && declaringClass.isInterface && declaringClass.isAssignableFrom(receiver)) {
+        require(!isStatic && Modifier.isPublic(modifiers)) {
+            "Interface static/private method is not inherited by ${receiver.name}: $this"
+        }
+    }
+    return takeIf {
+        parameters.matches(parameterTypes.toList()) && (expectedReturnType == null || returnType == expectedReturnType)
+    }
 }
 
-private fun Class<*>.findConstructorExact(types: List<Class<*>>): Constructor<*>? =
-    resolve().optional(silent = true).constructor {
-        parameters { it == types }
-    }.map { it.self }.uniqueOrNull("${this.name}#<init>")?.apply { isAccessible = true }
-
-/** 协变返回值会同时生成实现和 bridge；按返回值特异性选择，真正歧义则停止。 */
-private fun selectExactMethod(methods: List<Method>, description: String): Method? {
-    val candidates = methods.distinct()
-    if (candidates.size < 2) return candidates.singleOrNull()
-    val narrowed = candidates.filter { candidate ->
-        candidates.all { other -> other.returnType.isAssignableFrom(candidate.returnType) }
+private fun Class<*>.findHostField(name: String, members: HostMembers): Field? {
+    HostSymbols.fieldDescriptor(this, name)?.let { descriptor ->
+        return members.describedField(descriptor, classLoader).also {
+            require(it.declaringClass.isAssignableFrom(this)) { "Queried field owner does not match ${this.name}: $it" }
+        }
     }
-    val mostSpecific = narrowed.filter { candidate ->
-        narrowed.all { other -> other.declaringClass.isAssignableFrom(candidate.declaringClass) }
-    }
-    require(mostSpecific.size == 1) {
-        "Ambiguous host method $description: ${candidates.joinToString()}"
-    }
-    return mostSpecific.single()
+    val actualClass = this.name
+    val mappedNames = buildSet {
+        add(HostSymbols.resolveFieldName(this@findHostField, name))
+        HostSymbols.logicalClassesOf(actualClass).forEach { add(HostSymbols.resolveFieldName(it, name)) }
+    }.filter { it != name }
+    val mapped = mappedNames.mapNotNull { members.field(this, it) }.distinct()
+    require(mapped.size <= 1) { "Ambiguous host field ${this.name}#$name: ${mapped.joinToString()}" }
+    return if (mappedNames.isNotEmpty()) mapped.singleOrNull() else members.field(this, name)
 }
 
-private fun <T> List<T>.uniqueOrNull(description: String): T? {
-    require(size <= 1) { "Ambiguous host member $description: ${joinToString()}" }
-    return singleOrNull()
+private fun Class<*>.mappedMethodNames(name: String): List<String> {
+    return buildSet {
+        add(HostSymbols.resolveMethodName(this@mappedMethodNames, name))
+        // 合并门面可能有多个逻辑别名；不能用别名的枚举顺序选择同签名函数。
+        for (type in hostMembers().hierarchyOf(this@mappedMethodNames)) {
+            val candidates = HostSymbols.logicalClassesOf(type.name).mapNotNull { logical ->
+                if (HostSymbols.resolveMethodOwner(logical, name) != type.name) null
+                else HostSymbols.resolveMethodName(logical, name).takeIf { it != name }
+            }
+            addAll(candidates)
+        }
+    }.filter { it != name }
 }
 
-// 无全局成员/类名缓存；每次 resolve 绑定实际 Class，热重载和同名 ClassLoader 相互隔离。
-private object PublicHostMembers : MemberProcessor.Resolver() {
-    override fun <T : Any> getDeclaredMethods(declaringClass: Class<T>): List<Method> =
-        declaringClass.methods.toList()
+private fun Class<*>.findRawHostMethod(
+    resolvedNames: List<String>,
+    logicalName: String,
+    parameters: HostMethodParameters,
+    members: HostMembers,
+    returnType: Class<*>?,
+): Method? {
+    val mapped = resolvedNames.distinct().filter { it != logicalName }.flatMap {
+        members.methods(this, it, parameters, returnType = returnType)
+    }
+    return if (resolvedNames.any { it != logicalName }) {
+        HostMembers.uniqueMethod(mapped, "${this.name}#$logicalName")
+    } else members.method(this, logicalName, parameters, returnType = returnType)
+}
 
-    override fun <T : Any> getDeclaredFields(declaringClass: Class<T>): List<Field> =
-        declaringClass.fields.toList()
+/** null 表示无重定位；空集合表示已有重定位但该签名缺失，不允许回旧门面猜短名。 */
+private fun Class<*>.relocatedMethods(
+    name: String,
+    parameters: HostMethodParameters,
+    members: HostMembers,
+    returnType: Class<*>? = null,
+): List<Method>? {
+    val routes = members.hierarchyOf(this).flatMap { type ->
+        HostSymbols.logicalClassesOf(type.name).mapNotNull { logical ->
+            val owner = HostSymbols.resolveMethodOwner(logical, name)
+            if (owner == HostSymbols.resolveClass(logical)) null
+            else owner to HostSymbols.resolveMethodName(logical, name)
+        }
+    }.distinct()
+    if (routes.isEmpty()) return null
+    return routes.flatMap { (owner, resolvedName) ->
+        val target = members.namedClass(owner, classLoader)
+        members.methods(target, resolvedName, parameters, staticOnly = true, returnType = returnType)
+    }.distinct()
 }

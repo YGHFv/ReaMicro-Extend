@@ -2,9 +2,7 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.HostStorageRecords
 import com.reamicro.fix.core.HostReducerGuard
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethodsNamed
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.webdav.*
 
 internal fun WebDavDriveHook.newBaiduAuth(vararg legacy: Any?): Any =
@@ -18,25 +16,11 @@ internal fun WebDavDriveHook.newStorageFolder(name: String, path: String, empty:
 
 internal fun WebDavDriveHook.storageStateWithTree(state: Any, tree: List<Any>): Any =
     HostReducerGuard.reduce(state, cls(CLOUD_STORAGE_UI_STATE_CLASS), { error ->
-        XposedBridge.logAlways("$LOG_PREFIX storage reducer retained original state: ${error.stackTraceToString()}")
+        HookRuntime.logAlways("$LOG_PREFIX storage reducer retained original state: ${error.stackTraceToString()}")
     }) {
-        val constructor = try {
-            cls(CLOUD_STORAGE_UI_STATE_CLASS).getDeclaredConstructor(cls(CLOUD_USER_INFO_CLASS), List::class.java)
-        } catch (_: NoSuchMethodException) {
-            null
-        }
-        if (constructor != null) {
-            constructor.newInstance(state.javaClass.hostField("userInfo").get(state), tree)
-        } else {
-            val info = state.javaClass.hostMethodsNamed("getUserInfo").single { it.parameterCount == 0 }.invoke(state)
-            cls(CLOUD_STORAGE_UI_STATE_CLASS).hostMethodsNamed("copy").single { it.parameterCount == 2 }
-                .invoke(state, info, tree)
-        }
+        val records = requireNotNull(com.reamicro.fix.core.HostStorageBindings.records)
+        records.record("state", mapOf("userInfo" to records.field("state.userInfo").get(state), "treeList" to tree))
     }
-
 internal fun WebDavDriveHook.newNativeWorkHandle(id: String, state: Any): Any {
-    val constructor = cls(WORK_HANDLE_CLASS).declaredConstructors.single {
-        it.parameterCount == 2 && it.parameterTypes[0] == String::class.java && it.parameterTypes[1].isInstance(state)
-    }
-    return constructor.newInstance(id, state)
+    return com.reamicro.fix.core.HostWorkBindings.requireCurrent().handle(id, state)
 }

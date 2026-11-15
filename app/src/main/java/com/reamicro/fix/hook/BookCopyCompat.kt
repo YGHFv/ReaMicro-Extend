@@ -1,10 +1,5 @@
 package com.reamicro.fix.hook
 
-import java.lang.reflect.Method
-import java.lang.reflect.Modifier
-import com.reamicro.fix.core.HostExactRecordCopy
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.B2BookAssociation
 
 internal data class BookCopyPatch(
     val title: String? = null,
@@ -23,115 +18,28 @@ internal data class BookCopyPatch(
 
 internal object BookCopyCompat {
     fun copy(book: Any, patch: BookCopyPatch): Any {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val changes = buildMap<String, Any?> {
-                patch.title?.let { put("title", it) }
-                patch.subtitle?.let { put("subtitle", it) }
-                patch.author?.let { put("author", it) }
-                patch.cover?.takeIf(String::isNotBlank)?.let { put("cover", it) }
-                patch.size?.takeIf { it > 0 }?.let { put("size", it) }
-                patch.updated?.takeIf { it > 0 }?.let { put("updated", it) }
-                patch.pinnedAt?.let { put("pinnedAt", it) }
-                patch.cloudId?.let { put("cloudId", it) }
-                patch.backupType?.let { put("backupType", it) }
-                patch.backupId?.let { put("backupId", it) }
-                patch.backupCode?.let { put("backupCode", it) }
-                patch.publisher?.let { put("publisher", it) }
-            }
-            return HostExactRecordCopy(book.javaClass, B2BookAssociation.properties).copy(book, changes)
+        val changes = buildMap<String, Any?> {
+            patch.title?.let { put("title", it) }
+            patch.subtitle?.let { put("subtitle", it) }
+            patch.author?.let { put("author", it) }
+            patch.cover?.takeIf(String::isNotBlank)?.let { put("cover", it) }
+            patch.size?.takeIf { it > 0 }?.let { put("size", it) }
+            patch.updated?.takeIf { it > 0 }?.let { put("updated", it) }
+            patch.pinnedAt?.let { put("pinnedAt", it) }
+            patch.cloudId?.let { put("cloudId", it) }
+            patch.backupType?.let { put("backupType", it) }
+            patch.backupId?.let { put("backupId", it) }
+            patch.backupCode?.let { put("backupCode", it) }
+            patch.publisher?.let { put("publisher", it) }
         }
-        val copyMethod = findCopyMethod(book)
-        val parameterTypes = copyMethod.parameterTypes
-        val args = Array<Any?>(parameterTypes.size) { index ->
-            componentMethod(book, index + 1).invoke(book)
-        }
-        val embeddedFontsPresent = parameterTypes.getOrNull(12) == Integer.TYPE
-        val epubcfiIndex = if (embeddedFontsPresent) 13 else 12
-        val updatedIndex = epubcfiIndex + 5
-        val contentDownloadedPresent = parameterTypes.lastOrNull() == java.lang.Boolean.TYPE
-        val publisherIndex = parameterTypes.lastIndex - if (contentDownloadedPresent) 1 else 0
-        val backupCodeIndex = publisherIndex - 1
-        val backupIdIndex = publisherIndex - 2
-        val backupTypeIndex = publisherIndex - 3
-        val cloudIdIndex = publisherIndex - 4
-        val pinnedAtIndex = (updatedIndex + 1).takeIf { it < cloudIdIndex }
-
-        check(parameterTypes.size >= 23 && publisherIndex > updatedIndex) {
-            "Unsupported Book.copy signature: ${copyMethod.toGenericString()}"
-        }
-        check(parameterTypes.getOrNull(6) == String::class.java && parameterTypes.getOrNull(7) == java.lang.Long.TYPE) {
-            "Unsupported Book.copy core fields: ${copyMethod.toGenericString()}"
-        }
-        check(
-            parameterTypes.getOrNull(updatedIndex) == java.lang.Long.TYPE &&
-                parameterTypes.getOrNull(cloudIdIndex) == java.lang.Long.TYPE &&
-                parameterTypes.getOrNull(backupTypeIndex) == Integer.TYPE &&
-                parameterTypes.getOrNull(backupIdIndex) == String::class.java &&
-                parameterTypes.getOrNull(backupCodeIndex) == String::class.java &&
-                parameterTypes.getOrNull(publisherIndex) == String::class.java
-        ) {
-            "Unsupported Book.copy tail fields: ${copyMethod.toGenericString()}"
-        }
-
-        patch.title?.let { args[3] = it }
-        patch.subtitle?.let { args[4] = it }
-        patch.author?.let { args[5] = it }
-        patch.cover?.takeIf { it.isNotBlank() }?.let { args[6] = it }
-        patch.size?.takeIf { it > 0L }?.let { args[7] = it }
-        patch.updated?.takeIf { it > 0L }?.let { args[updatedIndex] = it }
-        patch.pinnedAt?.let { value -> pinnedAtIndex?.let { args[it] = value } }
-        patch.cloudId?.let { args[cloudIdIndex] = it }
-        patch.backupType?.let { args[backupTypeIndex] = it }
-        patch.backupId?.let { args[backupIdIndex] = it }
-        patch.backupCode?.let { args[backupCodeIndex] = it }
-        patch.publisher?.let { args[publisherIndex] = it }
-        val updated = copyMethod.invoke(book, *args)
-        requireSameStorageIdentity(book, updated)
-        return updated
+        return requireNotNull(com.reamicro.fix.core.HostBookBindings.current).copy(book, changes).also { requireSameStorageIdentity(book, it) }
     }
-
     internal fun requireSameStorageIdentity(before: Any, after: Any) {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            val schema = HostExactRecordCopy(before.javaClass, B2BookAssociation.properties)
-            val left = schema.snapshot(before)
-            val right = schema.snapshot(after)
-            check(listOf("id", "uuid", "uid").all { left[it] == right[it] })
-            return
+        val host = requireNotNull(com.reamicro.fix.core.HostBookBindings.current)
+        val left = host.snapshot(before)
+        val right = host.snapshot(after)
+        check(listOf("id", "uuid", "uid").all { left.getValue(it) == right.getValue(it) }) {
+            "拒绝改变书籍身份字段，已阻止书架回写"
         }
-        for (number in 1..3) {
-            check(componentMethod(before, number).invoke(before) == componentMethod(after, number).invoke(after)) {
-                "拒绝改变书籍身份字段 component$number，已阻止书架回写"
-            }
-        }
-    }
-
-    private fun findCopyMethod(book: Any): Method {
-        val bookClass = book.javaClass
-        val candidates = (bookClass.methods.asSequence() + bookClass.declaredMethods.asSequence())
-            .filter {
-                it.name == "copy" &&
-                    it.returnType == bookClass &&
-                    !Modifier.isStatic(it.modifiers) &&
-                    it.parameterTypes.size >= 23
-            }
-            .distinctBy { it.toGenericString() }
-            .sortedByDescending { it.parameterTypes.size }
-            .toList()
-        return candidates.firstOrNull()?.apply { isAccessible = true }
-            ?: error(
-                "Unsupported Book.copy signature: ${bookClass.name}; methods=" +
-                    (bookClass.methods.asSequence() + bookClass.declaredMethods.asSequence())
-                        .filter { it.name.startsWith("copy") }
-                        .distinctBy { it.toGenericString() }
-                        .joinToString { it.toGenericString() },
-            )
-    }
-
-    private fun componentMethod(book: Any, number: Int): Method {
-        val name = "component$number"
-        return (book.javaClass.methods.asSequence() + book.javaClass.declaredMethods.asSequence())
-            .firstOrNull { it.name == name && it.parameterTypes.isEmpty() }
-            ?.apply { isAccessible = true }
-            ?: error("Book.$name not found: ${book.javaClass.name}")
     }
 }

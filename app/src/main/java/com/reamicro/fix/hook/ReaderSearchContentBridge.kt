@@ -1,60 +1,47 @@
 package com.reamicro.fix.hook
 
 import com.reamicro.fix.core.HookInstallReport
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethodsNamed
-import com.reamicro.fix.core.typeMatches
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.core.HostReaderRenderBindings
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 
-/** Content 自己订阅搜索绘制代次，避免滚动段落缓存只刷新当前命中。 */
+/** Content subscribes to paint generations and supplies the queried resolved-mark local. */
 internal class ReaderSearchContentBridge(private val reader: ReaderHook) {
     private val depth = ThreadLocal.withInitial { 0 }
-
     fun install() {
         HookInstallReport.install("ReaderHook", "searchContentPaint") {
-            val loader = reader.classLoader
-            val localMarks = requireNotNull(loader.hostClass("org.epub.ui.BodyKt")
-                .hostField("LocalEpubMarks").get(null))
-            val content = loader.hostClass("org.epub.ui.ContentKt").hostMethodsNamed("Content")
-                .filter { it.parameterTypes.firstOrNull()?.let { typeMatches(it, "org.epub.html.node.ContentDom") } == true }
-            check(content.isNotEmpty()) { "Content paint entry unavailable" }
-            content.forEach { method ->
-                val composer = method.parameterTypes.indexOfFirst { typeMatches(it, "androidx.compose.runtime.Composer") }
-                check(composer >= 0 && method.parameterTypes.getOrNull(composer + 1) == Int::class.javaPrimitiveType)
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val args = param.args ?: return
-                        val dom = args.firstOrNull() ?: return
-                        if (reader.observeSearchPaint(dom)) {
-                            args[composer + 1] = ((args[composer + 1] as? Int) ?: 0) or 1
-                        }
+            val symbols = requireNotNull(HostReaderRenderBindings.current)
+            val localMarks = requireNotNull(symbols.field("localMarks").get(null))
+            val composer = symbols.index("content.composer")
+            val handles = mutableListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+            try {
+                handles += HookRuntime.hookMethod(symbols.method("content"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val args = param.args
+                        val dom = args[symbols.index("content.dom")] ?: return
+                        if (reader.observeSearchPaint(dom)) args[composer + 1] = (args[composer + 1] as Int) or 1
+                        param.setObjectExtra("reamicro.search.contentDepth", depth.get())
                         depth.set(depth.get() + 1)
-                        param.setObjectExtra("reamicro.search.contentScope", true)
                     }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (param.getObjectExtra("reamicro.search.contentScope") == true) {
-                            depth.set((depth.get() - 1).coerceAtLeast(0))
-                        }
+                    override fun after(param: Call) {
+                        val previous = param.getObjectExtra("reamicro.search.contentDepth") as? Int ?: return
+                        if (previous == 0) depth.remove() else depth.set(previous)
                     }
                 })
-            }
-            val consume = loader.hostClass("androidx.compose.runtime.Composer").hostMethodsNamed("consume")
-                .filter { it.parameterCount == 1 }
-            check(consume.isNotEmpty()) { "Content local mark reader unavailable" }
-            consume.forEach { method ->
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (depth.get() <= 0 || param.throwable != null || param.args?.firstOrNull() !== localMarks) return
+                handles += HookRuntime.hookMethod(symbols.method("consume"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (depth.get() <= 0 || param.throwable != null || param.args.firstOrNull() !== localMarks) return
                         val original = param.result as? List<*> ?: return
                         val next = reader.appendSearchResolvedMarker(original)
                         if (next != original) param.result = next
                     }
                 })
+                HookRuntime.deoptimize(symbols.method("content"))
+            } catch (error: Throwable) {
+                handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+                throw error
             }
-            XposedBridge.log("ReaMicro search Content paint bridge installed count=${content.size}/${consume.size}")
+            HookRuntime.log("ReaMicro search Content paint bridge installed")
         }
     }
 }

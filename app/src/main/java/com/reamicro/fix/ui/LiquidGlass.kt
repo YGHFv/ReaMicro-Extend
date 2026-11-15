@@ -8,11 +8,10 @@ import androidx.compose.ui.util.fastCoerceAtMost
 import top.yukonga.miuix.kmp.blur.BackdropEffectScope
 import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.colorControls
-import top.yukonga.miuix.kmp.blur.highlight.BloomStroke
-import top.yukonga.miuix.kmp.blur.highlight.Highlight
-import top.yukonga.miuix.kmp.blur.highlight.LightPosition
-import top.yukonga.miuix.kmp.blur.highlight.LightSource
-import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
+import top.yukonga.miuix.kmp.material.EdgeLightSource
+import top.yukonga.miuix.kmp.material.EdgePeak
+import top.yukonga.miuix.kmp.material.EdgeStroke
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.runtimeShaderEffect
 
 fun BackdropEffectScope.vibrancy() {
@@ -26,24 +25,25 @@ fun BackdropEffectScope.liquidCapsuleEffects() {
     liquidLens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
 }
 
-val LiquidCapsuleHighlight: Highlight = Highlight(
+val LiquidCapsuleStroke: EdgeStroke = EdgeStroke(
     width = 1.dp,
-    alpha = 0.75f,
-    style = BloomStroke(
-        color = Color.White.copy(alpha = 0.12f),
-        innerBlurRadius = 2.0.dp,
-        primaryLight = LightSource(
-            position = LightPosition(0.5f, -0.3f, -0.05f),
-            color = Color.White,
-            intensity = 1f,
-        ),
-        secondaryLight = LightSource(
-            position = LightPosition(0.5f, 0.8f, -0.5f),
-            color = Color.White,
-            intensity = 0.4f,
-        ),
-        dualPeak = true,
+    bevel = 2.0.dp,
+    color = Color.White.copy(alpha = 0.12f),
+    primary = EdgeLightSource(
+        x = 0.5f,
+        y = -0.3f,
+        z = -0.05f,
+        color = Color.White,
+        intensity = 1f,
     ),
+    secondary = EdgeLightSource(
+        x = 0.5f,
+        y = 0.8f,
+        z = -0.5f,
+        color = Color.White,
+        intensity = 0.4f,
+    ),
+    peak = EdgePeak.Axial,
 )
 
 fun BackdropEffectScope.liquidLens(

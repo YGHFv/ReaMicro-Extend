@@ -3,14 +3,14 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 object RotationOrientationController {
     fun apply(activity: Activity, snapshot: ModuleSettingsSnapshot) {
         val orientation = requestedOrientation(snapshot)
         if (activity.requestedOrientation == orientation) return
         activity.requestedOrientation = orientation
-        XposedBridge.log("$LOG_PREFIX requestedOrientation=$orientation")
+        HookRuntime.log("$LOG_PREFIX requestedOrientation=$orientation")
     }
 
     fun requestedOrientation(snapshot: ModuleSettingsSnapshot): Int {

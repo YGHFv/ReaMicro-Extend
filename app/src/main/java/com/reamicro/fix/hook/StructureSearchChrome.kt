@@ -42,7 +42,7 @@ internal fun structureEditorControlTextStyle() =
 
 @Composable
 internal fun StructureCompactOutlinedAction(
-    label: String, enabled: Boolean, palette: StructureHome130Style.Palette,
+    label: String, enabled: Boolean, palette: HostEmbeddedStyle.Palette,
     onClick: () -> Unit, busy: Boolean = false,
 ) {
     val shape = RoundedCornerShape(StructureContentStyle.actionCorner)
@@ -62,7 +62,7 @@ internal fun StructureCompactOutlinedAction(
 }
 
 @Composable
-internal fun StructureSearchTextAction(label: String, enabled: Boolean, palette: StructureHome130Style.Palette,
+internal fun StructureSearchTextAction(label: String, enabled: Boolean, palette: HostEmbeddedStyle.Palette,
     onClick: () -> Unit) {
     Box(Modifier.widthIn(min = 48.dp).heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp)
         .clip(RoundedCornerShape(StructureContentStyle.actionCorner))

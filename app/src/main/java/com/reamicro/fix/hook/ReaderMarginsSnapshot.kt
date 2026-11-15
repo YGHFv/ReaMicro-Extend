@@ -33,10 +33,12 @@ internal data class ReaderMarginsSnapshot(
         )
 
         fun fromHost(margins: Any): ReaderMarginsSnapshot {
-            fun value(name: String): Int = (margins.javaClass.getMethod(name).invoke(margins) as Number).toInt()
+            val host = requireNotNull(com.reamicro.fix.core.HostAccountBindings.preferences)
+            check(host.type("margins").isInstance(margins))
+            fun value(name: String): Int = host.field("margins.$name").getInt(margins)
             return ReaderMarginsSnapshot(
-                value("getTop"), value("getBottom"), value("getLeft"), value("getRight"),
-                value("getTopOuter"), value("getBottomOuter"),
+                value("top"), value("bottom"), value("left"), value("right"),
+                value("topOuter"), value("bottomOuter"),
             )
         }
     }

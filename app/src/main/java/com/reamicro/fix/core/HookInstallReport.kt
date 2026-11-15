@@ -14,28 +14,32 @@ object HookInstallReport {
     private val lock = Any()
     private val entries = LinkedHashMap<String, Entry>()
 
-    fun install(feature: String, name: String, block: () -> Unit): Boolean =
-        installResult(feature, name) {
-            block()
-            Unit
-        }
+    private val scopes = ThreadLocal<java.util.ArrayDeque<MutableMap<String, Entry>>>()
+
+    fun install(feature: String, name: String, block: () -> Any?): Boolean =
+        installResult(feature, name, block)
 
     fun installResult(feature: String, name: String, block: () -> Any?): Boolean {
-        val before = snapshot().mapTo(hashSetOf()) { it.id }
-        val result = runCatching(block)
-        val nestedFailures = snapshot().filter { it.id !in before && !it.ok }
+        val nested = linkedMapOf<String, Entry>()
+        val stack = scopes.get() ?: java.util.ArrayDeque<MutableMap<String, Entry>>().also(scopes::set)
+        stack.addLast(nested)
+        val result = try { runCatching(block) } finally {
+            stack.removeLast()
+            if (stack.isEmpty()) scopes.remove()
+        }
+        val nestedFailures = nested.values.filterNot { it.ok }
         val nestedError = nestedFailures
             .takeIf { it.isNotEmpty() }
             ?.joinToString(", ") { it.id }
             ?.let { IllegalStateException("nested hook steps failed: $it") }
         val success = result.isSuccess && result.getOrNull() != false && nestedFailures.isEmpty()
-        record(feature, name, success, result.exceptionOrNull() ?: nestedError)
+        record(feature, name, success, result.exceptionOrNull() ?: nestedError ?:
+            if (result.getOrNull() == false) IllegalStateException("installation returned false") else null)
         return success
     }
 
-    fun installAll(feature: String, steps: List<Pair<String, () -> Unit>>) {
-        steps.forEach { (name, block) -> install(feature, name, block) }
-    }
+    fun installAll(feature: String, steps: List<Pair<String, () -> Any?>>): Boolean =
+        steps.map { (name, block) -> install(feature, name, block) }.all { it }
 
     fun record(feature: String, name: String, ok: Boolean, error: Throwable? = null) {
         val entry = Entry(
@@ -45,6 +49,7 @@ object HookInstallReport {
             error = error?.let { "${it.javaClass.simpleName}: ${it.message.orEmpty()}" },
         )
         synchronized(lock) { entries[entry.id] = entry }
+        scopes.get()?.forEach { it[entry.id] = entry }
     }
 
     fun snapshot(): List<Entry> = synchronized(lock) { entries.values.toList() }

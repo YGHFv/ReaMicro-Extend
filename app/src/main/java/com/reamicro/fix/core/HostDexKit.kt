@@ -1,267 +1,72 @@
 package com.reamicro.fix.core
 
 import android.app.Application
-import android.content.Context
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
-import java.lang.reflect.Modifier
 import java.util.zip.ZipFile
 import org.luckypray.dexkit.DexKitBridge
-import org.luckypray.dexkit.query.FindMethod
-import org.luckypray.dexkit.query.matchers.MethodMatcher
-import org.luckypray.dexkit.result.ClassData
 
-/**
- * 运行期 DEX 结构校验（DexKit）。
- *
- * 背景：宿主每次重新混淆都会复用同一套短名池但重新分配名字，
- * 旧 profile 的「逻辑名 -> 混淆名」会整体失效，而且指纹（包名 + 体积区间）
- * 往往仍然命中，于是模块会把 hook 装到毫不相干的类上。
- *
- * 这里用 DexKit 直接读宿主 dex 的实时元数据，把每个映射类的**结构指纹**
- * 与模块内置的期望指纹比对：指纹一致才认为该 profile 仍适用于当前 dex。
- * 不一致时上层会退化为 identity（逻辑名原样返回），宁可少 hook 也不乱 hook。
- */
+/** 加载本代模块的 DexKit native 库并打开宿主查询桥接。 */
 object HostDexKit {
     private const val LOG_PREFIX = "ReaMicro dexkit"
-    private const val SHAPE_ASSET_DIR = "host-profiles"
     private const val LIB_ENTRY_ARM64 = "lib/arm64-v8a/libdexkit.so"
     private const val LIB_NAME = "libdexkit.so"
     private const val LIB_DIR_NAME = "reamicro_dexkit"
-    private const val PREFS_NAME = "reamicro_fix_hostdex"
-    private const val VERDICT_PREFIX = "verdict_v2_"
-
-    /** 按签名反查到的宿主类名缓存（进程内有效，避免重复打开 DexKit） */
-    private val methodOwnerCache = HashMap<String, String?>()
-
-    private val reference = Regex("L[^;]+;")
-    private val stablePrefixes = listOf(
-        "Ljava/",
-        "Landroid/",
-        "Ljavax/",
-        "Ldalvik/",
-        "Lkotlin/jvm/functions/Function",
-    )
-
-    data class Verdict(
-        val profileId: String,
-        val total: Int,
-        val ok: Int,
-        val failed: Set<String>,
-        val cached: Boolean,
-        val durationMs: Long,
-        /** 前几个指纹不一致的样本，供日志定位（format: logical|actual|expect|got）。 */
-        val samples: List<String> = emptyList(),
-    ) {
-        val ratio: Double get() = if (total <= 0) 0.0 else ok.toDouble() / total
-    }
-
-    private const val SAMPLE_LIMIT = 3
+    private const val LIB_MAX_ATTEMPTS = 3
 
     @Volatile private var libraryLoaded = false
     @Volatile private var libraryAttempts = 0
-    private const val LIB_MAX_ATTEMPTS = 3
+    @Volatile private var bridgeFailure: Throwable? = null
     private val nativeGeneration = java.util.UUID.randomUUID().toString()
-    private val generationShapes by lazy { readBundledShapes() }
 
-    /**
-     * 校验一个候选 profile 是否仍然匹配当前宿主 dex。
-     *
-     * @param hostApkPath 宿主 base APK 路径（DexKit 直接读它的 dex）
-     * @param profileId profile 标识，用于匹配内置指纹资产
-     * @param classes 逻辑类名 -> 该 profile 声明的混淆类名
-     * @param apkSize 宿主体积，用于缓存键
-     * @param hostDataDir 宿主 dataDir；onPackageReady 阶段拿不到 Context，用它推导 code_cache
-     */
-    fun verify(
-        hostApkPath: String?,
-        profileId: String,
-        classes: Map<String, String>,
-        apkSize: Long,
-        hostDataDir: String? = null,
-    ): Verdict? {
-        val expected = bundledShapes()[profileId] ?: return null
-        if (classes.isEmpty()) return null
-        if (hostApkPath.isNullOrBlank()) return null
-        val checkedClasses = classes.keys.intersect(expected.keys)
-        val cacheKey = runCatching { HostDexIdentity.key(File(hostApkPath), profileId, classes, expected) }
-            .getOrElse {
-                XposedBridge.logError("$LOG_PREFIX cannot fingerprint host DEX", it)
-                return null
-            }
-        cachedVerdict(profileId, cacheKey, checkedClasses)?.let { return it }
-        val bridge = openBridge(hostApkPath, hostDataDir) ?: return null
-        val startedAt = System.nanoTime()
-        return try {
-            var ok = 0
-            val failed = LinkedHashSet<String>()
-            val samples = ArrayList<String>()
-            var total = 0
-            for ((logical, actual) in classes) {
-                val want = expected[logical] ?: continue
-                total++
-                val data = runCatching { bridge.getClassData(actual) }.getOrNull()
-                val got = data?.let(::shapeOf)
-                if (got != null && got == want) {
-                    ok++
-                } else {
-                    failed += logical
-                    if (samples.size < SAMPLE_LIMIT) {
-                        samples += "$logical|$actual|${truncate(want)}|${truncate(got ?: "<no-class-data>")}"
-                    }
-                }
-            }
-            val verdict = Verdict(
-                profileId = profileId,
-                total = total,
-                ok = ok,
-                failed = failed,
-                cached = false,
-                durationMs = (System.nanoTime() - startedAt) / 1_000_000,
-                samples = samples,
-            )
-            storeVerdict(profileId, cacheKey, verdict)
-            verdict
-        } catch (error: Throwable) {
-            XposedBridge.logError("$LOG_PREFIX verify failed for $profileId", error)
-            null
-        } finally {
-            runCatching { bridge.close() }
-        }
-    }
-
-    private fun truncate(value: String): String =
-        if (value.length <= 260) value else value.take(260) + "...(len=${value.length})"
-
-    /**
-     * 按「返回类型 + 形参类型」在宿主 dex 中反查静态方法所属的类名。
-     *
-     * R8 会把逻辑类合并进无关类（例如 OPF 解析器被并入 Compose 类），这类符号
-     * 无法通过 profile 还原，只能运行时按签名定位。找不到返回 null。
-     */
-    fun findStaticMethodOwner(
-        returnDescriptor: String,
-        paramDescriptors: List<String>,
-        cacheKey: String,
-    ): String? {
-        synchronized(methodOwnerCache) {
-            if (methodOwnerCache.containsKey(cacheKey)) return methodOwnerCache[cacheKey]
-        }
-        val application = hostApplication() ?: return null
-        val apkPath = runCatching { application.applicationInfo.sourceDir }.getOrNull()
-        val dataDir = runCatching { application.applicationInfo.dataDir }.getOrNull()
-        val owner = if (apkPath.isNullOrBlank()) {
-            null
-        } else {
-            val bridge = openBridge(apkPath, dataDir)
-            if (bridge == null) {
-                null
-            } else {
-                try {
-                    val query = FindMethod.create().matcher(
-                        MethodMatcher.create()
-                            .returnType(returnDescriptor)
-                            .paramTypes(paramDescriptors),
-                    )
-                    bridge.findMethod(query)
-                        .asSequence()
-                        .firstOrNull { Modifier.isStatic(it.modifiers) }
-                        ?.declaredClassName
-                        ?.takeIf { it.isNotBlank() }
-                } catch (error: Throwable) {
-                    XposedBridge.logError("$LOG_PREFIX find method owner failed for $cacheKey", error)
-                    null
-                } finally {
-                    runCatching { bridge.close() }
-                }
-            }
-        }
-        if (owner != null) {
-            XposedBridge.logAlways("$LOG_PREFIX method owner resolved $cacheKey -> $owner")
-            synchronized(methodOwnerCache) { methodOwnerCache[cacheKey] = owner }
-        }
-        return owner
-    }
-
-    /** 内置指纹资产：assets/host-profiles/<profileId>.shapes。 */
-    fun bundledShapes(): Map<String, Map<String, String>> = generationShapes
-
-    private fun readBundledShapes(): Map<String, Map<String, String>> {
-        val apk = moduleApkFile() ?: return emptyMap()
-        return runCatching {
-            ZipFile(apk).use { zip ->
-                zip.entries().asSequence()
-                    .filter { !it.isDirectory && it.name.startsWith("assets/$SHAPE_ASSET_DIR/") }
-                    .filter { it.name.endsWith(".shapes") }
-                    .associate { entry ->
-                        val text = zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
-                        parseShapes(text)
-                    }
-            }
-        }.getOrElse {
-            XposedBridge.logError("$LOG_PREFIX read shapes failed", it)
-            emptyMap()
-        }
-    }
-
-    private fun parseShapes(text: String): Pair<String, Map<String, String>> {
-        var profileId = ""
-        val shapes = LinkedHashMap<String, String>()
-        text.lineSequence().forEach { raw ->
-            val line = raw.trim()
-            if (line.isEmpty() || line.startsWith("#")) return@forEach
-            when {
-                line.startsWith("profile=") -> profileId = line.removePrefix("profile=").trim()
-                line.startsWith("shape=") -> {
-                    val body = line.removePrefix("shape=")
-                    val logical = body.substringBefore('|')
-                    val shape = body.substringAfter('|')
-                    if (logical.isNotEmpty()) shapes[logical] = shape
-                }
-            }
-        }
-        return profileId.ifBlank { "unknown" } to shapes
-    }
-
-    /**
-     * 与 tools/build_profile_shapes.py 完全一致的指纹规则：
-     * 去掉空白，并把随构建改名的引用类型折叠成 `L*`。
-     */
-    private fun shapeOf(data: ClassData): String {
-        val superClass = data.superClass?.descriptor?.let(::normalize) ?: ""
-        val interfaces = data.interfaces.map { normalize(it.descriptor) }.sorted()
-        val methods = data.methods.map { normalize(it.descriptor) }.sorted()
-        val fields = data.fields.map { normalize(it.descriptor) }.sorted()
-        return listOf(
-            superClass,
-            interfaces.joinToString(","),
-            methods.joinToString(","),
-            fields.joinToString(","),
-        ).joinToString("|")
-    }
-
-    private fun normalize(descriptor: String): String {
-        val compact = descriptor.filterNot { it.isWhitespace() }
-        return reference.replace(compact) { match ->
-            if (stablePrefixes.any { match.value.startsWith(it) }) match.value else "L*"
-        }
-    }
-
-    internal fun openBridge(hostApkPath: String, hostDataDir: String?): DexKitBridge? {
+    internal fun openBridge(hostApkPath: String, hostDataDir: String?,
+        hostApkPaths: List<String> = listOf(hostApkPath)): DexKitBridge? {
         if (!ensureLibrary(hostDataDir)) return null
         return runCatching {
             val startedAt = System.nanoTime()
-            val bridge = DexKitBridge.create(hostApkPath)
-            XposedBridge.logAlways(
+            require(hostApkPaths.firstOrNull()?.let { File(it).absolutePath } == File(hostApkPath).absolutePath) {
+                "Host APK class path does not start with base APK"
+            }
+            val bridge = if (hostApkPaths.size == 1) DexKitBridge.create(hostApkPath) else {
+                // Pass only ApplicationInfo's explicit class path; a ClassLoader may also
+                // contain module/shared-library DEX that would make semantic anchors ambiguous.
+                val dexFiles = hostApkPaths.flatMapIndexed { index, path ->
+                    ZipFile(path).use { zip ->
+                        zip.hostDexEntries(requireDex = index == 0).map { entry ->
+                            zip.getInputStream(entry).use { it.readBytes() }
+                        }
+                    }
+                }.toTypedArray()
+                DexKitBridge.create(dexFiles)
+            }
+            try {
+                check(bridge.isValid && bridge.getDexNum() > 0) { "Host APK contains no readable DEX" }
+                // Installation already runs on a background thread. Bound query fan-out
+                // instead of competing with rendering and input on every CPU core.
+                bridge.setThreadNum(Runtime.getRuntime().availableProcessors().coerceIn(1, 2))
+            } catch (error: Throwable) {
+                bridge.close()
+                throw error
+            }
+            bridgeFailure = null
+            HookRuntime.logAlways(
                 "$LOG_PREFIX bridge ready dex=${bridge.getDexNum()} " +
                     "in ${(System.nanoTime() - startedAt) / 1_000_000}ms",
             )
             bridge
         }.getOrElse {
-            XposedBridge.logError("$LOG_PREFIX bridge create failed", it)
+            bridgeFailure = it
+            HookRuntime.logError("$LOG_PREFIX bridge create failed", it)
             null
         }
     }
+
+    internal fun requireBridge(hostApkPath: String, hostDataDir: String?,
+        hostApkPaths: List<String> = listOf(hostApkPath)): DexKitBridge =
+        openBridge(hostApkPath, hostDataDir, hostApkPaths) ?: throw IllegalStateException(
+            "DexKit 初始化失败：${bridgeFailure?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "native library unavailable"}",
+            bridgeFailure,
+        )
 
     /**
      * DexKit 的 Java 层不自动加载 so；这里从模块 APK 抽出来再 System.load。
@@ -281,7 +86,7 @@ object HostDexKit {
                 val apk = moduleApkFile() ?: error("module apk unavailable")
                 // ART 不允许不同 ClassLoader 加载同一路径的 so；各代际独立映射且不覆盖正在使用的文件。
                 val target = File(libraryDir(hostDataDir), "$nativeGeneration/$LIB_NAME")
-                extractLibrary(apk, target)
+                HostNativeLibraryFile.extract(apk, LIB_ENTRY_ARM64, target)
                 System.load(target.absolutePath)
                 target.delete()
                 target.parentFile?.delete()
@@ -290,36 +95,18 @@ object HostDexKit {
             return loaded.fold(
                 onSuccess = { file ->
                     libraryLoaded = true
-                    XposedBridge.logAlways("$LOG_PREFIX native library loaded from ${file.absolutePath}")
+                    HookRuntime.logAlways("$LOG_PREFIX native library loaded from ${file.absolutePath}")
                     true
                 },
                 onFailure = { error ->
-                    XposedBridge.logError(
+                    bridgeFailure = error
+                    HookRuntime.logError(
                         "$LOG_PREFIX native library load failed (attempt $attempt/$LIB_MAX_ATTEMPTS)",
                         error,
                     )
                     false
                 },
             )
-        }
-    }
-
-    private fun extractLibrary(apk: File, target: File): File {
-        ZipFile(apk).use { zip ->
-            val entry = zip.getEntry(LIB_ENTRY_ARM64)
-                ?: error("module apk missing $LIB_ENTRY_ARM64")
-            val expectedSize = entry.size
-            if (target.isFile && target.length() == expectedSize && expectedSize > 0) return target
-            target.parentFile?.mkdirs()
-            val temp = File(target.absolutePath + ".tmp")
-            zip.getInputStream(entry).use { input ->
-                temp.outputStream().use { output -> input.copyTo(output) }
-            }
-            if (!temp.renameTo(target)) {
-                temp.delete()
-                error("cannot install $LIB_NAME")
-            }
-            return target
         }
     }
 
@@ -338,39 +125,6 @@ object HostDexKit {
         val fallback = File(System.getProperty("java.io.tmpdir") ?: "/data/local/tmp", LIB_DIR_NAME)
         fallback.mkdirs()
         return fallback
-    }
-
-    private fun cachedVerdict(profileId: String, cacheKey: String, expected: Set<String>): Verdict? {
-        val prefs = runCatching {
-            hostApplication()?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        }.getOrNull() ?: return null
-        val stored = runCatching { prefs.getString(VERDICT_PREFIX + profileId, null) }.getOrNull()
-            ?: return null
-        val parts = stored.split('\u0001')
-        if (parts.size < 4 || parts[0] != cacheKey) return null
-        val ok = parts[1].toIntOrNull() ?: return null
-        val total = parts[2].toIntOrNull() ?: return null
-        val failed = parts[3].split(',').filter { it.isNotEmpty() }.toSet()
-        if (!HostDexIdentity.validCounts(total, ok, failed, expected)) return null
-        return Verdict(profileId, total, ok, failed, cached = true, durationMs = 0L)
-    }
-
-    private fun storeVerdict(profileId: String, cacheKey: String, verdict: Verdict) {
-        runCatching {
-            hostApplication()
-                ?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                ?.edit()
-                ?.putString(
-                    VERDICT_PREFIX + profileId,
-                    listOf(
-                        cacheKey,
-                        verdict.ok.toString(),
-                        verdict.total.toString(),
-                        verdict.failed.joinToString(","),
-                    ).joinToString("\u0001"),
-                )
-                ?.apply()
-        }.onFailure { XposedBridge.logError("$LOG_PREFIX verdict cache write failed", it) }
     }
 
     private fun hostApplication(): Application? = runCatching {

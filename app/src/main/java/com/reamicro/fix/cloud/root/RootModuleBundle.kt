@@ -21,6 +21,11 @@ internal object RootModuleBundle {
             }
             check(props.getProperty("id") == RootModuleManager.MODULE_ID) { "Unexpected Root module ID" }
             check(props.getProperty("versionCode")?.toIntOrNull() == expectedVersionCode) { "Bundled Root module version mismatch" }
+            val runtimeVersion = zip.getInputStream(zip.getEntry("common.sh")).bufferedReader(Charsets.UTF_8).use { reader ->
+                reader.lineSequence().firstOrNull { it.startsWith("REAMICRO_MODULE_VERSION=") }
+                    ?.substringAfter('=')?.toIntOrNull()
+            }
+            check(runtimeVersion == expectedVersionCode) { "Bundled Root runtime version mismatch" }
         }
     }
 }

@@ -53,10 +53,12 @@ internal class LocalTaskEngine(
                     val credential = JSONObject().put("baseUrl", CloudTaskLocalRunner.REAMICRO_BASE_URL).put("token", token)
                     if (execute != null) execute.invoke(task.taskType, stateInput, localTaskRequest(task), credential)
                     else CloudTaskLocalRunner.runTask(task.taskType, stateInput, localTaskRequest(task), credential) { progress ->
-                        store.recordState(key.accountId, task.taskType, progress)
+                        store.recordState(key.accountId, task.taskType, JSONObject(progress.toString())
+                            .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt))
                     }
                 }.getOrElse {
-                    stopAfterTask = it is InterruptedException || Thread.currentThread().isInterrupted
+                    stopAfterTask = it is InterruptedException || it is java.util.concurrent.CancellationException ||
+                        Thread.currentThread().isInterrupted || com.reamicro.fix.reload.TaskCancellation.current()?.isCancelled == true
                     // FileChannel.lock 不接受中断标记；只在提交本次进度期间暂时清除。
                     if (stopAfterTask) Thread.interrupted()
                     CloudTaskLocalRunner.Outcome("failed", it.message ?: "本地任务执行失败",
@@ -96,7 +98,8 @@ internal class LocalTaskEngine(
         for (accountId in store.accountIds()) {
             for (task in store.list(accountId).filter { it.enabled }) {
                 val state = recoveredAutomationState(task.taskType, store.runtimeState(accountId, task.taskType), clock()) ?: continue
-                store.recordState(accountId, task.taskType, state)
+                store.recordState(accountId, task.taskType, state
+                    .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt))
             }
         }
     }
@@ -108,7 +111,8 @@ internal class LocalTaskEngine(
             val checkin = store.runtimeState(accountId, "yeshe_checkin")
             val state = store.runtimeState(accountId, draw.taskType)
             val pending = pendingRewardDrawState(checkin, state, now) ?: continue
-            store.recordState(accountId, draw.taskType, pending)
+            store.recordState(accountId, draw.taskType, pending
+                .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, draw.configUpdatedAt))
         }
     }
 }

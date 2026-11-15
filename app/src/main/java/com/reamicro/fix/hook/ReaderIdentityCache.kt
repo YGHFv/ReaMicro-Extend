@@ -31,11 +31,12 @@ internal class ReaderIdentityCache<T : Any>(private val capacity: Int = 128) {
         val result = build()
         synchronized(this) {
             drainQueue()
-            if (ticket == generation) {
-                entries[Key(value, queue)] = result
-                while (entries.size > capacity) {
-                    entries.keys.iterator().run { next(); remove() }
-                }
+            // A theme/book change may clear the cache while a background measure builds.
+            // Its result must not reach the caller either, even if it was never cached.
+            if (ticket != generation) return null
+            entries[Key(value, queue)] = result
+            while (entries.size > capacity) {
+                entries.keys.iterator().run { next(); remove() }
             }
         }
         return result

@@ -12,16 +12,13 @@ import android.graphics.drawable.NinePatchDrawable
 import android.widget.EditText
 import android.widget.TextView
 import com.reamicro.fix.core.HookInstallReport
-import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.settings.XposedModuleSettings
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
 import com.reamicro.fix.hook.settings.*
-import com.reamicro.fix.hook.ReaMicroSettingsHook.ReaderHighlightPreviewTextView
-import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
 class ReaMicroSettingsHook(
     internal val classLoader: ClassLoader,
@@ -37,7 +34,7 @@ class ReaMicroSettingsHook(
         logPrefix = LOG_PREFIX,
     )
 
-    internal val b2Ui by lazy { com.reamicro.fix.core.B2NativeUi(classLoader) }
+    internal val nativeUi by lazy { com.reamicro.fix.core.HostNativeUi(classLoader) }
     internal val accountController = AccountCompletionController(classLoader, activityProvider)
     internal val settingsBuildDepth = ThreadLocal.withInitial { 0 }
     internal val itemCount = ThreadLocal.withInitial { 0 }
@@ -49,9 +46,9 @@ class ReaMicroSettingsHook(
     internal val accountSecurityBuildDepth = ThreadLocal.withInitial { 0 }
     internal val accountSecurityItemCount = ThreadLocal.withInitial { 0 }
     internal val accountSwitchEntryInjected = ThreadLocal.withInitial { false }
-    internal val settingsEntryTitleOverride = ThreadLocal.withInitial<String?> { null }
     internal val navigatingModuleRoute = ThreadLocal.withInitial { false }
-    internal val poppingInjectedRoute = ThreadLocal.withInitial { false }
+    internal val navigationPages = InjectedNavigationState(this)
+    internal val bookStructurePages = BookStructurePages(this)
     internal val methodCache = mutableMapOf<String, Method>()
 
     @Volatile internal var highlightScreenEntryOnClick: (() -> Unit)? = null
@@ -64,14 +61,21 @@ class ReaMicroSettingsHook(
     @Volatile internal var currentSettingsNavController: Any? = null
 
     @Volatile internal var lastKnownNavGraphScope: Any? = null
-    @Volatile internal var injectedRouteStack: List<InjectedRoute> = emptyList()
-    @Volatile internal var injectedRouteUiState: Any? = null
+    internal var pendingModuleSettingsRequest = false
+    internal var moduleSettingsRequestPosted = false
+    @Volatile internal var moduleActivationChanging = false
+    internal var moduleActivationRevision = 0L
+    internal var activationRestartPending = false
+    internal val moduleSettingsRequestHandler by lazy {
+        com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    }
     @Volatile internal var fontLibraryVersionUiState: Any? = null
     @Volatile internal var onlineSourceVersionUiState: Any? = null
     @Volatile internal var cloudAutomationVersionUiState: Any? = null
     @Volatile internal var cloudAutomationLoading: Boolean = false
     @Volatile internal var cloudAutomationLoaded: Boolean = false
     @Volatile internal var cloudAutomationAccountId: String = ""
+    internal var cloudAutomationIdentity: AccountHostRuntime.Identity? = null
     @Volatile internal var cloudAutomationError: String = ""
     @Volatile internal var cloudAutomationTasks: List<com.reamicro.fix.cloud.api.CloudTask> = emptyList()
     @Volatile internal var cloudAutomationCredentials: List<com.reamicro.fix.cloud.api.ReaMicroCredential> = emptyList()
@@ -88,6 +92,7 @@ class ReaMicroSettingsHook(
     @Volatile internal var onlineEpubStyleVersionUiState: Any? = null
 
     @Volatile internal var pendingOnlineEpubPreviewRefresh: Runnable = Runnable {}
+    internal val onlineEpubPreviewHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
 
     @Volatile internal var pendingOnlineEpubStyleImagePick: ((File) -> Unit)? = null
 
@@ -103,8 +108,7 @@ class ReaMicroSettingsHook(
 
     @Volatile internal var discoverObservedVersion: Int = -1
     @Volatile internal var pendingDeleteFontUiState: Any? = null
-    @Volatile internal var lastFontImportToken: String = ""
-    @Volatile internal var lastFontImportAtMs: Long = 0L
+    @Volatile internal var pendingFontPickIdentity: AccountHostRuntime.Identity? = null
     @Volatile internal var lastOnlineSourceImportToken: String = ""
     @Volatile internal var lastOnlineSourceImportAtMs: Long = 0L
     @Volatile internal var lastExternalImportToken: String = ""
@@ -113,6 +117,7 @@ class ReaMicroSettingsHook(
     internal val previewFontFamilyCache = HashMap<String, Any>()
     internal val failedPreviewFontFamilyLogKeys = HashSet<String>()
     internal val fontFilesCacheLock = Any()
+    @Volatile internal var cachedFontFilesIdentity: AccountHostRuntime.Identity? = null
     @Volatile internal var cachedFontFilesVersion: Int = Int.MIN_VALUE
     @Volatile internal var cachedFontFilesAtMs: Long = 0L
     @Volatile internal var cachedFontFiles: List<File> = emptyList()
@@ -130,41 +135,39 @@ class ReaMicroSettingsHook(
 
     fun install() {
         activeInstance = this
-        if (com.reamicro.fix.core.HostSymbols.profileId == "2.3.3-b2") {
-            B2SettingsUiBridge(this).install()
-            hookFontDocumentPickerResult()
-            hookExternalSourceImportIntent()
-            hookHostAccountSignOut()
-            hookAccountSecurityScreen()
-            hookAccountSecurityColumn()
-            return
+        com.reamicro.fix.reload.ModuleResources.cleanup {
+            bookStructurePages.clear()
+            navigationPages.clear()
+            currentSettingsNavGraphScope = null
+            currentSettingsNavController = null
+            lastKnownNavGraphScope = null
+            pendingModuleSettingsRequest = false
+            moduleSettingsRequestPosted = false
+            onlineEpubPreviewHandler.removeCallbacksAndMessages(null)
+            pendingOnlineEpubPreviewRefresh = Runnable {}
+            pendingFontPickIdentity = null
+            cachedFontFilesIdentity = null
+            cachedFontFiles = emptyList()
+            synchronized(previewFontFamilyCache) { previewFontFamilyCache.clear() }
+            if (activeInstance === this) activeInstance = null
         }
-        if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-            B4SettingsUiBridge(this).install()
-            hookFontDocumentPickerResult()
-            hookExternalSourceImportIntent()
-            hookHostAccountSignOut()
-            B4AccountSecurityBridge(this).install()
-            return
+        HookRuntime.withManagementHooks {
+            HostSettingsDialogs.install(this)
+            if (!SemanticSettingsNavigation(this).install()) SemanticSettingsUiBridge(this).install()
+            hookModuleSettingsIntent()
         }
-
-        HookInstallReport.installAll(
-            FEATURE_ID,
-            listOf(
-                "stringResource" to ::hookStringResource,
-                "navGraphScope" to ::hookNavGraphScope,
-                "aboutScreen" to ::hookAboutScreen,
-                "settingsListBuilder" to ::hookSettingsListBuilder,
-                "lazyListItem" to ::hookLazyListItem,
-                "fontDocumentPickerResult" to ::hookFontDocumentPickerResult,
-                "externalSourceImportIntent" to ::hookExternalSourceImportIntent,
-                "hostAccountSignOut" to ::hookHostAccountSignOut,
-                "accountSecurityScreen" to ::hookAccountSecurityScreen,
-                "accountSecurityColumn" to ::hookAccountSecurityColumn,
-            ),
-        )
+        if (!settings.snapshot().moduleEnabled) return
+        HookInstallReport.installAll(FEATURE_ID, listOf(
+            "fontDocumentPickerResult" to ::hookFontDocumentPickerResult,
+            "externalSourceImportIntent" to ::hookExternalSourceImportIntent,
+            "hostAccountSignOut" to ::hookHostAccountSignOut,
+            "accountSecurityExtensions" to {
+                HookRuntime.withFeatureGate({ settings.snapshot().accountSwitchEntryEnabled }) {
+                    HostAccountSecurityBridge(this).install()
+                }
+            },
+        ))
     }
-
     internal inner class ReaderHighlightPreviewTextView(context: Context) : TextView(context) {
         private var previewCss: String = ""
         private var previewPath: String = ""
@@ -206,7 +209,7 @@ class ReaMicroSettingsHook(
             val assetName = previewPath.removePrefix("asset://").takeIf { it != previewPath }
             val bitmap = ReaderHighlightImageAssets.decodeBitmap(previewPath, context, LOG_PREFIX) ?: return
             previewBitmap = bitmap
-            XposedBridge.log("$LOG_PREFIX highlight preview bitmap loaded path=$previewPath size=${bitmap.width}x${bitmap.height} alpha=${bitmap.hasAlpha()}")
+            HookRuntime.log("$LOG_PREFIX highlight preview bitmap loaded path=$previewPath size=${bitmap.width}x${bitmap.height} alpha=${bitmap.hasAlpha()}")
             if (bitmap.ninePatchChunk != null) {
                 previewNinePatchDrawable = NinePatchDrawable(resources, bitmap, bitmap.ninePatchChunk, Rect(), assetName ?: File(previewPath).name)
             }
@@ -273,7 +276,7 @@ class ReaMicroSettingsHook(
         private fun logPreviewDrawOnce(key: String, message: String) {
             if (previewDrawLogKey == key) return
             previewDrawLogKey = key
-            XposedBridge.log("$LOG_PREFIX $message")
+            HookRuntime.log("$LOG_PREFIX $message")
         }
     }
 
@@ -296,59 +299,21 @@ class ReaMicroSettingsHook(
         val destructiveText: Int = palette.destructiveText
     }
 
-    @Volatile internal var injectedRouteGetter: java.lang.reflect.Method? = null
-    @Volatile internal var injectedRouteSetter: java.lang.reflect.Method? = null
-
-    internal val MODULE_CHILD_ROUTES = setOf(
-        InjectedRoute.AssociationCompletionSettings,
-        InjectedRoute.ReaderCompletionSettings,
-        InjectedRoute.BookshelfCompletionSettings,
-        InjectedRoute.CloudCompletionSettings,
-        InjectedRoute.ApiServerSettings,
-        InjectedRoute.CloudAutomationSettings,
-        InjectedRoute.LocalAutomationSettings,
-        InjectedRoute.RotationCompletionSettings,
-        InjectedRoute.OnlineCompletionSettings,
-        InjectedRoute.OnlineDownloadStyleSettings,
-        InjectedRoute.AiConfigSettings,
-        InjectedRoute.FontSettings,
-        InjectedRoute.AboutCompletion,
-        InjectedRoute.ProfileBackgroundSettings,
-    )
-
-    internal val READER_CHILD_ROUTES = setOf(
-        InjectedRoute.ReaderSelectionMenuSettings,
-        InjectedRoute.ReaderHighlightSettings,
-        InjectedRoute.ReaderHighlightConfigSettings,
-        InjectedRoute.ReaderHighlightTextSettings,
-        InjectedRoute.ReaderHighlightColorPicker,
-        InjectedRoute.FontPicker(FontPickerTarget.DialogueHighlight),
-    )
-
-    internal val AI_CHILD_ROUTES = setOf(
-        InjectedRoute.DictionarySettings,
-        InjectedRoute.DictionaryApiPicker,
-        InjectedRoute.DictionaryPresetPicker,
-        InjectedRoute.ImageSettings,
-        InjectedRoute.ImageApiPicker,
-        InjectedRoute.ImagePresetPicker(AiImagePresetTarget.Cover),
-        InjectedRoute.ImagePresetPicker(AiImagePresetTarget.Banner),
-    )
-
     companion object {
         @Volatile private var activeInstance: ReaMicroSettingsHook? = null
 
         internal fun activeInstanceOrNull(): ReaMicroSettingsHook? = activeInstance
+        internal fun prepareNavigationReload(activity: Activity) {
+            activeInstance?.navigationPages?.prepareReload(activity)
+        }
 
         fun openDiscoverPage(): Boolean =
             activeInstance?.let { hook ->
                 runCatching {
 
-                    hook.injectedRouteStack = emptyList()
-                    hook.setInjectedRouteState(null)
                     hook.openInjectedRouteViaHostNavigation(InjectedRoute.Discover)
                 }.onFailure {
-                    XposedBridge.log("$LOG_PREFIX open discover page failed: ${it.stackTraceToString()}")
+                    HookRuntime.log("$LOG_PREFIX open discover page failed: ${it.stackTraceToString()}")
                 }.getOrDefault(false)
             } ?: false
 
@@ -397,7 +362,7 @@ class ReaMicroSettingsHook(
                 )
                 true
             }?.onFailure {
-                XposedBridge.log("$LOG_PREFIX reader highlight screen entry card render failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX reader highlight screen entry card render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
         fun renderReaderHighlightScreenContainer(
@@ -415,7 +380,7 @@ class ReaMicroSettingsHook(
                 )
                 true
             }?.onFailure {
-                XposedBridge.log("$LOG_PREFIX reader highlight screen container render failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX reader highlight screen container render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
         fun addReaderHighlightScreenEntryLazyItem(
@@ -433,7 +398,7 @@ class ReaMicroSettingsHook(
                 )
                 true
             }?.onFailure {
-                XposedBridge.log("$LOG_PREFIX reader highlight screen entry lazy item failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX reader highlight screen entry lazy item failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
         fun beginHighlightScreenBuild(onClick: () -> Unit) {
@@ -461,7 +426,7 @@ class ReaMicroSettingsHook(
                 )
                 true
             }?.onFailure {
-                XposedBridge.log("$LOG_PREFIX reader highlight rules sheet render failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX reader highlight rules sheet render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
         fun readerHighlightScreenPlanValue(): Int =
@@ -480,7 +445,7 @@ class ReaMicroSettingsHook(
                 this.renderReaderHighlightScreenPlanPage(bookKey, bookTitle, composer)
                 true
             }?.onFailure {
-                XposedBridge.log("$LOG_PREFIX reader highlight plan page render failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX reader highlight plan page render failed: ${it.stackTraceToString()}")
             }?.getOrDefault(false) ?: false
 
     }

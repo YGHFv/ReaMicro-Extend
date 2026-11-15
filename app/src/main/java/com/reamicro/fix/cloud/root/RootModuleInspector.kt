@@ -26,6 +26,7 @@ internal object RootModuleInspector {
         }
         return RootModuleStatus(
             rootAvailable = true, access = access,
+            safeMode = fields["safeMode"] == "1",
             installed = fields["installed"] == "1",
             statePresent = fields["state"] == "1",
             ready = fields["ready"] == "1",
@@ -58,6 +59,8 @@ internal object RootModuleInspector {
         state='${RootTaskRepository.STATE_DIRECTORY}'
         staged='${RootModuleManager.UPDATE_DIRECTORY}'
         [ ! -L "${'$'}module" ] && [ ! -L "${'$'}staged" ] || exit 73
+        if [ "${'$'}(getprop persist.sys.safemode 2>/dev/null)" = 1 ] ||
+           [ "${'$'}(getprop ro.sys.safemode 2>/dev/null)" = 1 ]; then echo safeMode=1; fi
         [ -d "${'$'}staged" ] && echo stagedPresent=1
         [ -f "${'$'}staged/disable" ] && echo stagedDisabled=1
         [ -f "${'$'}staged/remove" ] && echo stagedRemoval=1
@@ -77,15 +80,21 @@ internal object RootModuleInspector {
         complete_module() {
             [ "${'$'}(sed -n 's/^id=//p' "${'$'}1/module.prop" 2>/dev/null)" = reamicro_automation ] || return 1
             for part in module.prop common.sh action.sh runner.sh service.sh watchdog.sh lifecycle.sh stop.sh uninstall.sh; do
-                [ -s "${'$'}1/${'$'}part" ] || return 1
+                [ -f "${'$'}1/${'$'}part" ] && [ -s "${'$'}1/${'$'}part" ] &&
+                    [ -r "${'$'}1/${'$'}part" ] && [ ! -L "${'$'}1/${'$'}part" ] || return 1
+            done
+            for part in action.sh runner.sh service.sh watchdog.sh stop.sh uninstall.sh; do
+                [ -x "${'$'}1/${'$'}part" ] || return 1
             done
             if [ "${'$'}(module_version "${'$'}1")" -ge 10 ]; then
                 [ -f "${'$'}1/bin/wake-timer" ] && [ -s "${'$'}1/bin/wake-timer" ] &&
                     [ -x "${'$'}1/bin/wake-timer" ] && [ ! -L "${'$'}1/bin/wake-timer" ] || return 1
             fi
         }
-        complete_module "${'$'}staged" && echo stagedReady=1
-        complete_module "${'$'}module" && [ -x "${'$'}module/runner.sh" ] && [ -x "${'$'}module/action.sh" ] && echo ready=1
+        staged_version=${'$'}(sed -n 's/^versionCode=//p' "${'$'}staged/module.prop" 2>/dev/null | head -n 1)
+        [ "${'$'}(module_version "${'$'}staged")" = "${'$'}staged_version" ] &&
+            complete_module "${'$'}staged" && echo stagedReady=1
+        complete_module "${'$'}module" && echo ready=1
         version=${'$'}(module_version "${'$'}module")
         printf 'version=%s\n' "${'$'}version"
         printf 'staged='; sed -n 's/^versionCode=//p' "${'$'}staged/module.prop" 2>/dev/null | head -n 1; echo

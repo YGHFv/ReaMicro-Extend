@@ -1,14 +1,5 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostStaticMethod
-import com.reamicro.fix.core.HostDexKit
-
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.typeMatches
-
-
 import com.reamicro.fix.hook.WebDavDriveHook.OnlineChapterBatchSession
 
 import android.app.Notification
@@ -16,10 +7,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
 import android.os.Looper
 import android.os.Build
-import android.widget.Toast
 import com.reamicro.fix.R
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
@@ -33,6 +22,8 @@ import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceScriptCompat
 import com.reamicro.fix.online.OnlineSourceStore
+import com.reamicro.fix.online.OnlineParserMode
+import com.reamicro.fix.online.forTarget
 import com.reamicro.fix.online.OnlineSourceTrxsCompat
 import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
 import com.reamicro.fix.notification.onlineCompletionDownloadBigText
@@ -59,10 +50,10 @@ import com.reamicro.fix.online.download.OnlineChapterContentValidator
 import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
 import com.reamicro.fix.online.download.onlineChapterUpdateMessage
 import com.reamicro.fix.online.download.OnlineChapterUpdateOutcome
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -83,22 +74,19 @@ import com.reamicro.fix.online.epub.onlineContentOpf
 import com.reamicro.fix.online.epub.existingOnlineChapterImageHrefs
 import com.reamicro.fix.online.epub.chapterXhtml
 import com.reamicro.fix.online.epub.onlineBookUuid
-import com.reamicro.fix.online.epub.onlineImportedBookBackupId
 import com.reamicro.fix.online.download.orphanProfileBackgroundFiles
 import com.reamicro.fix.online.download.paragraphCommentCacheDir
 import com.reamicro.fix.online.download.staleTopLevelImportCacheDirs
 import com.reamicro.fix.online.download.deleteCachePath
 import com.reamicro.fix.online.download.nativeCloudDownloadKey
-import com.reamicro.fix.online.download.cancelOnlineCompletionHostNotification
 import com.reamicro.fix.online.download.cleanupOnlineCompletionDownloadTask
-import com.reamicro.fix.online.download.cancelOnlineCompletionNotification
 import com.reamicro.fix.online.download.writeOnlineCompletionFailedChapters
 import com.reamicro.fix.online.download.onlineCompletionFailedChapter
 import com.reamicro.fix.online.download.sleepOnlineCompletionRetryDelay
 import com.reamicro.fix.online.download.onlineCompletionRetryDelayMs
 import com.reamicro.fix.online.download.throwIfOnlineCompletionDownloadCancelled
+import com.reamicro.fix.online.download.withOnlineCompletionTaskLock
 import com.reamicro.fix.online.download.onlineCompletionOnDemandPendingChapter
-import com.reamicro.fix.online.download.onlineCompletionPendingChapter
 import com.reamicro.fix.online.download.fanqieContentBody
 import com.reamicro.fix.online.download.evaluateOnlineChapterUrlJs
 import com.reamicro.fix.online.download.normalizeOnlineChapterText
@@ -107,19 +95,21 @@ import com.reamicro.fix.online.download.writeOnlineCompletionTextAtomically
 import com.reamicro.fix.online.download.writeOnlineCompletionChapterIndex
 import com.reamicro.fix.online.download.unzipOnlineCompletionEpub
 import com.reamicro.fix.online.download.findImportBookMethod
+import com.reamicro.fix.reload.TaskCancellation
 import com.reamicro.fix.logging.logWebDav
 
 internal fun WebDavDriveHook.cleanupStartupCacheIfNeeded(context: Context) {
     ensureOnlineCompletionCancelReceiver(context)
     if (!settingsProvider().canRunStartupCacheCleanup) return
     if (!startupCacheCleanupStarted.compareAndSet(false, true)) return
+    val cutoff = System.currentTimeMillis() - STALE_IMPORT_CACHE_MIN_AGE_MS
     com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).postDelayed({
         com.reamicro.fix.reload.ModuleResources.thread({
             runCatching {
                 val appContext = context.applicationContext ?: context
                 val cacheDir = appContext.cacheDir
                 val filesDir = appContext.filesDir
-                val targets = listOf(
+                val cacheRoots = listOf(
                     File(cacheDir, "downloads"),
                     File(cacheDir, "reamicro-webdav"),
                     File(cacheDir, "reamicro-local-library"),
@@ -129,13 +119,16 @@ internal fun WebDavDriveHook.cleanupStartupCacheIfNeeded(context: Context) {
                     File(cacheDir, COVER_STAGE_CACHE_DIR),
 
                     paragraphCommentCacheDir(filesDir),
-                ) + staleTopLevelImportCacheDirs(cacheDir) +
+                )
+                // Keep aggregate roots and recent work. New tasks can appear after this snapshot.
+                val targets = cacheRoots.flatMap { it.listFiles()?.toList().orEmpty() } +
+                    staleTopLevelImportCacheDirs(cacheDir) +
                     orphanProfileBackgroundFiles(filesDir, settingsProvider().profileBackgroundImage)
                 var deletedFiles = 0
                 var deletedBytes = 0L
                 targets.forEach { target ->
                     if (!target.exists()) return@forEach
-                    if (isActiveOnlineCompletionCacheDir(target)) return@forEach
+                    if (target.lastModified() !in 1 until cutoff || isActiveDownloadCacheDir(target)) return@forEach
                     val stat = CacheDeleteStat()
                     deleteCachePath(target, stat)
                     deletedFiles += stat.files
@@ -143,21 +136,24 @@ internal fun WebDavDriveHook.cleanupStartupCacheIfNeeded(context: Context) {
                 }
                 logWebDav("startup cache cleanup files=$deletedFiles bytes=$deletedBytes")
             }.onFailure {
-                XposedBridge.log("$LOG_PREFIX startup cache cleanup failed: ${it.stackTraceToString()}")
+                HookRuntime.log("$LOG_PREFIX startup cache cleanup failed: ${it.stackTraceToString()}")
             }
         }, "ReaMicroCacheCleanup").start()
     }, STARTUP_CACHE_CLEANUP_DELAY_MS)
 }
 
-internal fun WebDavDriveHook.isActiveOnlineCompletionCacheDir(target: File): Boolean {
-    val activeDirs = onlineCompletionRunningDownloads.values
-        .map { it.cacheDir.absoluteFile }
-        .toList()
+internal fun WebDavDriveHook.isActiveDownloadCacheDir(target: File): Boolean {
+    val activeDirs = onlineCompletionRunningDownloads.values.map { it.cacheDir } +
+        runningNativeCloudDownloads.values.map { it.cacheDir } +
+        runningWebDavDownloads.values.map { it.localFile } +
+        pendingWebDavImports.values.map { it.localFile } +
+        ImportCompletionState.activeFiles() + onlineCompletionUpdateCacheDirs.values
     if (activeDirs.isEmpty()) return false
     val canonicalTarget = runCatching { target.canonicalFile }.getOrDefault(target.absoluteFile)
     return activeDirs.any { active ->
         val canonicalActive = runCatching { active.canonicalFile }.getOrDefault(active.absoluteFile)
-        canonicalActive == canonicalTarget || isChildPath(canonicalActive, canonicalTarget)
+        canonicalActive == canonicalTarget || isChildPath(canonicalActive, canonicalTarget) ||
+            isChildPath(canonicalTarget, canonicalActive)
     }
 }
 
@@ -185,20 +181,26 @@ internal fun WebDavDriveHook.tryHandleRunningNativeCloudDownloadTap(book: Any, t
         showToast("\u518d\u70b9\u4e00\u6b21\u53d6\u6d88\u4e0b\u8f7d")
         return true
     }
-    token.cancelRequested = true
-    cancelTrackedWork(token.tracker, token.id)
-    deleteCachePath(token.cacheDir, CacheDeleteStat())
+    val trackerLock = com.reamicro.fix.core.HostWorkBindings.requireCurrent().trackerLock(token.tracker)
+    trackerLock.lock()
+    try {
+        token.cancelRequested = true
+        cancelTrackedWork(token.tracker, token.id)
+    } finally {
+        trackerLock.unlock()
+    }
+    // The native worker owns these files until its completion callback releases them.
     webDavDownloadCancelPrompts.remove(token.id)
-    showToast("\u5df2\u53d6\u6d88\u4e0b\u8f7d\u5e76\u6e05\u7406\u7f13\u5b58")
+    showToast("已请求取消下载")
     logWebDav("native download cancel requested type=$type name=$name id=${token.id}")
     return true
 }
 
 internal fun WebDavDriveHook.registerNativeCloudDownload(workerManager: Any?, book: Any, handle: Any, type: Int) {
-    val id = handle.callString("getId")
+    val id = com.reamicro.fix.core.HostWorkBindings.requireCurrent().handleId(handle)
     if (id.isBlank()) return
     val tracker = runCatching {
-        workerManager?.javaClass?.getDeclaredField("tracker")?.apply { isAccessible = true }?.get(workerManager)
+        workerManager?.let { com.reamicro.fix.core.HostWorkBindings.requireCurrent().tracker(it) }
     }.getOrNull() ?: workTrackerRef?.get() ?: return
     rememberWorkerManager(workerManager)
     val cacheDir = File(currentContext()?.cacheDir ?: File("/data/local/tmp"), "downloads/$id")
@@ -222,22 +224,35 @@ internal fun WebDavDriveHook.unregisterNativeCloudDownload(token: NativeCloudDow
     webDavDownloadCancelPrompts.remove(token.id)
 }
 
-internal fun WebDavDriveHook.requestOnlineCompletionDownloadCancel(context: Context, notificationId: Int, key: String) {
-    val task = onlineCompletionRunningDownloadsByNotificationId[notificationId]
-        ?: key.takeIf { it.isNotBlank() }?.let { onlineCompletionRunningDownloads[it] }
-    if (task == null) {
-        cancelOnlineCompletionHostNotification(context, notificationId)
-        logWebDav("online completion cancel ignored missing task id=$notificationId key=$key")
+internal fun WebDavDriveHook.requestOnlineCompletionDownloadCancel(context: Context, notificationId: Int, key: String) =
+    requestOnlineCompletionDownloadStop(context, notificationId, key, pause = false)
+
+internal fun WebDavDriveHook.requestOnlineCompletionDownloadPause(context: Context, notificationId: Int, key: String) =
+    requestOnlineCompletionDownloadStop(context, notificationId, key, pause = true)
+
+private fun WebDavDriveHook.requestOnlineCompletionDownloadStop(
+    context: Context, notificationId: Int, key: String, pause: Boolean,
+) {
+    val task = onlineCompletionRunningDownloadsByNotificationId[notificationId]?.takeIf { it.key == key }
+    val updateKey = key.takeIf { it.startsWith("update:") }?.removePrefix("update:")
+    val control = task?.control ?: updateKey?.takeIf {
+        onlineCompletionUpdateNotificationIds[it] == notificationId
+    }?.let { onlineCompletionUpdateControls[it] }
+    if (control == null) {
+        logWebDav("online completion stale stop ignored id=$notificationId")
         return
     }
-    task.cancelRequested = true
-    task.thread?.interrupt()
-    cancelOnlineCompletionTrackedWork(task)
-    cleanupOnlineCompletionDownloadTask(task)
-    onlineCompletionRunningDownloads.remove(task.key, task)
-    onlineCompletionRunningDownloadsByNotificationId.remove(task.notificationId, task)
-    cancelOnlineCompletionNotification(context, task.notificationId, task.key)
-    logWebDav("online completion cancel requested id=${task.notificationId} book=${task.name}")
+    val result = if (pause) control.requestPause() else control.requestCancel()
+    val text = when (result) {
+        com.reamicro.fix.online.download.OnlineDownloadControl.RequestResult.ACCEPTED -> {
+            if (!pause) task?.cancelRequested = true
+            if (pause) "正在暂停，保存已完成章节" else "正在取消，清理本次缓存"
+        }
+        com.reamicro.fix.online.download.OnlineDownloadControl.RequestResult.TOO_LATE -> "正在完成导入，提交后不能取消"
+        else -> return
+    }
+    onlineCompletionProgressNotifiers[notificationId]?.running(0, text, force = true)
+    logWebDav("online completion stop requested id=$notificationId pause=$pause result=$result")
 }
 
 internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImportedBookSourceInfo? {
@@ -262,8 +277,9 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
         onlineSourceIdFromEncodedValue(backupId),
         onlineSourceIdFromUuid(uuid),
     ).filter { it.isNotBlank() }.distinct()
-    val sourceById = sources.firstOrNull { source ->
-        sourceIdCandidates.any { candidate -> OnlineSourceStore.matchesIdentity(source, candidate) }
+    val identityCandidates = if (epubMetadata.sourceId.isNotBlank()) listOf(epubMetadata.sourceId) else sourceIdCandidates
+    val sourceById = identityCandidates.firstNotNullOfOrNull { candidate ->
+        sources.firstOrNull { source -> OnlineSourceStore.matchesIdentity(source, candidate) }
     }
     val sourceByPublisher = sources.firstOrNull { source ->
         source.name == publisher || source.id == publisher
@@ -271,10 +287,10 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
     val sourceByMetadataName = sources.firstOrNull { source ->
         source.name == epubMetadata.sourceName
     }
-    val detailUrl = onlineCompletionQueryParameter(backupId, "detail")
-        .ifBlank { epubMetadata.detailUrl }
+    val detailUrl = epubMetadata.detailUrl
+        .ifBlank { onlineCompletionQueryParameter(backupId, "detail") }
         .ifBlank { uri.takeIf { it.startsWith("http", ignoreCase = true) }.orEmpty() }
-    val source = sourceById ?: sourceByMetadataName ?: sourceByPublisher
+    val source = sourceById ?: if (epubMetadata.sourceId.isBlank()) sourceByMetadataName ?: sourceByPublisher else null
     val sourceId = source?.id
         ?: epubMetadata.sourceId
             .ifBlank { sourceIdCandidates.firstOrNull { it.startsWith("online_") }.orEmpty() }
@@ -285,8 +301,8 @@ internal fun WebDavDriveHook.onlineImportedBookSourceInfo(book: Any): OnlineImpo
             detailUrl.isNotBlank())
     if (!hasOnlineCompletionMarker) return null
     val sourceName = source?.name.orEmpty()
-        .ifBlank { onlineCompletionQueryParameter(backupId, "name") }
         .ifBlank { epubMetadata.sourceName }
+        .ifBlank { onlineCompletionQueryParameter(backupId, "name") }
         .ifBlank { publisher.takeUnless(::isPathLikeOnlineSourceName).orEmpty() }
         .ifBlank { sourceId }
     return OnlineImportedBookSourceInfo(
@@ -302,9 +318,16 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
     info: OnlineImportedBookSourceInfo,
     silent: Boolean = false,
     skipCompleted: Boolean = false,
+    parentControl: com.reamicro.fix.online.download.OnlineDownloadControl? = null,
+    onProgress: ((Int, String) -> Unit)? = null,
     onComplete: ((OnlineChapterUpdateOutcome) -> Unit)? = null,
 ) {
+    val execution = storageExecutionGeneration.get()
     val title = book.callString("getTitle").ifBlank { "未命名图书" }
+    if (storageClosed || !settingsProvider().moduleEnabled) {
+        onComplete?.invoke(OnlineChapterUpdateOutcome(title, error = "章节更新已停止"))
+        return
+    }
     fun reject(message: String) {
         if (!silent) showToast(message)
         onComplete?.invoke(OnlineChapterUpdateOutcome(title, error = message))
@@ -315,7 +338,12 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
         return
     }
     val appContext = context.applicationContext ?: context
-    val source = (info.source ?: OnlineSourceStore.list(appContext).firstOrNull { source ->
+    val storageIdentity = AccountHostRuntime.storageSnapshot(activityProvider())
+    if (storageIdentity == null || book.callLong("getUid") != storageIdentity.accountId) {
+        reject("账号状态正在变化，请稍后重新更新")
+        return
+    }
+    val source = (OnlineSourceStore.list(appContext).firstOrNull { source ->
         OnlineSourceStore.matchesIdentity(source, info.sourceId)
     })?.let { OnlineSourceDownloadPolicyStore.attach(appContext, it) }
     if (source == null) {
@@ -332,66 +360,152 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
         reject("缺少在线源详情地址，无法更新章节")
         return
     }
-    val key = "${book.callString("getUuid")}|${source.id}|$detailUrl"
-    if (onlineCompletionRunningUpdates.putIfAbsent(key, true) == true) {
+    val key = "${storageIdentity.accountId}:${storageIdentity.generation}|${book.callLong("getId")}|${book.callString("getUuid")}"
+    val cancellation = if (parentControl != null) TaskCancellation() else TaskCancellation.current()?.child() ?: TaskCancellation()
+    val control = com.reamicro.fix.online.download.OnlineDownloadControl(cancellation)
+    if (onlineCompletionRunningUpdates.putIfAbsent(key, cancellation) != null) {
+        cancellation.cancel()
         reject("正在更新：$title")
         return
     }
-    val notificationId = onlineCompletionNotificationIds.incrementAndGet()
-    val tracker = currentWorkTracker()
-    val workId = tracker?.let { createOnlineCompletionTrackedTask(it, "$title 更新") }
-    val progressNotifier = OnlineCompletionProgressNotifier(
-        context = appContext,
-        notificationId = notificationId,
-        notificationKey = "update:$key",
-        cancellable = false,
-        bookName = title,
-        tracker = tracker,
-        workId = workId,
-        notificationsEnabled = !silent,
-    )
-    progressNotifier.running(0, "准备更新", force = true)
-    if (!silent) showToast("开始检查更新：$title")
-    com.reamicro.fix.reload.ModuleResources.thread({
-        val outcome = runCatching {
-            val latest = findLocalBookByUuid(book.callLong("getUid"), book.callString("getUuid")) ?: book
-            val target = OnlineDownloadTarget(
-                source = source,
-                query = title,
-                result = OnlineBookSearchResult(
-                    sourceName = source.name,
-                    name = title,
-                    author = latest.callString("getAuthor").ifBlank { book.callString("getAuthor") },
-                    coverUrl = latest.callString("getCover").ifBlank { book.callString("getCover") },
-                    detailUrl = detailUrl,
-                    intro = "",
-                ),
-            )
-            val result = updateOnlineCompletionBookIncrementally(
-                book = latest,
-                target = target,
-                skipCompleted = skipCompleted,
-                onProgress = { progress, message ->
-                    progressNotifier.running(progress, message)
-                },
-            )
-            val message = onlineChapterUpdateMessage(result.added, result.failed, result.retried, result.styled)
-            progressNotifier.finish(message, detailUrl, success = true)
-            if (!silent) com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                Toast.makeText(appContext, "$message：$title", Toast.LENGTH_SHORT).show()
+    onlineCompletionUpdateControls[key] = control
+    val parentStop = parentControl?.let(control::attachParent)
+    val sourceRegistration = OnlineSourceStore.observeChanges {
+        if (!OnlineSourceStore.isCurrent(source)) cancellation.cancel()
+    }
+    val parserGeneration = com.reamicro.fix.online.OnlineParserMode.generation
+    val parserRegistration = com.reamicro.fix.online.OnlineParserMode.observeChanges {
+        if (com.reamicro.fix.online.OnlineParserMode.generation != parserGeneration) cancellation.cancel()
+    }
+    val completed = java.util.concurrent.atomic.AtomicBoolean()
+    var interruptRegistration: AutoCloseable? = null
+    val notificationFailureReported = java.util.concurrent.atomic.AtomicBoolean()
+    var progressNotifier: WebDavDriveHook.OnlineCompletionProgressNotifier? = null
+    fun complete(outcome: OnlineChapterUpdateOutcome) {
+        if (!completed.compareAndSet(false, true)) return
+        onlineCompletionRunningUpdates.remove(key, cancellation)
+        onlineCompletionUpdateControls.remove(key, control)
+        onlineCompletionUpdateNotificationIds.remove(key)?.let { onlineCompletionProgressNotifiers.remove(it) }
+        sourceRegistration.close()
+        parserRegistration.close()
+        interruptRegistration?.close()
+        parentStop?.close()
+        control.finish()
+        cancellation.cancel()
+        runCatching { onComplete?.invoke(outcome) }
+            .onFailure { HookRuntime.logError("$LOG_PREFIX online update completion callback failed", it) }
+    }
+    fun notifySafely(action: () -> Unit) {
+        runCatching(action).onFailure {
+            if (notificationFailureReported.compareAndSet(false, true)) {
+                HookRuntime.logError("$LOG_PREFIX online update progress notification failed", it)
             }
-            OnlineChapterUpdateOutcome(title, result.added, result.failed, result.retried, skipped = result.skipped)
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX online completion update failed: ${it.stackTraceToString()}")
-            progressNotifier.finish(it.message ?: "章节更新失败", null, success = false)
-            if (!silent) com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                Toast.makeText(appContext, "章节更新失败：${it.message ?: title}", Toast.LENGTH_SHORT).show()
-            }
-        }.also {
-            onlineCompletionRunningUpdates.remove(key)
         }
-        onComplete?.invoke(outcome.getOrElse { OnlineChapterUpdateOutcome(title, error = it.message ?: "章节更新失败") })
-    }, "ReaMicroOnlineCompletionUpdate").start()
+    }
+    fun reportFailure(error: Throwable) {
+        if (error is InterruptedException) Thread.currentThread().interrupt()
+        HookRuntime.logError("$LOG_PREFIX online completion update failed", error)
+        notifySafely {
+            progressNotifier?.finish(error.message ?: "章节更新失败", null, success = false)
+            if (!silent) showToast("章节更新失败：${error.message ?: title}")
+        }
+    }
+    try {
+        ensureOnlineCompletionCancelReceiver(appContext)
+        val tracker = currentWorkTracker()
+        val workId = tracker?.let { createOnlineCompletionTrackedTask(it, "$title 更新") }
+        val notificationId = onlineCompletionNotificationIds.incrementAndGet()
+        onlineCompletionUpdateNotificationIds[key] = notificationId
+        val notifier = OnlineCompletionProgressNotifier(
+            context = appContext,
+            notificationId = notificationId,
+            notificationKey = "update:$key",
+            cancellable = true,
+            bookName = title,
+            tracker = tracker,
+            workId = workId,
+            notificationsEnabled = !silent,
+        )
+        progressNotifier = notifier
+        notifySafely {
+            notifier.running(0, "准备更新", force = true)
+            if (!silent) showToast("开始检查更新：$title")
+        }
+        val thread = com.reamicro.fix.reload.ModuleResources.thread({
+            var outcome = OnlineChapterUpdateOutcome(title, error = "章节更新未完成")
+            try {
+                cancellation.run {
+                fun checkCurrent() {
+                    cancellation.check()
+                    com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserGeneration)
+                    OnlineSourceStore.requireCurrent(source)
+                    check(!storageClosed && settingsProvider().moduleEnabled &&
+                        execution == storageExecutionGeneration.get() &&
+                        AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider())) {
+                        "账号或模块状态已变化，已停止章节更新"
+                    }
+                }
+                val latest = findLocalBookById(book.callLong("getId"), storageIdentity, checkCurrent = ::checkCurrent)
+                    ?.takeIf { it.callString("getUuid") == book.callString("getUuid") }
+                    ?: error("图书记录已变化，已停止章节更新")
+                val target = OnlineDownloadTarget(
+                    source = source,
+                    query = title,
+                    result = OnlineBookSearchResult(
+                        sourceName = source.name,
+                        name = title,
+                        author = latest.callString("getAuthor").ifBlank { book.callString("getAuthor") },
+                        coverUrl = latest.callString("getCover").ifBlank { book.callString("getCover") },
+                        detailUrl = detailUrl,
+                        intro = "",
+                    ),
+                )
+                val result = updateOnlineCompletionBookIncrementally(
+                    book = latest,
+                    target = target,
+                    skipCompleted = skipCompleted,
+                    storageIdentity = storageIdentity,
+                    control = control,
+                    onProgress = { progress, message ->
+                        notifySafely {
+                            notifier.running(progress, message)
+                            onProgress?.invoke(progress.coerceIn(0, 99), message)
+                        }
+                    },
+                )
+                outcome = OnlineChapterUpdateOutcome(title, result.added, result.failed, result.retried,
+                    skipped = result.skipped, paused = result.paused, pending = result.pending)
+                val message = if (result.paused) {
+                    "已暂停，已保存 ${result.added + result.retried} 章，可长按更新继续"
+                } else if (result.pending > 0) {
+                    "已保存 ${result.added + result.retried} 章，剩余 ${result.pending} 章待下载${onlineCompletionFailureSuffix(result.failed)}"
+                } else onlineChapterUpdateMessage(result.added, result.failed, result.retried, result.styled)
+                notifySafely {
+                    notifier.finish(message, detailUrl, success = true)
+                    if (!silent && !cancellation.isCancelled) showToast("$message：$title")
+                }
+                }
+            } catch (error: Throwable) {
+                outcome = OnlineChapterUpdateOutcome(title, error = error.message ?: "章节更新失败")
+                if (error is java.util.concurrent.CancellationException || cancellation.isCancelled) {
+                    val message = if (control.shouldPause && !control.isCancelled) "更新已暂停，未新增完整章节" else "更新已取消，本次未提交修改已清理"
+                    notifySafely { notifier.finish(message, null, success = false) }
+                } else reportFailure(error)
+            } finally {
+                complete(outcome)
+            }
+        }, "ReaMicroOnlineCompletionUpdate")
+        val networkInterrupt = control.networkCancellation.register(thread::interrupt)
+        val lifetimeInterrupt = cancellation.register(thread::interrupt)
+        interruptRegistration = AutoCloseable { networkInterrupt.close(); lifetimeInterrupt.close() }
+        thread.start()
+    } catch (error: Throwable) {
+        try {
+            reportFailure(error)
+        } finally {
+            complete(OnlineChapterUpdateOutcome(title, error = error.message ?: "章节更新失败"))
+        }
+    }
 }
 
 internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
@@ -401,8 +515,11 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
     failures: List<OnlineFailedChapter>,
     chapterHrefs: List<String>,
     maxChapterAttempts: Int? = null,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
     onProgress: (Int, String) -> Unit,
 ): OnlineFailedRetryResult {
+    checkCurrent()
     if (failures.isEmpty()) return OnlineFailedRetryResult(0, 0, false, 0)
     val remoteChapters = tocSnapshot.chapters
     val candidates = failures
@@ -410,7 +527,7 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
         .distinctBy { it.index }
         .let { values -> maxChapterAttempts?.let { values.take(it.coerceAtLeast(0)) } ?: values }
     if (candidates.isEmpty()) {
-        writeOnlineCompletionFailedChapters(bookDir, target, failures)
+        writeOnlineCompletionFailedChapters(bookDir, target, failures, commit = commit, checkCurrent = checkCurrent)
         return OnlineFailedRetryResult(0, failures.size, false, 0)
     }
     logWebDav(
@@ -429,6 +546,7 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
     val batchSession = onlineChapterBatchSession(target, remoteChapters, candidates.map { it.index })
 
     fun attemptLoggedChapter(index: Int, immediateRetry: Boolean): Boolean {
+        checkCurrent()
         val chapter = remoteChapters[index]
         dailyLimitMessage?.let { message ->
             nonRetryable.add(index)
@@ -453,6 +571,7 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
             val localAttempt = roundAttemptsByIndex[index] ?: 0
             val totalAttempts = (initialAttempts[index] ?: 0) + localAttempt
             runCatching {
+                checkCurrent()
                 downloadOnlineChapter(
                     target,
                     tocSnapshot.detail.url,
@@ -468,6 +587,8 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
                     chapter = chapterContent,
                     href = chapterHrefs.getOrNull(index).orEmpty(),
                     target = target,
+                    commit = commit,
+                    checkCurrent = checkCurrent,
                 )
                 failed.remove(index)
                 remaining.remove(index)
@@ -488,6 +609,8 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
                 )
                 return true
             }.onFailure { error ->
+                TaskCancellation.rethrowIfCancelled(error)
+                checkCurrent()
                 val message = error.message.orEmpty().ifBlank { error.javaClass.name }
                 if (error is OnlineSourceDailyLimitException) {
                     dailyLimitMessage = message
@@ -550,7 +673,7 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
     }
     val unresolved = remaining.values.sortedBy { it.index }
     logOnlineCompletionFinalFailures(target, unresolved.filter { it.index in failed }, "update-retry")
-    writeOnlineCompletionFailedChapters(bookDir, target, unresolved)
+    writeOnlineCompletionFailedChapters(bookDir, target, unresolved, commit = commit, checkCurrent = checkCurrent)
     return OnlineFailedRetryResult(
         retried = successCount,
         failed = unresolved.size,
@@ -560,6 +683,7 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
 }
 
 internal fun WebDavDriveHook.showOnlineCompletionDownloadModeDialog(target: OnlineDownloadTarget) {
+    if (storageClosed || !settingsProvider().moduleEnabled) return
     val context = currentContext()
     if (context == null) {
         showToast("无法启动在线补全下载：缺少 Context")
@@ -575,22 +699,41 @@ internal fun WebDavDriveHook.showOnlineCompletionDownloadModeDialog(target: Onli
 }
 
 internal fun WebDavDriveHook.startOnlineCompletionDownload(
-    target: OnlineDownloadTarget,
+    selection: OnlineDownloadTarget,
     mode: OnlineBookDownloadMode = OnlineBookDownloadMode.FULL,
 ) {
+    // Each invocation owns its parser session and disk cache, including parallel mode choices.
+    val target = selection.copy()
+    val execution = storageExecutionGeneration.get()
+    if (storageClosed || !settingsProvider().moduleEnabled) return
     val context = currentContext()
     if (context == null) {
         showToast("无法启动在线补全下载：缺少 Context")
         return
     }
     val appContext = context.applicationContext ?: context
+    val storageIdentity = AccountHostRuntime.storageSnapshot(activityProvider())
+    if (storageIdentity == null) {
+        showToast("账号状态正在变化，请稍后重新下载")
+        return
+    }
     target.source = OnlineSourceDownloadPolicyStore.attach(appContext, target.source)
+    val parserMode = try {
+        OnlineParserMode.forTarget(target)
+    } catch (error: java.util.concurrent.CancellationException) {
+        showToast(error.message ?: "解析方式已切换，请重新搜索")
+        return
+    }
+    if (!OnlineSourceStore.isCurrent(target.source)) {
+        showToast("在线源已更新或删除，请重新搜索后下载")
+        return
+    }
     if (OnlineSourceDownloadPolicyStore.remainingToday(appContext, target.source) == 0) {
         showToast(OnlineSourceDownloadPolicyStore.limitReachedMessage(target.source))
         return
     }
     ensureOnlineCompletionCancelReceiver(appContext)
-    val key = "${target.source.id}|${target.result.detailUrl}|${target.result.name}|${mode.name}"
+    val key = "${storageIdentity.accountId}:${storageIdentity.generation}|${target.source.id}|${target.result.detailUrl}|${target.result.name}|${mode.name}"
     if (onlineCompletionRunningDownloads.containsKey(key)) {
         showToast("正在下载：${target.result.name}")
         return
@@ -603,12 +746,17 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
         "$ONLINE_COMPLETION_CACHE_ROOT/${System.currentTimeMillis()}_${UUID.randomUUID()}",
     )
     val task = OnlineCompletionDownloadTask(
+        storageIdentity = storageIdentity,
         notificationId = notificationId,
         key = key,
         name = target.result.name,
         cacheDir = cacheDir,
         tracker = tracker,
         workId = workId,
+        checkActive = { !storageClosed && settingsProvider().moduleEnabled &&
+            execution == storageExecutionGeneration.get() &&
+            com.reamicro.fix.reload.ModuleResources.accepting && OnlineSourceStore.isCurrent(target.source) &&
+            com.reamicro.fix.online.OnlineParserMode.generation == parserMode.generation },
     )
     if (onlineCompletionRunningDownloads.putIfAbsent(key, task) != null) {
         cancelOnlineCompletionTrackedWork(task)
@@ -616,6 +764,13 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
         return
     }
     onlineCompletionRunningDownloadsByNotificationId[notificationId] = task
+    target.imageCache = com.reamicro.fix.online.download.OnlineChapterImageCache(File(cacheDir, "images"))
+    val sourceRegistration = OnlineSourceStore.observeChanges {
+        if (!OnlineSourceStore.isCurrent(target.source)) task.cancellation.cancel()
+    }
+    val parserRegistration = com.reamicro.fix.online.OnlineParserMode.observeChanges {
+        if (com.reamicro.fix.online.OnlineParserMode.generation != parserMode.generation) task.cancellation.cancel()
+    }
     val modeLabel = if (mode == OnlineBookDownloadMode.ON_DEMAND) "逐章加载" else "整本下载"
     showToast("已开始$modeLabel：${target.result.name}")
     logWebDav(
@@ -635,160 +790,134 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
     if (!notificationReady) {
         showToast("阅微通知权限未开启，下载继续在后台进行")
     }
-    val thread = com.reamicro.fix.reload.ModuleResources.thread({
-        var partialImportThread: Thread? = null
-        runCatching {
-            throwIfOnlineCompletionDownloadCancelled(task)
+    val lifetime = com.reamicro.fix.online.download.OnlineDownloadLifetime {
+        sourceRegistration.close()
+        parserRegistration.close()
+        cleanupOnlineCompletionDownloadTask(task)
+        target.imageCache = null
+        onlineCompletionRunningDownloads.remove(key, task)
+        onlineCompletionRunningDownloadsByNotificationId.remove(notificationId, task)
+        onlineCompletionProgressNotifiers.remove(notificationId, progressNotifier)
+    }
+    try {
+        val thread = com.reamicro.fix.reload.ModuleResources.thread({
             val localFile = File(task.cacheDir, "${safeOnlineFileName(target.result.name)}.epub")
-            task.cacheDir.mkdirs()
-            if (mode == OnlineBookDownloadMode.ON_DEMAND) {
-                val importResult = downloadOnlineCompletionOnDemandBook(
-                    target = target,
-                    outputFile = localFile,
-                    task = task,
-                    onProgress = { progress, message ->
-                        throwIfOnlineCompletionDownloadCancelled(task)
-                        progressNotifier.running(progress, message)
-                    },
-                )
-                task.importedBookDir = importResult.bookDir
-                throwIfOnlineCompletionDownloadCancelled(task)
-                progressNotifier.finish("已导入逐章加载书籍", target.result.detailUrl, success = true)
-                logWebDav(
-                    "online completion on-demand ready file=${localFile.absolutePath} " +
-                        "size=${localFile.length()} importedDir=${importResult.bookDir}",
-                )
-                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                    Toast.makeText(appContext, "已导入逐章加载：${target.result.name}", Toast.LENGTH_SHORT).show()
-                }
-                cleanupOnlineCompletionDownloadTask(task)
-                return@runCatching
-            }
-            downloadOnlineCompletionBook(
-                target = target,
-                outputFile = localFile,
-                task = task,
-                onProgress = { progress, message ->
+            try {
+                task.cacheDir.mkdirs()
+                val failedChapters = task.networkCancellation.run {
                     throwIfOnlineCompletionDownloadCancelled(task)
-                    val displayedProgress = if (task.importedBookDir != null && progress < 50) 50 else progress
-                    progressNotifier.running(displayedProgress, message)
-                },
-                onPartialReady = { partialFile, count ->
-                    throwIfOnlineCompletionDownloadCancelled(task)
-                    progressNotifier.running(48, "正在导入前 $count 章", force = true)
-                    partialImportThread = com.reamicro.fix.reload.ModuleResources.thread({
-                        if (task.cancelRequested) return@thread
-                        val partialImported = runCatching {
+                    if (mode == OnlineBookDownloadMode.ON_DEMAND) {
+                        downloadOnlineCompletionOnDemandBook(target, localFile, task) { progress, message ->
                             throwIfOnlineCompletionDownloadCancelled(task)
-                            val importResult = importOnlineCompletionBook(
-                                file = partialFile,
-                                target = target,
-                                onWaiting = {
-                                    throwIfOnlineCompletionDownloadCancelled(task)
-                                    progressNotifier.running(48, "等待导入队列：前 $count 章", force = true)
-                                },
-                                onStarted = {
-                                    throwIfOnlineCompletionDownloadCancelled(task)
-                                    progressNotifier.running(48, "正在导入前 $count 章", force = true)
-                                },
-                            )
-                            importResult.bookDir?.let { importedDir ->
-                                task.importedBookDir = importedDir
-                                flushOnlineCompletionDownloadedChapters(task, target)
-                                syncOnlineCompletionImportedBookSize(target)
-                                logWebDav(
-                                    "online completion partial import visible book=${target.result.name} " +
-                                        "dir=${importedDir.absolutePath}",
-                                )
-                            }
-                            importResult.imported
-                        }.onFailure { error ->
-                            if (error is OnlineCompletionDownloadCancelledException || task.cancelRequested) {
-                                return@thread
-                            }
-                            logWebDav(
-                                "online completion partial import failed but download continues: " +
-                                    "${error.message ?: error.javaClass.name}",
-                            )
-                        }.getOrDefault(false)
-                        val continueMessage = if (partialImported) {
-                            "已导入前 $count 章，继续下载"
-                        } else {
-                            "前 $count 章已写入，继续下载"
+                            progressNotifier.running(progress, message)
                         }
-                        progressNotifier.running(50, continueMessage, force = true)
-                    }, "ReaMicroOnlineCompletionPartialImport").also {
-                        it.start()
+                    } else {
+                        downloadOnlineCompletionBook(target, localFile, task) { progress, message ->
+                            throwIfOnlineCompletionDownloadCancelled(task)
+                            progressNotifier.running(progress, message)
+                        }
                     }
-                },
-            )
-            throwIfOnlineCompletionDownloadCancelled(task)
-            partialImportThread?.takeIf { it.isAlive }?.let { thread ->
-                progressNotifier.running(90, "等待前 100 章导入完成", force = true)
-                thread.join()
-            }
-            throwIfOnlineCompletionDownloadCancelled(task)
-            if (task.importedBookDir != null) {
-                progressNotifier.running(94, "写入剩余章节", force = true)
-                flushOnlineCompletionDownloadedChapters(task, target)
-                syncOnlineCompletionImportedBookSize(target)
-                logWebDav(
-                    "online completion final import skipped; chapters written to imported dir=${task.importedBookDir}",
-                )
-            } else {
-                progressNotifier.running(94, "正在导入完整章节", force = true)
-                importOnlineCompletionBook(
-                    file = localFile,
-                    target = target,
-                    onWaiting = {
-                        throwIfOnlineCompletionDownloadCancelled(task)
-                        progressNotifier.running(94, "等待导入队列", force = true)
-                    },
-                    onStarted = {
-                        throwIfOnlineCompletionDownloadCancelled(task)
-                        progressNotifier.running(94, "正在导入完整章节", force = true)
-                    },
-                )
-            }
-            throwIfOnlineCompletionDownloadCancelled(task)
-            progressNotifier.finish("已导入阅微", target.result.detailUrl, success = true)
-            logWebDav(
-                "online completion download complete file=${localFile.absolutePath} " +
-                    "size=${localFile.length()} importedDir=${task.importedBookDir}",
-            )
-            com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                Toast.makeText(appContext, "已导入：${target.result.name}", Toast.LENGTH_SHORT).show()
-            }
-            cleanupOnlineCompletionDownloadTask(task)
-        }.onFailure {
-            if (it is OnlineCompletionDownloadCancelledException || task.cancelRequested) {
-                cancelOnlineCompletionTrackedWork(task)
-                cleanupOnlineCompletionDownloadTask(task)
-                cancelOnlineCompletionNotification(appContext, task.notificationId, task.key)
-                logWebDav("online completion download cancelled book=${target.result.name}")
-            } else {
-                XposedBridge.log("$LOG_PREFIX online completion download failed: ${it.stackTraceToString()}")
-                cleanupOnlineCompletionDownloadTask(task)
-                progressNotifier.finish(it.message ?: "下载失败", null, success = false)
-                com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                    Toast.makeText(appContext, "在线补全下载失败：${it.message ?: target.result.name}", Toast.LENGTH_SHORT).show()
                 }
+                task.cancellation.run {
+                    throwIfOnlineCompletionDownloadCancelled(task)
+                    progressNotifier.running(94, "正在导入完整章节", force = true)
+                    importOnlineCompletionBook(task, localFile, target,
+                        onWaiting = { progressNotifier.running(94, "等待导入队列", force = true) },
+                        onStarted = { progressNotifier.running(94, "正在导入", force = true) })
+                    val completionMessage = if (mode == OnlineBookDownloadMode.ON_DEMAND) {
+                        "已导入逐章加载书籍"
+                    } else "已导入阅微${onlineCompletionFailureSuffix(failedChapters)}"
+                    progressNotifier.finish(completionMessage, target.result.detailUrl, success = true)
+                }
+            } catch (error: Throwable) {
+                if (task.control.shouldPause && !task.control.isCancelled && !task.control.isPublishing) {
+                    try {
+                        if (task.control.preparePausedPublication()) {
+                            task.cancellation.run {
+                                publishPausedOnlineCompletionBook(target, localFile, task, mode, progressNotifier)
+                            }
+                        } else {
+                            progressNotifier.finish("下载已取消，未导入书架", null, success = false)
+                        }
+                    } catch (pauseError: Throwable) {
+                        if (task.cancelRequested || task.cancellation.isCancelled || pauseError is java.util.concurrent.CancellationException) {
+                            progressNotifier.finish("下载已取消，未导入书架", null, success = false)
+                        } else {
+                            progressNotifier.finish(pauseError.message ?: "暂停保存失败", null, success = false)
+                            HookRuntime.logError("$LOG_PREFIX paused download publication failed", pauseError)
+                        }
+                    }
+                } else if (error is java.util.concurrent.CancellationException || task.cancelRequested || task.cancellation.isCancelled) {
+                    progressNotifier.finish("下载已取消，未导入书架", null, success = false)
+                } else {
+                    progressNotifier.finish(error.message ?: "下载失败", null, success = false)
+                    HookRuntime.logError("$LOG_PREFIX online completion download failed", error)
+                }
+            } finally {
+                task.control.finish()
+                task.cancellation.cancel()
+                lifetime.close()
             }
-        }.also {
-            onlineCompletionRunningDownloads.remove(key, task)
-            onlineCompletionRunningDownloadsByNotificationId.remove(notificationId, task)
-        }
-    }, "ReaMicroOnlineCompletionDownload")
-    task.thread = thread
-    thread.start()
+        }, "ReaMicroOnlineCompletionDownload")
+        task.thread = thread
+        task.networkCancellation.register(thread::interrupt)
+        task.cancellation.register(thread::interrupt)
+        thread.start()
+    } catch (error: Throwable) {
+        task.control.finish()
+        task.cancellation.cancel()
+        lifetime.close()
+        progressNotifier.finish(error.message ?: "无法启动下载", null, success = false)
+        HookRuntime.logError("$LOG_PREFIX online download could not start", error)
+    }
+}
+
+private fun WebDavDriveHook.publishPausedOnlineCompletionBook(
+    target: OnlineDownloadTarget,
+    file: File,
+    task: OnlineCompletionDownloadTask,
+    mode: OnlineBookDownloadMode,
+    notifier: WebDavDriveHook.OnlineCompletionProgressNotifier,
+) {
+    throwIfOnlineCompletionDownloadCancelled(task)
+    val chapters = task.tocSnapshot?.chapters.orEmpty()
+    val completed = task.downloadedChapters.toMap().filterKeys { it in chapters.indices }
+    if (completed.isEmpty()) {
+        notifier.finish("已暂停，尚无完整章节，未导入书架", null, success = false)
+        return
+    }
+    val hrefs = defaultOnlineChapterHrefs(chapters.size)
+    val metadata = OnlineOnDemandMetadata(
+        sourceId = target.source.id, detailUrl = target.result.detailUrl, bookName = target.result.name,
+        mode = mode,
+        chapters = chapters.mapIndexed { index, chapter ->
+            OnlineOnDemandChapter(
+                sourceChapterId = OnlineChapterUpdatePlanner.stableSourceChapterId(chapter.url),
+                url = chapter.url, title = chapter.title, volumeTitle = chapter.volumeTitle,
+                href = hrefs[index],
+                state = if (index in completed) OnlineChapterState.READY else OnlineChapterState.PENDING,
+                downloadedAtMs = if (index in completed) System.currentTimeMillis() else 0L,
+            )
+        },
+    )
+    notifier.running(88, "已停止网络，保存 ${completed.size} 章", force = true)
+    writeOnlineCompletionEpub(file, target,
+        chapters.mapIndexed { index, chapter -> completed[index] ?: if (mode == OnlineBookDownloadMode.ON_DEMAND) {
+            onlineCompletionOnDemandPendingChapter(chapter, index)
+        } else com.reamicro.fix.online.download.onlineCompletionPausedPendingChapter(chapter, index) },
+        task.downloadedCover, onDemandMetadata = metadata, allowNetworkImages = false,
+        checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) })
+    throwIfOnlineCompletionDownloadCancelled(task)
+    importOnlineCompletionBook(task, file, target,
+        onWaiting = { notifier.running(94, "暂停保存：等待导入队列", force = true) },
+        onStarted = { notifier.running(94, "暂停保存：正在导入已完成章节", force = true) })
+    notifier.finish("已暂停，已保存 ${completed.size} 章，可长按更新继续", target.result.detailUrl, success = true)
 }
 
 internal fun WebDavDriveHook.createOnlineCompletionTrackedTask(tracker: Any, bookName: String): String? =
     runCatching {
         val id = "online-${UUID.randomUUID()}"
-        tracker.javaClass.methods.first {
-            it.hostNameMatches("createTask") && it.parameterTypes.size == 4
-        }.apply { isAccessible = true }.invoke(
+        com.reamicro.fix.core.HostWorkBindings.requireCurrent().create(
             tracker,
             id,
             "download",
@@ -814,9 +943,10 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
     outputFile: File,
     task: OnlineCompletionDownloadTask,
     onProgress: (Int, String) -> Unit,
-): OnlineCompletionImportResult {
+): Int {
     throwIfOnlineCompletionDownloadCancelled(task)
     val tocSnapshot = loadOnlineCompletionToc(target, onProgress)
+    task.tocSnapshot = tocSnapshot
     val chapters = tocSnapshot.chapters
     val initialCount = ONLINE_COMPLETION_ON_DEMAND_INITIAL_CHAPTERS.coerceAtMost(chapters.size)
     val allowance = OnlineSourceDownloadPolicyStore.remainingToday(currentContext(), target.source)
@@ -859,6 +989,8 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
                     )
                 }
             }.onFailure { error ->
+                TaskCancellation.rethrowIfCancelled(error)
+                throwIfOnlineCompletionDownloadCancelled(task)
                 lastError = error
                 errors[index] = error.message.orEmpty().ifBlank { error.javaClass.name }
                 val retryKind = onlineHttpRetryKind(error)
@@ -882,21 +1014,21 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
     val cover = target.result.coverUrl.takeIf { it.isNotBlank() }?.let { coverUrl ->
         runCatching {
             OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
-                downloadOnlineBytes(target.source, coverUrl)
+                downloadOnlineImageBytes(target, coverUrl, isCover = true)
             }
         }.onFailure { error ->
-
-            com.reamicro.fix.xposed.XposedBridge.logAlways(
+            TaskCancellation.rethrowIfCancelled(error)
+            com.reamicro.fix.xposed.HookRuntime.logAlways(
                 "[ReaMicro] online completion on-demand cover failed url=${coverUrl.take(160)} " +
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
         }.getOrNull()
 
             ?: run {
-                if (!isFanqieCoverUrl(coverUrl)) return@run null
+                if (OnlineParserMode.forTarget(target).enhanced || !isFanqieCoverUrl(coverUrl)) return@run null
                 runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
                     .onFailure { error ->
-                        com.reamicro.fix.xposed.XposedBridge.logAlways(
+                        com.reamicro.fix.xposed.HookRuntime.logAlways(
                             "[ReaMicro] online completion cover web fallback failed " +
                                 "detail=${target.result.detailUrl.take(160)} " +
                                 "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
@@ -905,6 +1037,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
                     .getOrNull()?.second
             }
     }
+    task.downloadedCover = cover
     val chapterHrefs = defaultOnlineChapterHrefs(chapters.size)
     val metadata = OnlineOnDemandMetadata(
         sourceId = target.source.id,
@@ -935,20 +1068,10 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
         chapters = epubChapters,
         cover = cover,
         onDemandMetadata = metadata,
+        checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) },
     )
     throwIfOnlineCompletionDownloadCancelled(task)
-    onProgress(82, "正在导入逐章加载书籍")
-    val importResult = importOnlineCompletionBook(
-        file = outputFile,
-        target = target,
-        onWaiting = { onProgress(82, "等待导入队列") },
-        onStarted = { onProgress(86, "正在导入逐章加载书籍") },
-    )
-    val bookDir = importResult.bookDir ?: error("导入后未找到图书目录")
-    OnlineOnDemandMetadataStore.write(bookDir, metadata)
-    syncOnlineCompletionImportedBookSize(target)
-    onProgress(96, "逐章加载书籍已就绪")
-    return importResult
+    return 0
 }
 
 internal fun WebDavDriveHook.downloadOnlineCompletionBook(
@@ -956,10 +1079,10 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
     outputFile: File,
     task: OnlineCompletionDownloadTask,
     onProgress: (Int, String) -> Unit,
-    onPartialReady: (File, Int) -> Unit,
-) {
+): Int {
     throwIfOnlineCompletionDownloadCancelled(task)
     val tocSnapshot = loadOnlineCompletionToc(target, onProgress)
+    task.tocSnapshot = tocSnapshot
     throwIfOnlineCompletionDownloadCancelled(task)
     val detail = tocSnapshot.detail
     val chapters = tocSnapshot.chapters
@@ -988,7 +1111,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             throwIfOnlineCompletionDownloadCancelled(task)
             OnlineConcurrentRateLimiter.withLimitBlocking(target.source) {
                 throwIfOnlineCompletionDownloadCancelled(task)
-                downloadOnlineBytes(target.source, coverUrl)
+                downloadOnlineImageBytes(target, coverUrl, isCover = true)
             }
         }.onSuccess { payload ->
             logWebDav(
@@ -996,22 +1119,23 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                     "bytes=${payload.bytes.size} type=${payload.mimeType.ifBlank { "unknown" }}",
             )
         }.onFailure { error ->
+            TaskCancellation.rethrowIfCancelled(error)
             logWebDav(
                 "online completion cover failed url=${coverUrl.take(160)} " +
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
 
-            com.reamicro.fix.xposed.XposedBridge.logAlways(
+            com.reamicro.fix.xposed.HookRuntime.logAlways(
                 "[ReaMicro] online completion cover failed url=${coverUrl.take(160)} " +
                     "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
             )
         }.getOrNull()
 
             ?: run {
-                if (!isFanqieCoverUrl(coverUrl)) return@run null
+                if (OnlineParserMode.forTarget(target).enhanced || !isFanqieCoverUrl(coverUrl)) return@run null
                 runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
                     .onFailure { error ->
-                        com.reamicro.fix.xposed.XposedBridge.logAlways(
+                        com.reamicro.fix.xposed.HookRuntime.logAlways(
                             "[ReaMicro] online completion cover web fallback failed " +
                                 "detail=${target.result.detailUrl.take(160)} " +
                                 "error=${error.javaClass.simpleName}: ${error.message.orEmpty()}",
@@ -1020,38 +1144,10 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                     .getOrNull()?.second
             }
     }
-    val shouldImportFirstBatch = chapters.size > ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD
-    var firstBatchImported = false
+    task.downloadedCover = cover
     var consecutiveServiceFailures = 0
     val batchSession = onlineChapterBatchSession(target, chapters, 0 until allowedChapterCount)
     fun downloadedCount(): Int = downloaded.count { it != null }
-
-    fun maybeImportFirstBatch(progress: Int, processedCount: Int) {
-        throwIfOnlineCompletionDownloadCancelled(task)
-        if (!shouldImportFirstBatch || firstBatchImported) return
-        val firstBatch = downloaded.take(ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS)
-        if (
-            firstBatch.size < ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS ||
-            processedCount < ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS ||
-            firstBatch.all { it == null }
-        ) return
-        firstBatchImported = true
-        val partialFile = File(
-            outputFile.parentFile ?: outputFile.absoluteFile.parentFile ?: File("/data/local/tmp"),
-            "${outputFile.nameWithoutExtension}_first_${ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS}.epub",
-        )
-        onProgress(progress, "生成前 ${ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS} 章 EPUB")
-        throwIfOnlineCompletionDownloadCancelled(task)
-        val partialChapters = chapters.mapIndexed { index, chapter ->
-            downloaded[index] ?: onlineCompletionPendingChapter(chapter, index)
-        }
-        writeOnlineCompletionEpub(partialFile, target, partialChapters, cover)
-        logWebDav(
-            "online completion partial epub ready path=${partialFile.absolutePath} " +
-                "downloaded=${firstBatch.size} toc=${partialChapters.size}",
-        )
-        onPartialReady(partialFile, ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS)
-    }
 
     fun attemptChapter(index: Int, immediateRetry: Boolean): Boolean {
         throwIfOnlineCompletionDownloadCancelled(task)
@@ -1077,7 +1173,6 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             }.onSuccess { chapterContent ->
                 downloaded[index] = chapterContent
                 task.downloadedChapters[index] = chapterContent
-                writeOnlineCompletionChapterToImportedBookIfReady(task, target, index, chapterContent)
                 val recoveredFromServiceFailure = consecutiveServiceFailures > 0
                 consecutiveServiceFailures = 0
                 if (recoveredFromServiceFailure) {
@@ -1097,6 +1192,8 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                 }
                 return true
             }.onFailure { error ->
+                TaskCancellation.rethrowIfCancelled(error)
+                throwIfOnlineCompletionDownloadCancelled(task)
                 failed.add(index)
                 val message = error.message.orEmpty().ifBlank { error.javaClass.name }
                 failureMessages[index] = message
@@ -1141,7 +1238,6 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
         if (failed.isNotEmpty()) {
             onProgress(progress, "下载章节 ${index + 1}/${chapters.size}${onlineCompletionFailureSuffix(failed.size)}")
         }
-        maybeImportFirstBatch(progress, index + 1)
     }
     var retryRound = 0
     while (failed.any { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
@@ -1163,7 +1259,6 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             if (failed.isNotEmpty()) {
                 onProgress(progress, "重试章节 ${chapterIndex + 1}/${chapters.size}${onlineCompletionFailureSuffix(failed.size)}")
             }
-            maybeImportFirstBatch(progress, chapters.size)
         }
     }
     val successCount = downloadedCount()
@@ -1185,9 +1280,6 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
         )
     }
     logOnlineCompletionFinalFailures(target, finalFailures, "download")
-    task.importedBookDir?.let { bookDir ->
-        writeOnlineCompletionFailedChapters(bookDir, target, finalFailures)
-    }
     val finalChapters = chapters.mapIndexed { index, chapter ->
         downloaded[index] ?: OnlineDownloadedChapter(
             title = chapter.title.ifBlank { "第 ${index + 1} 章" },
@@ -1199,17 +1291,22 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
     }
     onProgress(88, "生成 EPUB")
     throwIfOnlineCompletionDownloadCancelled(task)
-    writeOnlineCompletionEpub(outputFile, target, finalChapters, cover, finalFailures)
+    writeOnlineCompletionEpub(outputFile, target, finalChapters, cover, finalFailures,
+        checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) })
     logWebDav(
         "online completion epub ready path=${outputFile.absolutePath} " +
             "chapters=${finalChapters.size} success=$successCount failed=${failed.size}",
     )
+    return failed.size
 }
 
 internal fun WebDavDriveHook.loadOnlineCompletionToc(
     target: OnlineDownloadTarget,
     onProgress: (Int, String) -> Unit,
 ): OnlineTocSnapshot {
+    if (OnlineParserMode.forTarget(target).enhanced) {
+        return com.reamicro.fix.online.EnhancedOnlineParser.toc(target, onProgress)
+    }
     val startedAt = System.nanoTime()
     val detailUrl = target.result.detailUrl.ifBlank { error("搜索结果缺少详情页地址") }
     onProgress(3, "读取详情页")
@@ -1269,6 +1366,18 @@ internal fun WebDavDriveHook.downloadOnlineChapter(
     batchSession: OnlineChapterBatchSession? = null,
 ): OnlineDownloadedChapter =
     OnlineSourceDownloadPolicyStore.withChapterDownload(currentContext(), target.source) {
+        if (OnlineParserMode.forTarget(target).enhanced) {
+            val content = com.reamicro.fix.online.EnhancedOnlineParser.content(target, chapter, index)
+                .let(com.reamicro.fix.online.epub.OnlineChapterImageMarkup::preserveUpstream)
+            OnlineChapterContentValidator.downloadedFailureReason(content)?.let { reason ->
+                error("章节正文无效：$reason")
+            }
+            return@withChapterDownload OnlineDownloadedChapter(
+                title = chapter.title.ifBlank { "第 ${index + 1} 章" },
+                content = content, volumeTitle = chapter.volumeTitle, level = chapter.level,
+                sourceUrl = chapter.url, transport = "legado",
+            ).also { completed -> cacheOnlineChapterImages(target, completed) }
+        }
         val batchBody = batchSession?.bodyFor(index, chapter)
         val transport: String
         val body = if (batchBody != null) {
@@ -1302,7 +1411,7 @@ internal fun WebDavDriveHook.downloadOnlineChapter(
             level = chapter.level,
             sourceUrl = chapter.url,
             transport = transport,
-        )
+        ).also { completed -> cacheOnlineChapterImages(target, completed) }
     }
 
 internal fun WebDavDriveHook.cacheOnlineParagraphComments(
@@ -1508,8 +1617,31 @@ internal fun WebDavDriveHook.extractOnlineChapterContent(source: OnlineSourceEnt
 }
 
 internal fun WebDavDriveHook.downloadOnlineBytes(source: OnlineSourceEntry, requestUrl: String): OnlineBinaryPayload {
+    return com.reamicro.fix.online.OnlineSourceTask(source).use { operation ->
+        operation.run {
+            if (com.reamicro.fix.online.OnlineParserMode.isEnhanced) {
+                com.reamicro.fix.online.EnhancedOnlineParser.bytes(source, requestUrl)
+            } else downloadOnlineBytesCurrent(source, requestUrl)
+        }
+    }
+}
+
+internal fun WebDavDriveHook.downloadOnlineImageBytes(
+    target: OnlineDownloadTarget, url: String, isCover: Boolean = false,
+): OnlineBinaryPayload =
+    if (OnlineParserMode.forTarget(target).enhanced)
+        com.reamicro.fix.online.EnhancedOnlineParser.bytes(
+            target.source, url, isCover,
+            state = OnlineParserMode.forTarget(target), session = target.parserBook,
+        )
+    else downloadOnlineBytes(target.source, url)
+
+private fun WebDavDriveHook.downloadOnlineBytesCurrent(source: OnlineSourceEntry, requestUrl: String): OnlineBinaryPayload {
+    TaskCancellation.checkCurrent()
+    OnlineSourceStore.requireCurrent(source)
     return withOnlineCleartextAllowed(requestUrl) {
         fun execute(authRetried: Boolean): OnlineBinaryPayload {
+            TaskCancellation.checkCurrent()
             val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = onlineConnectTimeoutMillis(source)
@@ -1522,17 +1654,34 @@ internal fun WebDavDriveHook.downloadOnlineBytes(source: OnlineSourceEntry, requ
                     if (name.isNotBlank() && value.isNotBlank()) setRequestProperty(name, value)
                 }
             }
+            val cancellation = TaskCancellation.current()?.register(connection::disconnect)
             try {
+                TaskCancellation.checkCurrent()
                 val code = connection.responseCode
+                TaskCancellation.checkCurrent()
                 if (code in 200..299) {
                     return OnlineBinaryPayload(
-                        bytes = connection.inputStream.use { it.readBytes() },
+                        bytes = connection.inputStream.use { input ->
+                            val output = ByteArrayOutputStream()
+                            val buffer = ByteArray(16 * 1024)
+                            while (true) {
+                                TaskCancellation.checkCurrent()
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                check(count <= 16 * 1024 * 1024 - output.size()) { "在线图片响应超过 16 MiB" }
+                                output.write(buffer, 0, count)
+                            }
+                            TaskCancellation.checkCurrent()
+                            output.toByteArray()
+                        },
                         mimeType = connection.contentType?.substringBefore(';')?.trim().orEmpty(),
                         url = connection.url.toString(),
                     )
                 }
                 if ((code == 401 || code == 403) && !authRetried && source.hasLoginConfig) {
+                    TaskCancellation.checkCurrent()
                     val login = OnlineSourceAuth.loginWithSavedCredentials(currentApplicationContext() ?: currentContext(), source)
+                    TaskCancellation.checkCurrent()
                     logWebDav(
                         "online completion binary auth retry source=${source.name} code=$code " +
                             "success=${login.success} message=${login.message}",
@@ -1541,7 +1690,11 @@ internal fun WebDavDriveHook.downloadOnlineBytes(source: OnlineSourceEntry, requ
                 }
                 val authHint = if (code == 401 || code == 403) "：未登录或会员权限不足" else ""
                 error("HTTP $code$authHint")
+            } catch (error: Throwable) {
+                TaskCancellation.rethrowIfCancelled(error)
+                throw error
             } finally {
+                cancellation?.close()
                 connection.disconnect()
             }
         }
@@ -1555,15 +1708,20 @@ internal fun WebDavDriveHook.appendOnlineCompletionChapters(
     remoteChapters: List<OnlineChapter>,
     chapterHrefs: List<String>,
     newChapters: Map<Int, OnlineDownloadedChapter>,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
+    allowNetworkImages: Boolean = true,
 ): Boolean {
+    checkCurrent()
     val root = bookDir.canonicalFile
-    writeOnlineCompletionDefaultStyle(root)
+    writeOnlineCompletionDefaultStyle(root, commit = commit, checkCurrent = checkCurrent)
     var changed = false
     val decor = onlineCompletionBookDirDecor(root)
     val volumeFirstChapters = onlineVolumeSegments(
         remoteChapters.map { OnlineDownloadedChapter(title = it.title, content = "", volumeTitle = it.volumeTitle) },
     ).mapTo(hashSetOf()) { it.startIndex }
     newChapters.forEach { (remoteIndex, chapter) ->
+        checkCurrent()
         val href = chapterHrefs.getOrNull(remoteIndex)
             ?: error("EPUB chapter href missing for remote index $remoteIndex")
         writeOnlineCompletionChapterToBookDir(
@@ -1574,6 +1732,9 @@ internal fun WebDavDriveHook.appendOnlineCompletionChapters(
             target = target,
             decor = decor,
             isVolumeFirstChapter = remoteIndex in volumeFirstChapters,
+            commit = commit,
+            checkCurrent = checkCurrent,
+            allowNetworkImages = allowNetworkImages,
         )
         changed = true
     }
@@ -1586,11 +1747,11 @@ internal fun WebDavDriveHook.appendOnlineCompletionChapters(
         )
     }
     val coverExt = onlineCompletionExistingCoverExt(root)
-    if (writeOnlineCompletionVolumePages(root, tocChapters, decor)) changed = true
+    if (writeOnlineCompletionVolumePages(root, tocChapters, decor, commit = commit, checkCurrent = checkCurrent)) changed = true
     val tocFile = File(root, "OEBPS/toc.ncx")
     val nextToc = onlineTocNcx(target, tocChapters, chapterHrefs)
     if (!tocFile.isFile || tocFile.readText(Charsets.UTF_8) != nextToc) {
-        tocFile.writeText(nextToc, Charsets.UTF_8)
+        writeOnlineCompletionTextAtomically(tocFile, nextToc, commit = commit, checkCurrent = checkCurrent)
         changed = true
     }
     val opfFile = File(root, "OEBPS/content.opf")
@@ -1602,28 +1763,49 @@ internal fun WebDavDriveHook.appendOnlineCompletionChapters(
         chapterHrefs = chapterHrefs,
     )
     if (!opfFile.isFile || opfFile.readText(Charsets.UTF_8) != nextOpf) {
-        writeOnlineCompletionTextAtomically(opfFile, nextOpf)
+        writeOnlineCompletionTextAtomically(opfFile, nextOpf, commit = commit, checkCurrent = checkCurrent)
         changed = true
     }
-    synchronizeOnlineImageManifest(root)
-    if (writeOnlineCompletionChapterIndex(root, target, remoteChapters, chapterHrefs)) changed = true
+    synchronizeOnlineImageManifest(root, commit = commit, checkCurrent = checkCurrent)
+    if (writeOnlineCompletionChapterIndex(root, target, remoteChapters, chapterHrefs, commit = commit, checkCurrent = checkCurrent)) changed = true
     return changed
 }
 
 internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
     request: OnlineOnDemandChapterRequest,
 ) {
+    val execution = storageExecutionGeneration.get()
     val context = currentContext() ?: error("按需下载缺少 Context")
+    val identity = request.storageIdentity
+    val parserGeneration = com.reamicro.fix.online.OnlineParserMode.generation
+    var operationSource: OnlineSourceEntry? = null
+    fun checkCurrent() {
+        TaskCancellation.checkCurrent()
+        com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserGeneration)
+        operationSource?.let(OnlineSourceStore::requireCurrent)
+        check(!storageClosed && settingsProvider().moduleEnabled && execution == storageExecutionGeneration.get() &&
+            !Thread.currentThread().isInterrupted && AccountHostRuntime.isCurrentStorage(identity)) {
+            "账号已切换，已停止旧账号章节下载"
+        }
+    }
+    checkCurrent()
+    val expectedRoot = File(context.filesDir, "${identity.accountId}/books").canonicalFile
+    check(request.bookDir.canonicalFile.parentFile == expectedRoot) { "按需下载目录与当前账号不一致" }
+    val commit: (() -> Unit) -> Unit = { action ->
+        AccountHostRuntime.withCurrentStorage(identity) { checkCurrent(); action() }
+    }
     val source = OnlineSourceStore.list(context)
         .firstOrNull { OnlineSourceStore.matchesIdentity(it, request.metadata.sourceId) }
         ?.let { OnlineSourceDownloadPolicyStore.attach(context, it) }
         ?: error("在线书源已不存在：${request.metadata.sourceId}")
+    operationSource = source
     val metadata = OnlineOnDemandMetadataStore.read(request.bookDir)
         ?: error("按需章节元数据不存在")
+    checkCurrent()
     val current = metadata.chapter(request.chapterIndex)
         ?: error("按需章节索引越界：${request.chapterIndex}")
     if (current.state == OnlineChapterState.READY) return
-    val downloadingMetadata = OnlineOnDemandMetadataStore.update(request.bookDir) { latest ->
+    val downloadingMetadata = OnlineOnDemandMetadataStore.update(request.bookDir, commit = commit, checkCurrent = ::checkCurrent) { latest ->
         val latestChapter = latest.chapter(request.chapterIndex)
             ?: error("按需章节索引越界：${request.chapterIndex}")
         if (latestChapter.state == OnlineChapterState.READY) latest else {
@@ -1649,9 +1831,16 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
         ),
     )
     val result = runCatching {
+        if (OnlineParserMode.forTarget(target).enhanced) {
+            return@runCatching downloadOnlineChapter(
+                target, request.metadata.detailUrl, "", chapter, request.chapterIndex,
+            )
+        }
         val detail = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
+            checkCurrent()
             requestOnlineSearch(source, request.metadata.detailUrl)
         }
+        checkCurrent()
         downloadOnlineChapter(
             target = target,
             detailUrl = detail.url,
@@ -1661,14 +1850,17 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
         )
     }
     result.onSuccess { content ->
+        checkCurrent()
         writeOnlineCompletionChapterToBookDir(
             bookDir = request.bookDir,
             index = request.chapterIndex,
             chapter = content,
             href = current.href,
             target = target,
+            commit = commit,
+            checkCurrent = ::checkCurrent,
         )
-        OnlineOnDemandMetadataStore.update(request.bookDir) { latest ->
+        OnlineOnDemandMetadataStore.update(request.bookDir, commit = commit, checkCurrent = ::checkCurrent) { latest ->
             latest.updateChapter(request.chapterIndex) {
                 it.markReady(System.currentTimeMillis())
             }
@@ -1678,52 +1870,14 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
                 "index=${request.chapterIndex + 1} href=${current.href}",
         )
     }.onFailure { error ->
-        OnlineOnDemandMetadataStore.update(request.bookDir) { latest ->
+        // A departed request must not publish a failure into a later guest/account view of this path.
+        checkCurrent()
+        OnlineOnDemandMetadataStore.update(request.bookDir, commit = commit, checkCurrent = ::checkCurrent) { latest ->
             latest.updateChapter(request.chapterIndex) {
                 it.markFailed(error.message.orEmpty().ifBlank { error.javaClass.name })
             }
         }
         throw error
-    }
-}
-
-internal fun WebDavDriveHook.writeOnlineCompletionChapterToImportedBookIfReady(
-    task: OnlineCompletionDownloadTask,
-    target: OnlineDownloadTarget,
-    index: Int,
-    chapter: OnlineDownloadedChapter,
-) {
-    val bookDir = task.importedBookDir ?: return
-    task.bookDirWriteLock.lock()
-    try {
-        throwIfOnlineCompletionDownloadCancelled(task)
-        writeOnlineCompletionChapterToBookDir(bookDir, index, chapter, target = target)
-    } finally {
-        task.bookDirWriteLock.unlock()
-    }
-}
-
-internal fun WebDavDriveHook.flushOnlineCompletionDownloadedChapters(
-    task: OnlineCompletionDownloadTask,
-    target: OnlineDownloadTarget,
-) {
-    val bookDir = task.importedBookDir ?: return
-    val chapters = task.downloadedChapters.entries
-        .sortedBy { it.key }
-        .map { it.key to it.value }
-    if (chapters.isEmpty()) return
-    task.bookDirWriteLock.lock()
-    try {
-        throwIfOnlineCompletionDownloadCancelled(task)
-        chapters.forEach { (index, chapter) ->
-            writeOnlineCompletionChapterToBookDir(bookDir, index, chapter, target = target)
-        }
-        logWebDav(
-            "online completion flushed downloaded chapters to imported dir=" +
-                "${bookDir.absolutePath} count=${chapters.size}",
-        )
-    } finally {
-        task.bookDirWriteLock.unlock()
     }
 }
 
@@ -1735,25 +1889,31 @@ internal fun WebDavDriveHook.writeOnlineCompletionChapterToBookDir(
     target: OnlineDownloadTarget? = null,
     decor: OnlineEpubDecor? = null,
     isVolumeFirstChapter: Boolean = false,
+    commit: (() -> Unit) -> Unit = { it() },
+    checkCurrent: () -> Unit = {},
+    allowNetworkImages: Boolean = true,
 ) {
+    checkCurrent()
     val root = bookDir.canonicalFile
     val textDir = File(root, "OEBPS/Text").canonicalFile
     val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
     if (!textDir.path.startsWith(rootPrefix)) {
         error("EPUB Text directory escapes book dir")
     }
-    textDir.mkdirs()
-    writeOnlineCompletionDefaultStyle(root)
+    commit { checkCurrent(); textDir.mkdirs() }
+    writeOnlineCompletionDefaultStyle(root, commit = commit, checkCurrent = checkCurrent)
     val relativeHref = href.trim().removePrefix("OEBPS/")
         .takeIf { it.startsWith("Text/") && it.endsWith(".xhtml", ignoreCase = true) }
         ?: "Text/chapter_${(index + 1).toString().padStart(4, '0')}.xhtml"
     val file = File(root, "OEBPS/$relativeHref").canonicalFile
     if (!file.path.startsWith(rootPrefix)) error("EPUB chapter path escapes book dir")
     val imageHrefs = if (target != null) {
-        localizeOnlineChapterImages(root, target, chapter)
+        localizeOnlineChapterImages(root, target, chapter, commit = commit, checkCurrent = checkCurrent,
+            allowNetworkImages = allowNetworkImages)
     } else {
         existingOnlineChapterImageHrefs(root, chapter)
     }
+    checkCurrent()
     writeOnlineCompletionTextAtomically(
         file,
         chapterXhtml(
@@ -1763,6 +1923,8 @@ internal fun WebDavDriveHook.writeOnlineCompletionChapterToBookDir(
             decor = decor ?: onlineCompletionBookDirDecor(root),
             isVolumeFirstChapter = isVolumeFirstChapter,
         ),
+        commit = commit,
+        checkCurrent = checkCurrent,
     )
     if (index == 0 || (index + 1) % 20 == 0) {
         logWebDav("online completion chapter file updated ${index + 1} path=${file.absolutePath}")
@@ -1770,60 +1932,87 @@ internal fun WebDavDriveHook.writeOnlineCompletionChapterToBookDir(
 }
 
 internal fun WebDavDriveHook.importOnlineCompletionBook(
+    task: OnlineCompletionDownloadTask,
     file: File,
     target: OnlineDownloadTarget,
     onWaiting: (() -> Unit)? = null,
     onStarted: (() -> Unit)? = null,
-): OnlineCompletionImportResult {
-    var locked = onlineCompletionImportLock.tryLock()
-    if (!locked) {
+): OnlineCompletionImportResult = withOnlineCompletionTaskLock(
+    task, onlineCompletionImportLock,
+    onWaiting = {
         logWebDav("online completion import queued book=${target.result.name} file=${file.name}")
         onWaiting?.invoke()
-        onlineCompletionImportLock.lock()
-        locked = true
-    }
-    return try {
-        onStarted?.invoke()
-        importOnlineCompletionBookLocked(file, target)
-    } finally {
-        if (locked) onlineCompletionImportLock.unlock()
-    }
+    },
+) {
+    throwIfOnlineCompletionDownloadCancelled(task)
+    onStarted?.invoke()
+    importOnlineCompletionBookLocked(task, file, target)
 }
 
-internal fun WebDavDriveHook.importOnlineCompletionBookLocked(file: File, target: OnlineDownloadTarget): OnlineCompletionImportResult {
+internal fun WebDavDriveHook.importOnlineCompletionBookLocked(
+    task: OnlineCompletionDownloadTask, file: File, target: OnlineDownloadTarget,
+): OnlineCompletionImportResult {
+    throwIfOnlineCompletionDownloadCancelled(task)
     val bookshelf = awaitBookshelfRepository()
         ?: error("阅微导入服务暂不可用，请先打开书架后重试")
+    throwIfOnlineCompletionDownloadCancelled(task)
     val sourceUrl = target.result.detailUrl.ifBlank { target.source.sourceUrl }
-    val importUuid = onlineBookUuid(target)
-    val importTitle = target.result.name
-    OnlineCompletionImportSignal.remember(importUuid, importTitle, sourceUrl)
+    var importUuid = onlineBookUuid(target)
+    var importTitle = target.result.name
+    var importPlan: ModuleDirectoryImportPlan? = null
+    var publication: com.reamicro.fix.online.download.OnlineCompletionDirectoryPublication? = null
+    var committed: OnlineCompletionImportResult? = null
     return try {
-        val unzipDirFile = unzipOnlineCompletionEpub(file)
+        val unzipDirFile = unzipOnlineCompletionEpub(file) { throwIfOnlineCompletionDownloadCancelled(task) }
+        throwIfOnlineCompletionDownloadCancelled(task)
+        val plan = ModuleImportPrecheck.prepareDirectory(unzipDirFile, sourceUrl, importUuid, importTitle,
+            task.importedBookDir?.name)
+        if (!plan.allowed) throw OnlineCompletionDownloadCancelledException("已取消导入")
+        importPlan = plan
+        importUuid = plan.uuid
+        importTitle = plan.title
+        OnlineCompletionImportSignal.remember(importUuid, importTitle, sourceUrl, task.storageIdentity)
         val unzipDir = okioPath(unzipDirFile)
-        val booksDir = currentOnlineCompletionBooksDir(bookshelf)
+        val library = requireNotNull(com.reamicro.fix.core.HostStorageBindings.library)
+        val storage = requireNotNull(library.field("repository.storage").get(bookshelf))
+        val booksDir = requireNotNull(library.method("books").invoke(storage, task.storageIdentity.accountId))
+        val expectedBooksRoot = File(requireNotNull(currentContext()).filesDir, "${task.storageIdentity.accountId}/books").canonicalFile
+        check(File(booksDir.toString()).canonicalFile == expectedBooksRoot) { "阅微导入目录与下载账号不一致" }
+        throwIfOnlineCompletionDownloadCancelled(task)
         logWebDav(
             "online completion import target uid=${currentUserId(bookshelf) ?: -1L} " +
                 "booksDir=$booksDir",
         )
-        val imported = importOnlineCompletionEpubDirectory(unzipDir, booksDir)
-        val bookDir = imported.first
+        val stagingRoot = File(task.cacheDir, "import-${UUID.randomUUID()}").apply { mkdirs() }.canonicalFile
+        val imported = importOnlineCompletionEpubDirectory(unzipDir, okioPath(stagingRoot))
+        throwIfOnlineCompletionDownloadCancelled(task)
+        val stagedBook = File(imported.first.toString()).canonicalFile
+        check(stagedBook.parentFile == stagingRoot && stagedBook.isDirectory) { "阅微 EPUB 导入暂存目录越界" }
         val opf = imported.second
-        val expectedRoot = booksDir.toString().trimEnd('/')
-        val actualBookDir = bookDir.toString()
-        if (actualBookDir != expectedRoot && !actualBookDir.startsWith("$expectedRoot/")) {
-            error("阅微 EPUB 导入目录越界：expected=$expectedRoot actual=$actualBookDir")
-        }
+        val publishedBook = File(expectedBooksRoot, stagedBook.name).canonicalFile
+        check(publishedBook.parentFile == expectedBooksRoot) { "阅微 EPUB 导入目录越界" }
+        publication = com.reamicro.fix.online.download.publishOnlineCompletionDirectory(
+            stagedBook, publishedBook,
+            commit = { action -> AccountHostRuntime.withCurrentStorage(task.storageIdentity, action = action) },
+            checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) },
+            checkRollbackCurrent = {
+                check(AccountHostRuntime.isCurrentStorage(task.storageIdentity)) { "账号已切换，不能回滚其他账号图书目录" }
+            },
+        )
+        val bookDir = okioPath(publishedBook)
         val platformFile = platformFile(file)
         rememberPendingWebDavImport(
             platformFile = platformFile,
             localFile = file,
             sourceUrl = sourceUrl,
             sourceSize = file.length(),
+            storageIdentity = task.storageIdentity,
+            checkActive = { throwIfOnlineCompletionDownloadCancelled(task) },
         )
         logWebDav(
             "online completion epub imported dir=$bookDir " +
-                "title=${callStringPath(opf, "metadata", "title", "value")} " +
-                "uuid=${callStringPath(opf, "metadata", "uuid", "value")}",
+                "title=${nativeOpfMetadataText(opf, "title")} " +
+                "uuid=${nativeOpfMetadataText(opf, "uuid")}",
         )
         val importMethod = findImportBookMethod(bookshelf)
         val importArgs = importBookArgs(
@@ -1833,27 +2022,43 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(file: File, target
             opf,
             sourceUrl,
             java.lang.Long.valueOf(file.length()),
+            checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) },
         )
+        throwIfOnlineCompletionDownloadCancelled(task)
         logWebDav(
             "online completion importBook invoking uid=${currentUserId(bookshelf) ?: -1L} " +
                 "method=${importMethod.name}/${importMethod.parameterTypes.size} " +
                 "argTypes=${importArgs.joinToString { it?.javaClass?.simpleName ?: "null" }} " +
                 "bookDir=${bookDir.toString().take(160)} opf=${opf.javaClass.simpleName}",
         )
+        if (!task.control.beginPublishing()) throw OnlineCompletionDownloadCancelledException("导入前已停止")
+        onlineCompletionProgressNotifiers[task.notificationId]
+            ?.running(95, "正在完成导入，提交后不能取消", force = true)
         val result = invokeSuspendBlocking(
             importMethod,
             bookshelf,
             *importArgs,
         )
+        // Native import has committed its row and catalog before returning its authoritative row ID.
+        // A later cancellation must not restore/remove the files underneath that committed record.
+        val importedRowId = onlineCompletionImportRowId(result)
+        if (importedRowId != null) {
+            committed = OnlineCompletionImportResult(imported = true, bookDir = publishedBook)
+            task.control.markCommitted()
+            task.importedBookDir = publishedBook
+            task.importedBookFileKey = com.reamicro.fix.online.download.onlineCompletionDirectoryKey(publishedBook)
+            runCatching { requireNotNull(publication).complete() }
+                .onFailure { HookRuntime.logError("$LOG_PREFIX import committed; backup cleanup failed", it) }
+        }
+        throwIfOnlineCompletionDownloadCancelled(task)
         logWebDav(
             "online completion importBook raw result=${result?.javaClass?.name ?: "null"} " +
                 "value=$result",
         )
-        val importedRowId = onlineCompletionImportRowId(result)
         logWebDav(
             "online completion importBook result parts=" +
-                "first=${result?.let { onlineCompletionImportPart(it, "getFirst", "a") }?.let { "${it.javaClass.name}:$it" }} " +
-                "second=${result?.let { onlineCompletionImportPart(it, "getSecond", "b") }?.let { "${it.javaClass.name}:$it" }} " +
+                "first=${result?.let { onlineCompletionImportPart(it, "first") }?.let { "${it.javaClass.name}:$it" }} " +
+                "second=${result?.let { onlineCompletionImportPart(it, "second") }?.let { "${it.javaClass.name}:$it" }} " +
                 "rowId=${importedRowId ?: -1L}",
         )
         val importedBook = syncOnlineCompletionImportedBookMetadata(
@@ -1861,7 +2066,11 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(file: File, target
             target = target,
             sourceUrl = sourceUrl,
             importedRowId = importedRowId,
+            storageIdentity = task.storageIdentity,
+            expectedUuid = importUuid,
+            checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) },
         )
+        throwIfOnlineCompletionDownloadCancelled(task)
         if (result != true && importedBook == null) {
             error("阅微导入未返回成功，且未找到书架记录：${target.result.name}")
         }
@@ -1873,15 +2082,35 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(file: File, target
             )
         }
         val visibleBook = importedBook
-            ?: findOnlineCompletionImportedBook(bookshelf, target, sourceUrl)
+            ?: findOnlineCompletionImportedBook(bookshelf, target, sourceUrl, storageIdentity = task.storageIdentity,
+                expectedUuid = importUuid)
             ?: error("阅微导入后未找到书架记录：${target.result.name}")
-        OnlineCompletionImportResult(
-            imported = true,
-            bookDir = runCatching { bookDirectory(visibleBook).canonicalFile }
-                .getOrElse { File(bookDir.toString()).canonicalFile },
-        )
+        throwIfOnlineCompletionDownloadCancelled(task)
+        check(visibleBook.callLong("getUid") == task.storageIdentity.accountId) { "阅微导入书籍与下载账号不一致" }
+        val visibleDirectory = runCatching { bookDirectory(visibleBook).canonicalFile }
+            .getOrElse { File(bookDir.toString()).canonicalFile }
+        AccountHostRuntime.withCurrentStorage(task.storageIdentity) {
+            throwIfOnlineCompletionDownloadCancelled(task)
+            task.importedBookFileKey = com.reamicro.fix.online.download.onlineCompletionDirectoryKey(visibleDirectory)
+            task.importedBookDir = visibleDirectory
+        }
+        committed = OnlineCompletionImportResult(imported = true, bookDir = visibleDirectory)
+        task.control.markCommitted()
+        runCatching { requireNotNull(publication).complete() }
+            .onFailure { HookRuntime.logError("$LOG_PREFIX import committed; backup cleanup failed", it) }
+        requireNotNull(committed)
+    } catch (failure: Throwable) {
+        val result = committed
+        if (result != null) {
+            HookRuntime.logError("$LOG_PREFIX native import committed; post-import refresh failed", failure)
+            result
+        } else {
+            runCatching { publication?.rollback() }.onFailure(failure::addSuppressed)
+            throw failure
+        }
     } finally {
-        OnlineCompletionImportSignal.forget(importUuid, importTitle, sourceUrl)
+        importPlan?.let(ModuleImportPrecheck::discard)
+        OnlineCompletionImportSignal.forget(importUuid, importTitle, sourceUrl, task.storageIdentity)
     }
 }
 
@@ -1890,27 +2119,28 @@ internal fun WebDavDriveHook.syncOnlineCompletionImportedBookMetadata(
     target: OnlineDownloadTarget,
     sourceUrl: String,
     importedRowId: Long? = null,
+    storageIdentity: AccountHostRuntime.Identity = requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())),
+    expectedUuid: String? = null,
+    checkCurrent: () -> Unit = {},
 ): Any? =
     runCatching {
+        checkCurrent()
+        check(AccountHostRuntime.isCurrentStorage(storageIdentity)) { "账号已切换，请重新导入" }
         val imported = findOnlineCompletionImportedBook(
             bookshelf,
             target,
             sourceUrl,
             importedRowId,
+            storageIdentity,
+            expectedUuid,
         ) ?: return null
+        check(AccountHostRuntime.isCurrentStorage(storageIdentity)) { "账号已切换，请重新导入" }
         val bookDir = runCatching { bookDirectory(imported).canonicalFile }.getOrNull()
         val size = bookDir?.takeIf { it.isDirectory }?.let { bookDirectorySize(it) }
-        val updated = copyBookWithBackupAndPublisher(
-            book = imported,
-            backupType = BACKUP_TYPE_ONLINE_COMPLETION,
-            backupId = onlineImportedBookBackupId(target),
-            backupCode = target.source.id,
-            publisher = imported.callString("getPublisher"),
-            cover = imported.callString("getCover").ifBlank { target.result.coverUrl },
-            size = size,
-            updated = System.currentTimeMillis(),
+        val updated = updateOnlineContentMetadata(
+            imported, target, size ?: imported.callLong("getSize"), storageIdentity, bookshelf, checkCurrent,
         )
-        updateLocalBook(updated)
+        check(AccountHostRuntime.isCurrentStorage(storageIdentity)) { "账号已切换，请重新导入" }
         logWebDav(
             "online completion metadata synced uuid=${updated.callString("getUuid")} " +
                 "backupId=${bookBackupIdOf(updated)} source=${target.source.name} " +
@@ -1919,7 +2149,9 @@ internal fun WebDavDriveHook.syncOnlineCompletionImportedBookMetadata(
         )
         updated
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX online completion metadata sync failed: ${it.stackTraceToString()}")
+        TaskCancellation.rethrowIfCancelled(it)
+        checkCurrent()
+        HookRuntime.log("$LOG_PREFIX online completion metadata sync failed: ${it.stackTraceToString()}")
     }.getOrNull()
 
 internal fun WebDavDriveHook.findOnlineCompletionImportedBook(
@@ -1927,186 +2159,64 @@ internal fun WebDavDriveHook.findOnlineCompletionImportedBook(
     target: OnlineDownloadTarget,
     sourceUrl: String,
     importedRowId: Long? = null,
+    storageIdentity: AccountHostRuntime.Identity = requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())),
+    expectedUuid: String? = null,
 ): Any? {
-    val located = importedRowId
-        ?.takeIf { it > 0L }
-        ?.let(::findLocalBookById)
-        ?: findLocalBookByUrl(bookshelf, sourceUrl)
-        ?: findLocalBookByUrl(bookshelf, target.result.detailUrl)
-        ?: currentUserId(bookshelf)?.let { uid ->
-            findLocalBookByUuid(uid, onlineBookUuid(target))
-        }
-    if (located != null) return located
-
-    val targetTitle = target.result.name.normalizedOnlineCompletionTitle()
-    return listLocalBooks(bookshelf)
-        ?.asSequence()
-        ?.filterNotNull()
-        ?.firstOrNull { book ->
-            book.callString("getTitle").normalizedOnlineCompletionTitle() == targetTitle
-        }
-}
-
-private fun String.normalizedOnlineCompletionTitle(): String =
-    trim().replace(Regex("\\s+"), " ").lowercase()
-
-internal fun WebDavDriveHook.syncOnlineCompletionImportedBookSize(target: OnlineDownloadTarget) {
-    runCatching {
-        val bookshelf = currentBookshelfRepository() ?: return
-        val sourceUrl = target.result.detailUrl.ifBlank { target.source.sourceUrl }
-        val imported = findLocalBookByUrl(bookshelf, sourceUrl)
-            ?: findLocalBookByUrl(bookshelf, target.result.detailUrl)
-            ?: return
-        val bookDir = bookDirectory(imported).canonicalFile
-        val size = bookDirectorySize(bookDir)
-        val updated = copyBookWithBackupAndPublisher(
-            book = imported,
-            backupType = BACKUP_TYPE_ONLINE_COMPLETION,
-            backupId = bookBackupIdOf(imported).ifBlank { onlineImportedBookBackupId(target) },
-            backupCode = imported.callString("getBackupCode").ifBlank { target.source.id },
-            publisher = imported.callString("getPublisher"),
-            cover = imported.callString("getCover").ifBlank { target.result.coverUrl },
-            size = size,
-            updated = System.currentTimeMillis(),
-        )
-        updateLocalBook(updated)
-        logWebDav(
-            "online completion imported book size synced uuid=${updated.callString("getUuid")} size=$size",
-        )
-    }.onFailure {
-        XposedBridge.log("$LOG_PREFIX online completion size sync failed: ${it.stackTraceToString()}")
-    }
+    check(AccountHostRuntime.isCurrentStorage(storageIdentity)) { "账号已切换，请重新导入" }
+    val library = requireNotNull(com.reamicro.fix.core.HostStorageBindings.library)
+    val dao = requireNotNull(library.field("repository.dao").get(bookshelf))
+    val byRow = importedRowId?.takeIf { it > 0L }?.let {
+        invokeSuspendBlocking(library.method("findId"), dao, it)
+    }?.takeIf { it.callLong("getUid") == storageIdentity.accountId &&
+        (expectedUuid == null || it.callString("getUuid") == expectedUuid) }
+    check(AccountHostRuntime.isCurrentStorage(storageIdentity)) { "账号已切换，请重新导入" }
+    if (byRow != null) return byRow
+    val flow = requireNotNull(library.method("list").invoke(dao, storageIdentity.accountId))
+    val books = firstFlowValue(flow) as? Iterable<*> ?: return null
+    check(AccountHostRuntime.isCurrentStorage(storageIdentity)) { "账号已切换，请重新导入" }
+    val candidates = books.filterNotNull().filter { it.callLong("getUid") == storageIdentity.accountId }
+    if (expectedUuid != null) return candidates.singleOrNull { it.callString("getUuid") == expectedUuid }
+    val uuid = onlineBookUuid(target)
+    return candidates.singleOrNull { it.callString("getUuid") == uuid }
+        ?: candidates.singleOrNull { sourceUrl.isNotBlank() && it.callString("getUri") == sourceUrl }
+        ?: candidates.singleOrNull { target.result.detailUrl.isNotBlank() && it.callString("getUri") == target.result.detailUrl }
 }
 
 internal fun WebDavDriveHook.importOnlineCompletionEpubDirectory(unzipDir: Any, booksDir: Any): Pair<Any, Any> {
-    val managerClass = cls(com.reamicro.fix.core.HostSymbols.resolveMethodOwner(EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD))
-    val manager = if (com.reamicro.fix.core.HostSymbols.usesRc3Abi) null else runCatching {
-        managerClass.hostField("INSTANCE").apply { isAccessible = true }.get(null)
-    }.getOrNull() ?: error("阅微 EpubFileManager INSTANCE 未找到")
-
-    val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
-        .filter { candidate ->
-            (candidate.name == com.reamicro.fix.core.HostSymbols.resolveMethodName(EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD) ||
-                candidate.hostNameMatches(EPUB_IMPORT_METHOD)) &&
-                candidate.parameterTypes.size >= 2 &&
-                typeMatches(candidate.parameterTypes[0], OKIO_PATH_CLASS) &&
-                typeMatches(candidate.parameterTypes[1], OKIO_PATH_CLASS)
-        }
-        .minByOrNull { it.parameterTypes.size }
-        ?.apply { isAccessible = true }
-        ?: error("阅微 EpubFileManager.import 方法未找到")
-
-    val importArgs = arrayListOf<Any?>(unzipDir, booksDir)
-    while (importArgs.size < importMethod.parameterTypes.size) importArgs.add(null)
-    val pair = importMethod.invoke(manager, *importArgs.toTypedArray())
-        ?: error("阅微 EpubFileManager.import 返回空")
-    // B4 将 Kotlin Pair 混淆成只有 a/b 字段的普通类，不能继续按 getFirst()/getSecond() 读取。
-    val first = onlineCompletionImportPart(pair, "getFirst", "a")
-        ?: error("阅微 EpubFileManager.import 未返回 bookDir")
-    val second = onlineCompletionImportPart(pair, "getSecond", "b")
-        ?: error("阅微 EpubFileManager.import 未返回 OPF")
-    logWebDav(
-        "online completion epub import returned type=${pair.javaClass.name} " +
-            "bookDir=${first.javaClass.simpleName} opf=${second.javaClass.simpleName}",
-    )
-    return first to second
+    val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.imports)
+    require(host.type("path").isInstance(unzipDir) && host.type("path").isInstance(booksDir))
+    val pair = requireNotNull(host.method("epubDirectory").invoke(null, unzipDir, booksDir, null)) {
+        "阅微 EPUB 导入返回空"
+    }
+    val directory = requireNotNull(host.field("pair.first").get(pair))
+    val opf = requireNotNull(host.field("pair.second").get(pair))
+    check(host.type("path").isInstance(directory) && host.type("opf").isInstance(opf)) { "阅微 EPUB 导入结果类型不匹配" }
+    return directory to opf
 }
-
-internal fun onlineCompletionImportPart(result: Any, getterName: String, fieldName: String): Any? =
-    runCatching {
-        result.javaClass.methods.firstOrNull {
-            it.hostNameMatches(getterName) && it.parameterTypes.isEmpty()
-        }?.apply { isAccessible = true }?.invoke(result)
-    }.getOrNull()
-        ?: runCatching {
-            result.javaClass.declaredFields.firstOrNull { it.name == fieldName }
-                ?.apply { isAccessible = true }
-                ?.get(result)
-        }.getOrNull()
-
+internal fun onlineCompletionImportPart(result: Any, role: String): Any? {
+    require(role == "first" || role == "second")
+    val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.imports)
+    require(host.type("pair").isInstance(result)) { "阅微导入结果不是 Pair" }
+    return host.field("pair.$role").get(result)
+}
 internal fun onlineCompletionImportRowId(result: Any?): Long? {
     if (result == null) return null
-    val first = onlineCompletionImportPart(result, "getFirst", "a")
-    val second = onlineCompletionImportPart(result, "getSecond", "b")
-    // importBook 在 B4 返回 Pair(false, 新书架记录行 ID)，第二项不是错误码。
+    val first = onlineCompletionImportPart(result, "first")
+    val second = onlineCompletionImportPart(result, "second")
+    // 导入结果 Pair 的第二项是新书架记录行 ID。
     return (second as? Number)
         ?.toLong()
         ?.takeIf { first is Boolean && it > 0L }
 }
 
 internal fun WebDavDriveHook.okioPath(file: File): Any =
-    classLoader.hostStaticMethod(OKIO_PATHS_CLASS, "get", String::class.java, java.lang.Boolean.TYPE)
-        .apply { isAccessible = true }
-        .invoke(null, file.absolutePath, false)
+    requireNotNull(requireNotNull(com.reamicro.fix.core.HostStorageBindings.catalog).method("path").invoke(null, file.absolutePath, false))
 
 internal fun WebDavDriveHook.obtainOnlineCompletionOpf(bookDir: Any): Any {
-    val opfClass = cls(OPF_CLASS)
-    if (com.reamicro.fix.core.HostSymbols.abiProfileId == "2.3.3-b4") {
-        // B4 将解析器并入 trd.k；使用已取证的静态成员映射，不再拿缺失的 Companion 做动态猜测。
-        val pathClass = cls(OKIO_PATH_CLASS)
-        require(pathClass.isInstance(bookDir)) { "EPUB 目录参数类型不匹配" }
-        val obtain = classLoader.hostStaticMethod(OPF_CLASS, "obtain", pathClass)
-        check(opfClass.isAssignableFrom(obtain.returnType)) { "EPUB OPF 解析器返回类型不匹配" }
-        return obtain.invoke(null, bookDir) ?: error("EPUB OPF 解析失败")
-    }
-    val companion = sequenceOf("INSTANCE", "Companion")
-        .mapNotNull { fieldName ->
-            runCatching {
-                opfClass.companionField(fieldName)?.let { field ->
-                    field.isAccessible = true
-                    field.get(null)
-                }
-            }.getOrNull()
-        }
-        .firstOrNull()
-        ?: (opfClass.declaredFields.asSequence() + opfClass.fields.asSequence())
-            .filter { Modifier.isStatic(it.modifiers) && it.type.name.contains("Opf\$Companion") }
-            .mapNotNull { field ->
-                runCatching {
-                    field.isAccessible = true
-                    field.get(null)
-                }.getOrNull()
-            }
-            .firstOrNull()
-        // B4 起 Opf 退化为数据类，Companion 被 R8 移除，改按签名反查解析器
-        ?: return obtainOnlineCompletionOpfBySignature(opfClass, bookDir)
-    val obtain = (companion.javaClass.methods.asSequence() + companion.javaClass.declaredMethods.asSequence())
-        .firstOrNull { it.hostNameMatches("obtain") && it.parameterTypes.size == 1 }
-        ?: return obtainOnlineCompletionOpfBySignature(opfClass, bookDir)
-    obtain.isAccessible = true
-    return obtain.invoke(companion, bookDir) ?: error("EPUB OPF 解析失败")
+    val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.catalog)
+    require(host.type("path").isInstance(bookDir)) { "EPUB 目录参数类型不匹配" }
+    return requireNotNull(host.method("opf").invoke(null, bookDir)) { "EPUB OPF 解析失败" }
 }
-
-/**
- * 新版宿主把 OPF 解析器从 Opf.Companion 挪走，并被 R8 合并进无关类。
- * 这里按「(okio.Path) -> Opf」签名在 dex 中反查静态方法再调用。
- */
-internal fun WebDavDriveHook.obtainOnlineCompletionOpfBySignature(opfClass: Class<*>, bookDir: Any): Any {
-    val pathClass = cls(OKIO_PATH_CLASS)
-    val owner = HostDexKit.findStaticMethodOwner(
-        returnDescriptor = hostTypeDescriptor(opfClass),
-        paramDescriptors = listOf(hostTypeDescriptor(pathClass)),
-        cacheKey = "online-completion-opf-obtain",
-    ) ?: error(
-        "EPUB OPF 解析器未找到: fields=" +
-            opfClass.declaredFields.joinToString { "${it.name}:${it.type.name}" },
-    )
-    val ownerClass = cls(owner)
-    val method = (ownerClass.declaredMethods.asSequence() + ownerClass.methods.asSequence())
-        .firstOrNull {
-            Modifier.isStatic(it.modifiers) &&
-                it.parameterTypes.size == 1 &&
-                it.parameterTypes[0] == pathClass &&
-                opfClass.isAssignableFrom(it.returnType)
-        }
-        ?: error("EPUB OPF 解析方法未找到: owner=$owner")
-    method.isAccessible = true
-    logWebDav("online completion opf resolver owner=$owner method=${method.name}")
-    return method.invoke(null, bookDir) ?: error("EPUB OPF 解析失败")
-}
-
-private fun hostTypeDescriptor(type: Class<*>): String =
-    "L" + type.name.replace('.', '/') + ";"
 
 internal fun WebDavDriveHook.updateOnlineCompletionNotification(
     context: Context,
@@ -2118,6 +2228,7 @@ internal fun WebDavDriveHook.updateOnlineCompletionNotification(
     progress: Int,
     done: Boolean,
 ): Boolean {
+    com.reamicro.fix.notification.OnlineNotificationEventOrder.accept(id, android.os.SystemClock.elapsedRealtimeNanos(), key)
     val moduleRelaySent = sendOnlineCompletionNotificationViaModule(
         context,
         id,
@@ -2165,13 +2276,18 @@ internal fun WebDavDriveHook.updateOnlineCompletionNotification(
             .setProgress(100, progress.coerceIn(0, 100), false)
         if (!done && cancellable) {
             builder.addAction(
+                android.R.drawable.ic_media_pause,
+                "暂停",
+                onlineCompletionCancelPendingIntent(context, id, key, pause = true),
+            )
+            builder.addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "\u53d6\u6d88",
                 onlineCompletionCancelPendingIntent(context, id, key),
             )
         }
         manager.notify(id, builder.build())
-        cancelOnlineCompletionNotificationIfDone(manager, id, done)
+        cancelOnlineCompletionNotificationIfDone(manager, id, done, text)
         logWebDav("online completion host notification posted id=$id moduleRelaySent=$moduleRelaySent")
         true
     }.getOrElse {
@@ -2190,10 +2306,11 @@ internal fun WebDavDriveHook.sendOnlineCompletionNotificationViaModule(
     progress: Int,
     done: Boolean,
 ): Boolean {
-    val broadcastSent = sendOnlineCompletionNotificationBroadcast(context, id, key, cancellable, title, text, progress, done)
+    val issuedAt = android.os.SystemClock.elapsedRealtimeNanos()
+    val broadcastSent = sendOnlineCompletionNotificationBroadcast(context, id, key, cancellable, title, text, progress, done, issuedAt)
     val shouldStartActivity = shouldStartOnlineCompletionNotificationActivity(id, done, broadcastSent)
     val activitySent = if (shouldStartActivity) {
-        startOnlineCompletionNotificationActivity(context, id, key, cancellable, title, text, progress, done)
+        startOnlineCompletionNotificationActivity(context, id, key, cancellable, title, text, progress, done, issuedAt)
     } else {
         false
     }
@@ -2230,9 +2347,10 @@ internal fun WebDavDriveHook.startOnlineCompletionNotificationActivity(
     text: String,
     progress: Int,
     done: Boolean,
+    issuedAt: Long,
 ): Boolean =
     runCatching {
-        val intent = onlineCompletionNotificationIntent(id, key, cancellable, title, text, progress, done).apply {
+        val intent = onlineCompletionNotificationIntent(id, key, cancellable, title, text, progress, done, issuedAt).apply {
             setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_ACTIVITY_CLASS)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
@@ -2261,9 +2379,10 @@ internal fun WebDavDriveHook.sendOnlineCompletionNotificationBroadcast(
     text: String,
     progress: Int,
     done: Boolean,
+    issuedAt: Long,
 ): Boolean =
     runCatching {
-        val intent = onlineCompletionNotificationIntent(id, key, cancellable, title, text, progress, done).apply {
+        val intent = onlineCompletionNotificationIntent(id, key, cancellable, title, text, progress, done, issuedAt).apply {
             setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS)
         }
         context.sendBroadcast(intent)
@@ -2285,8 +2404,11 @@ internal fun WebDavDriveHook.onlineCompletionNotificationIntent(
     text: String,
     progress: Int,
     done: Boolean,
+    issuedAt: Long,
 ): Intent =
     Intent(ONLINE_COMPLETION_NOTIFICATION_ACTION).apply {
+            putExtra(com.reamicro.fix.notification.OnlineNotificationEventOrder.EXTRA_ISSUED_AT,
+                issuedAt)
             addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
             addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID, id)
@@ -2299,11 +2421,19 @@ internal fun WebDavDriveHook.onlineCompletionNotificationIntent(
             putExtra(ModuleLogState.EXTRA_CONCISE_LOG_ENABLED, settingsProvider().conciseLogEnabled)
     }
 
-internal fun WebDavDriveHook.importBookArgs(method: Method, file: Any?, bookDir: Any?, opf: Any?, url: Any?, size: Any?): Array<Any?> {
-    val realParamCount = (method.parameterTypes.size - 1).coerceAtLeast(0)
-    val args = arrayListOf(file, bookDir, opf, url, size)
-    while (args.size < realParamCount) {
-        args.add(functionProxy("ImportProgress", FUNCTION1_CLASS) { targetUnit() })
+internal fun WebDavDriveHook.importBookArgs(
+    method: Method, file: Any?, bookDir: Any?, opf: Any?, url: Any?, size: Any?,
+    checkCurrent: () -> Unit = {},
+): Array<Any?> {
+    val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.imports) { "Native import contract unavailable" }
+    check(method == host.method("normal"))
+    val arguments = arrayOfNulls<Any>(method.parameterCount - 1)
+    val progress = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).callback(host.type("function1")) { checkCurrent() }
+    for ((role, value) in mapOf("normalFile" to file, "normalPath" to bookDir, "normalOpf" to opf,
+        "normalUrl" to url, "normalSize" to size, "normalProgress" to progress)) {
+        val index = host.value(role)
+        check(value == null || method.parameterTypes[index].isInstance(value)) { "Invalid native import argument $role" }
+        arguments[index] = value
     }
-    return args.toTypedArray()
+    return arguments
 }

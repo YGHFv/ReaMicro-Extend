@@ -2,32 +2,22 @@ package com.reamicro.fix.hook
 
 import android.view.KeyEvent
 import android.view.View
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostReleaseClass
-import com.reamicro.fix.core.hostReleaseMethod
-import com.reamicro.fix.core.hostReleaseField
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.core.HostReaderGuardBindings
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 
 internal fun ReaderHook.hookReaderBackKey() {
-    if (!HostSymbols.usesRc3Abi) return
-    // RC3 根焦点节点把 BACK 按下解释为 FocusDirection.Exit，松开却不消费。
-    // 正文及普通底栏放行按下事件，让 Activity 接收完整按键并执行原有返回链。
-    val rootKeyNode = classLoader.hostReleaseClass("tf")
-    val ownerField = rootKeyNode.hostReleaseField("p").apply { isAccessible = true }
-    val handler = rootKeyNode.hostReleaseMethod("F", KeyEvent::class.java)
-    val stateField = classLoader.hostClass("app.zhendong.reamicro.arch.MVIViewModel").hostField("uiState")
-    val stateClass = classLoader.hostClass("app.zhendong.reamicro.ui.reader.ReaderUiState")
-    val statusField = stateClass.hostField("status")
-    val sheetField = stateClass.hostField("sheetStatus")
-    val hiddenClass = if (HostSymbols.usesReleaseLayout) classLoader.hostReleaseClass("lrb") else classLoader.loadClass("mrb")
-    val selectionClass = classLoader.hostClass("org.epub.ui.EpubSelectionController")
-    val selectionMethod = selectionClass.hostMethod("getSelection")
-    XposedBridge.hookMethod(handler, object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
+    val symbols = requireNotNull(HostReaderGuardBindings.backKey) { "Reader back-key contract unavailable" }
+    val ownerField = symbols.field("owner")
+    val handler = symbols.method("key")
+    val stateClass = symbols.type("state")
+    val statusField = symbols.field("status")
+    val sheetField = symbols.field("sheet")
+    val hiddenClass = symbols.type("hidden")
+    val selectionClass = symbols.type("selection")
+    val selectionMethod = symbols.method("selection")
+    HookRuntime.hookMethod(handler, object : HookCallback() {
+        override fun before(param: Call) {
             val event = param.args?.getOrNull(0) as? KeyEvent ?: return
             if (event.keyCode != KeyEvent.KEYCODE_BACK || event.action != KeyEvent.ACTION_DOWN) return
             val activity = activityProvider() ?: return
@@ -35,12 +25,12 @@ internal fun ReaderHook.hookReaderBackKey() {
             val view = ownerField.get(param.thisObject) as? View ?: return
             if (!view.isShown || view.rootView !== activity.window.decorView) return
             val vm = currentViewModelRef?.get() ?: return
-            val state = callNoArg(stateField.get(vm), "getValue") ?: return
+            val state = symbols.method("currentState").invoke(vm) ?: return
             if (!stateClass.isInstance(state)) return
             val selection = currentSelectionControllerRef?.get() ?: return
             if (!selectionClass.isInstance(selection)) return
             val release = shouldReleaseReaderBackKey(
-                profile = HostSymbols.profileId,
+                contractAvailable = true,
                 keyCode = event.keyCode,
                 action = event.action,
                 repeatCount = event.repeatCount,
@@ -54,5 +44,5 @@ internal fun ReaderHook.hookReaderBackKey() {
             if (release) param.result = false
         }
     })
-    XposedBridge.log("ReaMicro RC3 reader BACK focus pass-through installed")
+    HookRuntime.log("ReaMicro reader BACK focus pass-through installed from current APK")
 }

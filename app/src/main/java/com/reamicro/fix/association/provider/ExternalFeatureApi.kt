@@ -11,4 +11,8 @@ class ExternalFeatureApi(
     val settingsProvider: () -> ModuleSettingsSnapshot,
     val fontSettingsProvider: () -> FontSettingsSnapshot,
     val onSearchSourceDisabled: (BookSource, String) -> Unit,
-)
+) {
+    /** Optional local integrations bind logical symbols through the same installed query results. */
+    val hostSymbols: ExternalHostSymbols by lazy { ExternalHostSymbols(classLoader) }
+    val manualEditPublicEntryVisible: Boolean get() = settingsProvider().associationManualEditUnlocked
+}

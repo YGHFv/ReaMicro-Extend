@@ -1,31 +1,51 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostStaticMethod
-
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.xposed.XposedHelpers
+import android.app.Activity
+import com.reamicro.fix.core.HostCoroutines
 import java.io.File
-import java.lang.reflect.Proxy
+import java.lang.ref.WeakReference
 import java.util.concurrent.CancellationException
 
 internal data class ReaderRefreshSession(
     val viewModel: Any, val epub: Any, val root: File, val generation: Long,
+    val presentation: Long, val activity: WeakReference<Activity>,
 )
 
 internal fun ReaderHook.captureRefreshSession(viewModel: Any, root: File): ReaderRefreshSession? {
+    val activity = activeReaderActivity() ?: return null
     if (currentViewModelRef?.get() !== viewModel || !sameReaderBookRoot(currentEpubRoot(), root)) return null
     val epub = currentEpubStrong ?: currentEpubRef?.get() ?: return null
-    return ReaderRefreshSession(viewModel, epub, root, onDemandRefreshCoordinator.generation())
+    return ReaderRefreshSession(viewModel, epub, root, onDemandRefreshCoordinator.generation(),
+        onDemandRefreshCoordinator.presentation(), WeakReference(activity))
 }
 
 internal fun ReaderHook.isRefreshSessionCurrent(session: ReaderRefreshSession): Boolean =
     onDemandRefreshCoordinator.isGeneration(session.generation) &&
+        onDemandRefreshCoordinator.isPresentation(session.presentation) &&
+        session.activity.get()?.let { it === activeReaderActivity() } == true &&
         currentViewModelRef?.get() === session.viewModel &&
         (currentEpubStrong ?: currentEpubRef?.get()) === session.epub
 
+internal fun ReaderHook.activeReaderActivity(): Activity? =
+    activityProvider()?.takeIf {
+        !readerActivityPaused && readerActivityRef?.get() === it &&
+            isActivityResumedProvider() && !it.isFinishing && !it.isDestroyed
+    }
+
+internal fun ReaderHook.suspendOnDemandRefreshes() {
+    onDemandRefreshCoordinator.suspendPresentation()
+    onDemandHandler.removeCallbacksAndMessages(null)
+    onDemandJumpLease = null
+    onDemandVisibleRefreshKey = null
+    onDemandVisibleSlot = null
+    onDemandVisibleBusyRetries = 0
+    lastOnDemandPrefetchSpineKey = ""
+    onDemandPrefetchRetryCount.clear()
+}
+
 internal fun ReaderHook.invalidateOnDemandRefreshes() {
     onDemandRefreshCoordinator.reset()
+    onDemandHandler.removeCallbacksAndMessages(null)
     onDemandSpineTable = null
     onDemandPrefetchInFlight.clear()
     onDemandPrefetchRetryCount.clear()
@@ -44,15 +64,7 @@ internal fun ReaderHook.invokeRefreshHostSuspend(
     session: ReaderRefreshSession, current: () -> Boolean, operation: (Any?) -> Any?,
 ): Any? {
     requireRefreshCurrent(current)
-    val vmType = classLoader.hostClass("androidx.lifecycle.ViewModel")
-    val scope = classLoader.hostClass("androidx.lifecycle.ViewModelKt")
-        .hostMethod("getViewModelScope", vmType).invoke(null, session.viewModel)
-    val context = XposedHelpers.callMethod(scope, "getCoroutineContext")
-    val job = requireNotNull(classLoader.hostStaticMethod(
-        "kotlinx.coroutines.JobKt",
-        "getJob", classLoader.hostClass("kotlin.coroutines.CoroutineContext"),
-    ).invoke(null, context)) { "Reader ViewModel job missing" }
-    check(XposedHelpers.callMethod(job, "isActive") == true) { "Reader ViewModel job is inactive" }
+    val job = HostCoroutines.activeViewModelJob(classLoader, session.viewModel)
     return invokeSelectionHostSuspend(parentContext = job) { cont ->
         requireRefreshCurrent(current)
         operation(cont)
@@ -62,24 +74,9 @@ internal fun ReaderHook.invokeRefreshHostSuspend(
 internal fun ReaderHook.refreshOnMain(
     session: ReaderRefreshSession, current: () -> Boolean, action: () -> Any?,
 ): Any? {
-    val f2 = classLoader.hostClass("kotlin.jvm.functions.Function2")
-    val block = Proxy.newProxyInstance(classLoader, arrayOf(f2)) { proxy, method, args ->
-        when (com.reamicro.fix.core.HostSymbols.logicalMethodName(method)) {
-            "invoke" -> { requireRefreshCurrent(current); action() }
-            "toString" -> "ReaMicroRefreshMain"
-            "hashCode" -> System.identityHashCode(proxy)
-            "equals" -> proxy === args?.firstOrNull()
-            else -> null
-        }
+    return invokeRefreshHostSuspend(session, current) { continuation ->
+        HostCoroutines.withMain(classLoader, continuation) { requireRefreshCurrent(current); action() }
     }
-    val main = com.reamicro.fix.core.HostCoroutines.mainDispatcher(classLoader)
-    // B4 合并门面的不同静态方法分属不同 owner，必须按已有成员映射分派。
-    val withContext = classLoader.hostStaticMethod(
-        "kotlinx.coroutines.BuildersKt",
-        "withContext", classLoader.hostClass("kotlin.coroutines.CoroutineContext"), f2,
-        classLoader.hostClass("kotlin.coroutines.Continuation"),
-    )
-    return invokeRefreshHostSuspend(session, current) { withContext.invoke(null, main, block, it) }
 }
 
 internal class ReaderRefreshLockBusy : IllegalStateException("Reader virtual window is busy")

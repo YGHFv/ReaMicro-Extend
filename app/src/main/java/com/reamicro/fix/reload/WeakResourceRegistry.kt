@@ -18,6 +18,11 @@ internal class WeakResourceRegistry<T : Any> {
         return references.mapNotNull { it.get() }.also { references.clear() }
     }
 
+    @Synchronized fun snapshot(): List<T> {
+        prune()
+        return references.mapNotNull { it.get() }
+    }
+
     @Synchronized fun size(): Int {
         prune()
         return references.size

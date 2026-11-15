@@ -1,23 +1,12 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.B2NativeUi
-import com.reamicro.fix.core.HostNativeUiAbi
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostStaticMethod
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 internal class ReaderSearchPaintEpoch(loader: ClassLoader) {
-    // B4 将状态工厂合并到原生门面，不能再从已删除的 Compose 文件类查找。
-    private val state = if (HostNativeUiAbi.supports(HostSymbols.profileId)) {
-        B2NativeUi(loader).mutableState(0L)
-    } else loader.hostStaticMethod(
-        "androidx.compose.runtime.SnapshotStateKt__SnapshotStateKt",
-        "mutableStateOf", Any::class.java,
-    ).invoke(null, 0L)
-    private val get = loader.hostClass("androidx.compose.runtime.State").hostMethod("getValue")
-    private val set = loader.hostClass("androidx.compose.runtime.MutableState").hostMethod("setValue", Any::class.java)
+    private val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).also { require(it.loader === loader) }
+    private val state = requireNotNull(ui.call("state", 0L))
+    private val get = ui.method("stateGet")
+    private val set = ui.method("stateSet")
     private var epoch = 0L
     private data class Seen(val owner: java.lang.ref.WeakReference<Any>, var epoch: Long)
     private val seen = arrayListOf<Seen>()
@@ -43,7 +32,7 @@ internal fun ReaderHook.observeSearchPaint(owner: Any): Boolean {
         epoch.observe(owner)
     }.getOrElse {
         searchPaintUnavailable = true
-        XposedBridge.logError("ReaMicro search paint observer unavailable", it)
+        HookRuntime.logError("ReaMicro search paint observer unavailable", it)
         false
     }
 }
@@ -55,7 +44,7 @@ internal fun ReaderHook.invalidateSearchPaint(): Boolean {
         true
     }.getOrElse {
         searchPaintUnavailable = true
-        XposedBridge.logError("ReaMicro search paint invalidation unavailable", it)
+        HookRuntime.logError("ReaMicro search paint invalidation unavailable", it)
         false
     }
 }

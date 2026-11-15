@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import com.reamicro.fix.hook.webdav.*
+import com.reamicro.fix.reload.TaskCancellation
+import com.reamicro.fix.reload.cancellableQuery
 
 internal fun syntheticLocalLibraryBookEntry(path: String): LocalLibraryEntry =
     LocalLibraryEntry(
@@ -61,8 +63,8 @@ internal fun queryDocumentEntry(context: Context, documentUri: Uri, treeUri: Str
         DocumentsContract.Document.COLUMN_LAST_MODIFIED,
     )
     return runCatching {
-        context.contentResolver.query(documentUri, projection, null, null, null)?.use { cursor ->
-            if (!cursor.moveToFirst()) return@use null
+        context.contentResolver.cancellableQuery(documentUri, projection) { cursor ->
+            if (cursor == null || !cursor.moveToFirst()) return@cancellableQuery null
             val name = cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME))
             val mime = cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE))
             LocalLibraryEntry(
@@ -76,21 +78,24 @@ internal fun queryDocumentEntry(context: Context, documentUri: Uri, treeUri: Str
                     .takeIf { it > 0L } ?: System.currentTimeMillis(),
             )
         }
-    }.getOrNull()
+    }.getOrElse { error ->
+        TaskCancellation.rethrowIfCancelled(error)
+        null
+    }
 }
 
 internal fun queryDocumentName(context: Context, documentUri: Uri): String =
     runCatching {
-        context.contentResolver.query(
+        context.contentResolver.cancellableQuery(
             documentUri,
             arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)) else ""
-        }.orEmpty()
-    }.getOrDefault("")
+        ) { cursor ->
+            if (cursor != null && cursor.moveToFirst()) cursor.stringAt(cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)) else ""
+        }
+    }.getOrElse { error ->
+        TaskCancellation.rethrowIfCancelled(error)
+        ""
+    }
 
 internal fun encodeLocalLibraryPath(treeUri: String, documentId: String): String =
     "$LOCAL_LIBRARY_PATH_PREFIX${treeUri.localPathPart()}:${documentId.localPathPart()}"

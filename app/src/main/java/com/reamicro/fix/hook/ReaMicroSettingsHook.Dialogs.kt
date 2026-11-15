@@ -1,22 +1,17 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.reload.runOnModuleUiThread
+
 import android.app.Activity
 import android.app.Dialog
 import android.content.Context
-import android.content.ComponentCallbacks
-import android.content.res.Configuration
 import android.content.Intent
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
-import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -28,16 +23,17 @@ import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePreset
 import com.reamicro.fix.ai.AiImagePresetTarget
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
 
 internal fun ReaMicroSettingsHook.openHookInstallReportDialog() {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
+            if (openNestedInjectedRoute(InjectedRoute.ModuleDiagnostics)) return@runCatching
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, "模块自检", colors))
             card.addView(
@@ -63,7 +59,7 @@ internal fun ReaMicroSettingsHook.openHookInstallReportDialog() {
             card.addView(actions)
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX hook install report dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX hook install report dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -86,7 +82,7 @@ internal fun ReaMicroSettingsHook.openAccountDataDocumentPicker() {
         activity.startActivityForResult(intent, ACCOUNT_DATA_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         Toast.makeText(activity, "\u65e0\u6cd5\u6253\u5f00\u6570\u636e\u9009\u62e9\u5668", Toast.LENGTH_SHORT).show()
-        XposedBridge.log("$LOG_PREFIX failed to open account data picker: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to open account data picker: ${it.stackTraceToString()}")
     }
 }
 
@@ -109,7 +105,7 @@ internal fun ReaMicroSettingsHook.openAccountCredentialDocumentPicker() {
         activity.startActivityForResult(intent, ACCOUNT_CREDENTIAL_DOCUMENT_REQUEST_CODE)
     }.onFailure {
         Toast.makeText(activity, "\u65e0\u6cd5\u6253\u5f00\u51ed\u8bc1\u9009\u62e9\u5668", Toast.LENGTH_SHORT).show()
-        XposedBridge.log("$LOG_PREFIX failed to open account credential picker: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX failed to open account credential picker: ${it.stackTraceToString()}")
     }
 }
 
@@ -312,6 +308,7 @@ internal fun ReaMicroSettingsHook.renderImagePresetPickerContent(target: AiImage
 
 internal fun ReaMicroSettingsHook.settingsDialogCard(context: Context, colors: SettingsDialogColors): LinearLayout =
     LinearLayout(context).apply {
+        HostSettingsDialogs.markCard(this)
         orientation = LinearLayout.VERTICAL
         setPadding(
             settingsDp(context, 20),
@@ -332,9 +329,9 @@ internal fun ReaMicroSettingsHook.settingsDialogTitle(
     colors: SettingsDialogColors,
 ): TextView =
     TextView(context).apply {
+        HostSettingsDialogs.markTitle(this)
         text = title
-        textSize = 18f
-        typeface = Typeface.DEFAULT_BOLD
+        EmbeddedHostUi.text(this, "TitleLarge")
         includeFontPadding = false
         setTextColor(colors.title)
         layoutParams = LinearLayout.LayoutParams(
@@ -377,7 +374,7 @@ internal fun ReaMicroSettingsHook.settingsDialogStatus(
 ): TextView =
     TextView(context).apply {
         text = message
-        textSize = 13f
+        EmbeddedHostUi.text(this, "BodySmall")
         setTextColor(colors.body)
         includeFontPadding = false
         layoutParams = LinearLayout.LayoutParams(
@@ -404,8 +401,7 @@ internal fun ReaMicroSettingsHook.settingsDialogButton(
 ): TextView =
     TextView(context).apply {
         text = title
-        textSize = 14f
-        typeface = Typeface.DEFAULT_BOLD
+        EmbeddedHostUi.text(this, "LabelLarge")
         gravity = Gravity.CENTER
         setSingleLine(true)
         minHeight = settingsDp(context, 44)
@@ -454,7 +450,7 @@ internal fun ReaMicroSettingsHook.settingsDialogSwitchRow(
 ): Switch =
     Switch(context).apply {
         text = title
-        textSize = 14f
+        EmbeddedHostUi.text(this, "LabelLarge")
         setTextColor(colors.title)
         isChecked = checked
         showText = false
@@ -496,6 +492,10 @@ internal fun ReaMicroSettingsHook.settingsDialogScroll(context: Context, card: L
         )
     }
 
+internal fun ReaMicroSettingsHook.settingsDialog(activity: Activity): Dialog =
+    HostSettingsDialogs.create(this, activity)
+
+@Suppress("UNUSED_PARAMETER")
 internal fun ReaMicroSettingsHook.showSettingsDialog(
     dialog: Dialog,
     content: View,
@@ -503,44 +503,7 @@ internal fun ReaMicroSettingsHook.showSettingsDialog(
     widthRatio: Float = 0.9f,
     dismissOnThemeChange: Boolean = false,
 ) {
-    dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-    dialog.setContentView(content)
-    dialog.window?.let { window ->
-        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        window.setDimAmount(0.46f)
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-    }
-    dialog.show()
-    if (dismissOnThemeChange) {
-
-        val callbacks = object : ComponentCallbacks {
-            override fun onConfigurationChanged(newConfig: Configuration) {
-                ModuleDialogTheme.invalidate()
-                runCatching { activity.unregisterComponentCallbacks(this) }
-                if (dialog.isShowing) dialog.dismiss()
-            }
-
-            override fun onLowMemory() = Unit
-        }
-        activity.registerComponentCallbacks(callbacks)
-        dialog.window?.decorView?.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-            override fun onViewAttachedToWindow(view: View) = Unit
-            override fun onViewDetachedFromWindow(view: View) {
-                runCatching { activity.unregisterComponentCallbacks(callbacks) }
-                view.removeOnAttachStateChangeListener(this)
-            }
-        })
-    }
-    dialog.window?.let { window ->
-        window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        window.setDimAmount(0.46f)
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        window.setLayout(
-            (activity.resources.displayMetrics.widthPixels * widthRatio).toInt(),
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        )
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-    }
+    HostSettingsDialogs.show(dialog, content, dismissOnThemeChange)
 }
 
 internal fun ReaMicroSettingsHook.showAiModelSelectionDialog(
@@ -549,7 +512,7 @@ internal fun ReaMicroSettingsHook.showAiModelSelectionDialog(
     colors: SettingsDialogColors,
     onSelected: (String) -> Unit,
 ) {
-    val dialog = Dialog(activity)
+    val dialog = settingsDialog(activity)
     val card = settingsDialogCard(activity, colors)
     card.addView(settingsDialogTitle(activity, "\u9009\u62e9\u6a21\u578b", colors))
     models.forEach { model ->
@@ -571,7 +534,7 @@ internal fun ReaMicroSettingsHook.settingsDialogChoiceRow(
 ): TextView =
     TextView(context).apply {
         text = title
-        textSize = 14f
+        EmbeddedHostUi.text(this, "LabelLarge")
         setTextColor(colors.title)
         setSingleLine(false)
         setPadding(
@@ -594,10 +557,10 @@ internal fun ReaMicroSettingsHook.openDictionaryPresetDialog() {
 
 internal fun ReaMicroSettingsHook.openDictionaryPresetDialog(existing: AiDictionaryPreset?) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val nameInput = settingsDialogInput(activity, "\u9884\u8bbe\u540d\u79f0", singleLine = true, colors = colors).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
@@ -687,7 +650,7 @@ internal fun ReaMicroSettingsHook.openDictionaryPresetDialog(existing: AiDiction
             refreshButtons()
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open dictionary preset dialog: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open dictionary preset dialog: ${it.stackTraceToString()}")
             showToast("\u65e0\u6cd5\u6253\u5f00\u8bcd\u5178\u9884\u8bbe")
         }
     }
@@ -699,11 +662,11 @@ internal fun ReaMicroSettingsHook.openImagePresetDialog(target: AiImagePresetTar
 
 internal fun ReaMicroSettingsHook.openImagePresetDialog(target: AiImagePresetTarget, existing: AiImagePreset?) {
     val activity = activityProvider() ?: return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val actualTarget = existing?.target ?: target
             val colors = SettingsDialogColors(activity)
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = settingsDialogCard(activity, colors)
             val nameInput = settingsDialogInput(activity, "\u9884\u8bbe\u540d\u79f0", singleLine = true, colors = colors).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
@@ -793,7 +756,7 @@ internal fun ReaMicroSettingsHook.openImagePresetDialog(target: AiImagePresetTar
             refreshButtons()
             showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to open image preset dialog: ${it.stackTraceToString()}")
+            HookRuntime.log("$LOG_PREFIX failed to open image preset dialog: ${it.stackTraceToString()}")
             showToast("\u65e0\u6cd5\u6253\u5f00\u751f\u56fe\u9884\u8bbe")
         }
     }
@@ -805,15 +768,14 @@ internal fun ReaMicroSettingsHook.updateModuleDialogTheme(composer: Any) {
         val scheme = colorScheme(composer)
         val pageBackground = composeColorToArgb(backgroundDim(composer))
         val rowBackground = composeColorToArgb(
-            method(THEME_KT_CLASS, BACKGROUND_AUTO_METHOD, 1).invoke(null, scheme) as Long,
+            requireNotNull(com.reamicro.fix.core.HostUiBindings.current).method("backgroundAuto").invoke(null, scheme) as Long,
         )
         val border = composeColorToArgb(
-            method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, scheme) as Long,
+            requireNotNull(com.reamicro.fix.core.HostUiBindings.current).method("borderVariant").invoke(null, scheme) as Long,
         )
         val title = composeColorToArgb(scheme.longMethod("getOnBackground"))
         val body = composeColorToArgb(
-            runCatching { scheme.longMethod("getOnSurfaceVariant") }
-                .getOrElse { method(THEME_KT_CLASS, "getOnBackgroundVariant", 1).invoke(null, scheme) as Long },
+            scheme.longMethod("getOnSurfaceVariant"),
         )
         val primary = composeColorToArgb(scheme.longMethod("getPrimary"))
         ModuleDialogTheme.update(
@@ -831,6 +793,6 @@ internal fun ReaMicroSettingsHook.updateModuleDialogTheme(composer: Any) {
             ),
         )
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX update module dialog theme failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX update module dialog theme failed: ${it.stackTraceToString()}")
     }
 }

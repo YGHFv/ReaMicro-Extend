@@ -31,7 +31,14 @@ object CloudTaskLocalRunner {
             request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" },
         )
         operationError(body)?.let { return Outcome("failed", "获取行商状态失败：$it", state) }
+        val tripData = body.optJSONObject("data") ?: if (body.has("data")) {
+            return Outcome("failed", "行商状态响应无效，未开启新行商", state)
+        } else body
+        if ((!tripData.isNull("activeTrip") && tripData.optJSONObject("activeTrip") == null) ||
+            (!tripData.isNull("trip") && tripData.optJSONObject("trip") == null)
+        ) return Outcome("failed", "行商状态响应无效，未开启新行商", state)
         var trip = parseMerchantTrip(body)
+        MerchantDeparture.observeTrip(state, trip.tripId, checkpoint)
         val remembered = rememberedMerchantConfig(task, trip)
         rememberMerchantConfig(state, remembered)
         state.put(LocalTaskStore.KEY_MERCHANT_END_TIME, trip.endTimeMs)
@@ -96,38 +103,67 @@ object CloudTaskLocalRunner {
                 return Outcome("failed", "$message（未能开启新行商：${merchantStartHint(config)}）", state, detail = detail)
             }
             val blessingType = request.optString("blessingType").trim().uppercase()
-            val blessing = ensureTaoistBlessing(baseUrl, token, request, blessingType)
+            val previousTripId = trip.tripId.takeIf { trip.hasTrip } ?: state.optLong(LocalTaskStore.KEY_MERCHANT_SETTLED_TRIP)
+            val departure = MerchantDeparture(state, previousTripId, config, blessingType, checkpoint)
+            if (departure.startUnconfirmed) {
+                return Outcome(
+                    "failed", "$message（上次开启请求结果待确认，未重复开启；稍后继续查询行程）",
+                    state, detail = detail,
+                )
+            }
+            val blessing = ensureTaoistBlessing(baseUrl, token, request, departure.configuredType, departure)
             if (blessing.failure != null) {
                 return Outcome("failed", "$message${blessingNote(blessing, blessingType)}", state, detail = detail)
             }
+            if (departure.contextChanged) {
+                departure.complete()
+                return Outcome(
+                    "failed", "$message（上次祈禳已确认，出发配置已更改，稍后按新配置继续）",
+                    state, detail = detail,
+                )
+            }
+            if (blessing.skippedForMaterials) detail.put("本次祈禳", MerchantDeparture.SKIPPED_NOTE)
+            val blessingNote = blessingNote(blessing, blessingType)
+            departure.startPending()
             val started = runCatching {
                 postReaMicro(
                     baseUrl, token,
                     JSONObject().put("cityCode", config.cityCode).put("principal", config.principal).put("transportId", config.transportId),
                     request.optString("startEndpoint").ifBlank { "rest/community/start-traveling-merchant" },
                 )
-            }.getOrElse { return Outcome("failed", "$message（未能开启新行商：${it.message}）", state, detail = detail) }
+            }.getOrElse {
+                return Outcome(
+                    "failed", "$message（开启请求结果待确认：${it.message}；稍后查询行程，未重复开启）$blessingNote",
+                    state, detail = detail,
+                )
+            }
             operationError(started)?.let {
-                return Outcome("failed", "$message（未能开启新行商：$it）", state, detail = detail)
+                if (MerchantDeparture.explicitRejection(started) != null) departure.startRejected()
+                return Outcome("failed", "$message（未能开启新行商：$it）$blessingNote", state, detail = detail)
             }
             var nextTrip = parseMerchantTrip(started)
             if (!nextTrip.hasTrip) {
                 val refreshed = runCatching {
                     postReaMicro(baseUrl, token, JSONObject(), request.optString("endpoint").ifBlank { "rest/community/get-traveling-merchant" })
                 }.getOrNull()
-                if (refreshed != null && businessError(refreshed) == null) nextTrip = parseMerchantTrip(refreshed)
+                if (refreshed != null && operationError(refreshed) == null) nextTrip = parseMerchantTrip(refreshed)
             }
-            if ((!nextTrip.hasTrip || nextTrip.tripId == trip.tripId) &&
-                !(started.optJSONObject("data") ?: started).optBoolean("success", false)
-            ) {
-                return Outcome("failed", "$message（未能确认新行商已开启）", state, detail = detail)
+            if (!nextTrip.hasTrip || nextTrip.tripId <= 0L || nextTrip.tripId == trip.tripId) {
+                val accepted = (started.optJSONObject("data") ?: started).opt("success") == true
+                if (accepted) departure.startAccepted()
+                return Outcome(
+                    if (accepted) "success" else "failed",
+                    "$message（${if (accepted) "开启请求已接受" else "开启请求结果待确认"}，等待服务端返回新行程）$blessingNote",
+                    state, notify = !accepted, detail = detail,
+                )
             }
-            if (trip.hasTrip) state.put(LocalTaskStore.KEY_MERCHANT_RESTART_AFTER, trip.tripId)
+            departure.complete()
+            if (previousTripId > 0L) state.put(LocalTaskStore.KEY_MERCHANT_RESTART_AFTER, previousTripId)
             rememberMerchantConfig(state, config)
             state.put(LocalTaskStore.KEY_MERCHANT_END_TIME, nextTrip.endTimeMs)
             state.put("nextRunAtOverride", merchantNextRunAt(nextTrip, now))
             checkpoint(state)
-            message += "，已开启新行商${blessingNote(blessing, blessingType)}"
+            message += "，已开启新行商$blessingNote"
             detail.put("新行商", "预计 ${formatMerchantEpoch(nextTrip.endTimeMs)} 完成")
             val blessEffect = blessing.detail.optString("效果").trim()
 
@@ -137,7 +173,7 @@ object CloudTaskLocalRunner {
                 detail.put("新行商结束时间", endText)
             }
             if (blessEffect.isNotBlank()) message += "，运签效果：$blessEffect"
-            if (blessing.detail.length() > 0) {
+            if (blessing.detail.optString("运签").isNotBlank()) {
                 detail.put("新行商运签", blessing.detail.optString("运签"))
                 if (blessEffect.isNotBlank()) detail.put("新行商运签效果", blessEffect)
             }
@@ -439,8 +475,9 @@ object CloudTaskLocalRunner {
         token: String,
         request: JSONObject,
         blessingType: String,
+        departure: MerchantDeparture? = null,
     ): BlessingCheck = runCatching {
-        checkTaoistBlessing(baseUrl, token, request, blessingType)
+        checkTaoistBlessing(baseUrl, token, request, blessingType, departure)
     }.getOrElse { BlessingCheck("查询或祈禳运签失败：${it.message}", JSONObject()) }
 
     private fun checkTaoistBlessing(
@@ -448,8 +485,10 @@ object CloudTaskLocalRunner {
         token: String,
         request: JSONObject,
         blessingType: String,
+        departure: MerchantDeparture?,
     ): BlessingCheck {
         val type = blessingType.trim().uppercase()
+        if (departure?.materialsUnavailable == true) return skippedMerchantPrayer()
         if (type.isBlank()) return BlessingCheck(null, JSONObject())
         if (type !in setOf(BLESSING_LUCK, BLESSING_SAFETY, BLESSING_WEALTH)) {
             return BlessingCheck("不支持的运签配置：$type", JSONObject())
@@ -460,21 +499,39 @@ object CloudTaskLocalRunner {
             JSONObject(),
             request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" },
         )
-        businessError(current)?.let { return BlessingCheck("查询运签失败：$it", JSONObject()) }
+        operationError(current)?.let { return BlessingCheck("查询运签失败：$it", JSONObject()) }
+        if (current.has("data") && current.optJSONObject("data") == null) {
+            return BlessingCheck("查询运签响应无效", JSONObject())
+        }
         val data = current.optJSONObject("data") ?: current
 
         val blessing = data.opt("blessing") as? JSONObject
         val activeType = blessing?.optString("blessingType").orEmpty()
+        if ((!data.isNull("blessing") && blessing == null) || (blessing != null && activeType.isBlank())) {
+            return BlessingCheck("查询运签响应无效", JSONObject())
+        }
         if (activeType.equals(type, ignoreCase = true)) {
+            departure?.prayerReady()
             return BlessingCheck(null, blessingDetail(blessing!!, "沿用已有"), activeType = activeType)
         }
+        if (departure?.mustConfirmPrayer == true) {
+            return BlessingCheck("上次祈禳结果仍待确认，未重复祈禳；稍后继续查询运签", JSONObject())
+        }
+        departure?.prayerPending()
         val pray = postReaMicro(
             baseUrl,
             token,
             JSONObject().put("blessingType", type),
             request.optString("prayEndpoint").ifBlank { "rest/community/pray-taoist-blessing" },
         )
-        operationError(pray)?.let { return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject()) }
+        operationError(pray)?.let {
+            if (departure != null && MerchantDeparture.insufficientMaterials(pray)) {
+                departure.skipPrayer()
+                return skippedMerchantPrayer()
+            }
+            if (MerchantDeparture.explicitRejection(pray) != null) departure?.prayerRejected()
+            return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject())
+        }
         val prayData = pray.optJSONObject("data") ?: pray
         val prayed = prayData.optJSONObject("blessing") ?: run {
             val refreshed = postReaMicro(baseUrl, token, JSONObject(),
@@ -487,6 +544,7 @@ object CloudTaskLocalRunner {
             val reason = if (actualType.isBlank()) "服务端未返回生效运签" else "服务端返回${blessingLabel(actualType)}，与配置不符"
             return BlessingCheck("祈禳${blessingLabel(type)}失败：$reason", JSONObject())
         }
+        departure?.prayerReady()
         return BlessingCheck(
             null,
             blessingDetail(prayed!!, "本次祈禳"),
@@ -495,6 +553,10 @@ object CloudTaskLocalRunner {
             replacedType = activeType,
         )
     }
+
+    private fun skippedMerchantPrayer() = BlessingCheck(
+        null, JSONObject(), skippedForMaterials = true,
+    )
 
     private fun blessingDetail(blessing: JSONObject, source: String): JSONObject {
         val type = blessing.optString("blessingType")
@@ -512,10 +574,13 @@ object CloudTaskLocalRunner {
         val activeType: String = "",
 
         val replacedType: String = "",
+
+        val skippedForMaterials: Boolean = false,
     )
 
     internal fun blessingNote(check: BlessingCheck, configuredType: String): String = when {
         check.failure != null -> "（运签：${check.failure}）"
+        check.skippedForMaterials -> " · ${MerchantDeparture.SKIPPED_NOTE}"
         configuredType.isBlank() -> ""
         check.prayed -> {
             val label = blessingLabel(check.activeType.ifBlank { configuredType })
@@ -1100,6 +1165,7 @@ object CloudTaskLocalRunner {
     private const val CLAIM_RETRY_INTERVAL_MS = 3_600_000L
 
     internal const val KEY_MERCHANT_NOTIFIED_TRIP = "merchantLastNotifiedTripId"
+    internal const val KEY_MERCHANT_DEPARTURE = "merchantDeparture"
 
     internal const val KEY_REWARD_ITEMS = "奖励物品"
 

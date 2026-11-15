@@ -1,15 +1,16 @@
 package com.reamicro.fix.hook
 
 import android.app.Activity
+import java.io.File
 import android.app.Dialog
 import android.content.Context
 import android.graphics.Typeface
+import android.os.Looper
 import android.view.View
 import com.reamicro.fix.core.ComposeInterop
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.cloud.webdav.CleartextScope
-import com.reamicro.fix.cloud.webdav.CloudBookRowExtendedDisplayContext
 import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
 import com.reamicro.fix.online.download.OnlineFanqieBatchProtocolException
 import com.reamicro.fix.online.download.OnlineSourceHttpException
@@ -36,6 +37,8 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.logging.logWebDav
+import com.reamicro.fix.reload.TaskCancellation
+import com.reamicro.fix.xposed.HookRuntime
 
 class WebDavDriveHook(
     internal val classLoader: ClassLoader,
@@ -64,10 +67,8 @@ class WebDavDriveHook(
     internal val importUnauthRender = ThreadLocal<ImportUnauthRenderContext?>()
     internal val importLocalLibraryRow = ThreadLocal<ImportLocalLibraryRowContext?>()
     internal val webDavIconDepth = ThreadLocal<Int>()
-    internal val syncAvailableTypes = ThreadLocal<List<Int>?>()
-    internal val syncAvailableRowIndex = ThreadLocal<Int>()
+    internal val syncAvailableProvider = ThreadLocal<Int>()
     internal val webDavCloudTitleDepth = ThreadLocal<Int>()
-    internal val webDavCloudTreeDepth = ThreadLocal<Int>()
     internal val webDavAccountScreenDepth = ThreadLocal<Int>()
     internal val webDavAccountNavGraphScope = ThreadLocal<Any?>()
     internal val localLibraryIconDepth = ThreadLocal<Int>()
@@ -77,36 +78,15 @@ class WebDavDriveHook(
     internal val onlineCompletionRenderTypesBySource = ConcurrentHashMap<String, Int>()
     internal val onlineCompletionRenderSourceByType = ConcurrentHashMap<Int, String>()
     internal val onlineCompletionRenderTitles = ConcurrentHashMap<Int, String>()
-    internal val localLibraryCloudTreeDepth = ThreadLocal<Int>()
     internal val localLibraryAccountScreenDepth = ThreadLocal<Int>()
     internal val localLibraryAccountNavGraphScope = ThreadLocal<Any?>()
-    internal val localLibraryAuthorizedDetailDepth = ThreadLocal<Int>()
     internal val localLibraryDefaultFolderDepth = ThreadLocal<Int>()
     internal val localLibraryDefaultFolderStringIndex = ThreadLocal<Int>()
     internal val webDavNotAuthDepth = ThreadLocal<Int>()
     internal val webDavNotAuthTipPending = ThreadLocal<Boolean>()
-    internal val syncWebDavAuthRenderedBeforeAvailable = ThreadLocal<Boolean>()
     internal val webDavRenderingSyncAuthCard = ThreadLocal<Boolean>()
-    internal val syncAuthCardContentOwnsContext = ThreadLocal<Boolean>()
-    internal val webDavRunningBackupPending = ThreadLocal<Boolean>()
     internal val webDavRunningSyncAuthCardDepth = ThreadLocal<Int>()
     internal val homeWebDavSearchRender = ThreadLocal<HomeSearchRenderContext?>()
-    internal val cloudBookRowExtendedDisplay = ThreadLocal<CloudBookRowExtendedDisplayContext?>()
-    internal val onlineCompletionBookRowInfoDepth = ThreadLocal<Int>()
-    internal val onlineCompletionLocalSheetBook = ThreadLocal<Any?>()
-    internal val onlineCompletionLocalSheetDepth = ThreadLocal<Int>()
-    @Volatile internal var onlineCompletionLastLocalSheetBookRef: WeakReference<Any>? = null
-    internal val onlineCompletionUpdateRowInjecting = ThreadLocal<Boolean>()
-    internal data class OnlineCompletionActionCellOverride(
-        val icon: Any,
-        val title: String,
-        val onClick: Any,
-    )
-    internal val onlineCompletionActionCellOverrides =
-        ThreadLocal<List<OnlineCompletionActionCellOverride>?>()
-    internal val onlineCompletionActionCellOverrideIndex = ThreadLocal<Int>()
-    @Volatile internal var onlineCompletionCombinedGroupRowHooked = false
-    @Volatile internal var onlineCompletionSourceLabelHooked = false
     internal val webDavBackupCardDepth = ThreadLocal<Int>()
     internal var webDavAccountNavGraphScopeStrong: Any? = null
     internal var localLibraryAccountNavGraphScopeStrong: Any? = null
@@ -148,28 +128,50 @@ class WebDavDriveHook(
     internal val runningNativeCloudDownloadsById = ConcurrentHashMap<String, NativeCloudDownload>()
     internal val webDavDownloadCancelPrompts = ConcurrentHashMap<String, Long>()
     internal val webDavHomeSearchSeq = AtomicLong(0L)
-    internal val localLibraryHomeSearchSeq = AtomicLong(0L)
-    internal val onlineCompletionHomeSearchSeq = AtomicLong(0L)
+    internal val storageHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
+    internal val homeSearchState = lazy { WebDavHomeSearch(this) }
+    internal val homeSearch by homeSearchState
+    internal val localRefreshWorkerState = lazy { LatestSearchWorker("ReaMicroLocalLibraryRefresh") }
+    internal val localRefreshWorker by localRefreshWorkerState
+    internal val webDavRefreshWorkerState = lazy { LatestSearchWorker("ReaMicroWebDavRefresh") }
+    internal val webDavRefreshWorker by webDavRefreshWorkerState
+    internal val localIndexWorkerState = lazy { LatestSearchWorker("ReaMicroLocalLibraryIndex") }
+    internal val localIndexWorker by localIndexWorkerState
+    internal val onlineSearchTasksState = lazy { WebDavSearchTasks() }
+    internal val onlineSearchTasks by onlineSearchTasksState
+    @Volatile internal var storageActivityRef: WeakReference<Activity>? = null
+    internal val storageUiGeneration = AtomicLong(0L)
+    internal val storageExecutionGeneration = AtomicLong(0L)
+    @Volatile internal var storagePaused = true
+    @Volatile internal var storageClosed = false
     internal val onlineCompletionSearchTargets = ConcurrentHashMap<String, OnlineDownloadTarget>()
     internal val onlineCompletionSearchRowViews = ConcurrentHashMap<String, WeakReference<View>>()
     internal val onlineCompletionRunningDownloads = ConcurrentHashMap<String, OnlineCompletionDownloadTask>()
     internal val onlineCompletionRunningDownloadsByNotificationId = ConcurrentHashMap<Int, OnlineCompletionDownloadTask>()
-    internal val onlineCompletionRunningUpdates = ConcurrentHashMap<String, Boolean>()
+    internal val onlineCompletionRunningUpdates = ConcurrentHashMap<String, TaskCancellation>()
+    internal val onlineCompletionUpdateControls =
+        ConcurrentHashMap<String, com.reamicro.fix.online.download.OnlineDownloadControl>()
+    internal val onlineCompletionUpdateNotificationIds = ConcurrentHashMap<String, Int>()
+    internal val onlineCompletionUpdateCacheDirs = ConcurrentHashMap<String, File>()
+    internal val onlineCompletionProgressNotifiers = ConcurrentHashMap<Int, OnlineCompletionProgressNotifier>()
     internal val onlineCompletionImportLock = ReentrantLock(true)
-    internal val onlineCompletionNotificationIds = AtomicInteger(4300)
+    internal val onlineCompletionNotificationIds = AtomicInteger(
+        0x30000000 or (java.util.UUID.randomUUID().hashCode() and 0x0fffffff),
+    )
     internal val onlineCompletionNotificationBlockedLogged = AtomicBoolean(false)
     internal val onlineCompletionCancelReceiverRegistered = AtomicBoolean(false)
     internal val onlineCompletionModuleActivityPromptAt = ConcurrentHashMap<Int, Long>()
     internal val onlineCompletionMetadataRepairAt = AtomicLong(0L)
-    @Volatile internal var lastHomeSearchWebDavResults: List<Any> = emptyList()
-    @Volatile internal var lastHomeSearchLocalResults: List<Any> = emptyList()
     internal val cloudStorageScreenRefreshAt = ConcurrentHashMap<String, Long>()
     internal val localLibraryListCache = ConcurrentHashMap<String, LocalLibraryListCache>()
+    internal val localLibraryCacheGeneration = AtomicLong(0L)
+    internal val localLibraryRefreshSequence = AtomicLong(0L)
+    internal val webDavRefreshSequence = AtomicLong(0L)
+    internal val webDavConnectionGeneration = AtomicLong(0L)
     internal val localLibrarySearchIndexLock = Any()
     @Volatile internal var localLibrarySearchIndex: LocalLibrarySearchIndex? = null
-    @Volatile internal var localLibrarySearchIndexBuilding: Boolean = false
+    internal var localLibraryIndexRequest: Any? = null
     internal val webDavBackupViewModels = mutableListOf<WeakReference<Any>>()
-    internal val webDavRunningBackupBookIds = ConcurrentHashMap<Long, Boolean>()
     internal val webDavRecentBackups = ConcurrentHashMap<Long, WebDavBackupSnapshot>()
     internal val bookBackupContentLogSeq = AtomicLong(0L)
 
@@ -187,64 +189,60 @@ class WebDavDriveHook(
         private val workId: String?,
         private val notificationsEnabled: Boolean = true,
     ) {
-        private var lastNotificationAtMs = 0L
-        private var lastProgress = -1
-        private var lastMessage = ""
+        init { onlineCompletionProgressNotifiers[notificationId] = this }
+        private val progressState = com.reamicro.fix.online.download.OnlineProgressState(
+            ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS,
+        )
+        private val progressFailureLogged = AtomicBoolean()
+
+        private fun publish(update: com.reamicro.fix.online.download.OnlineProgressState.Update, data: String?): Boolean {
+            val status = update.status
+            // UI observers can fail after a book has already committed. They cannot fail the import.
+            runCatching {
+                if (tracker != null && workId != null) {
+                    if (update.finished && update.success) {
+                        com.reamicro.fix.core.HostWorkBindings.requireCurrent()
+                            .completeImport(tracker, workId, data, bookName)
+                    } else {
+                        setTrackedWorkState(tracker, workId, status, update.progress,
+                            if (update.finished) update.message else null, data,
+                            if (update.finished) bookName else "$bookName：${update.message}")
+                    }
+                }
+            }.onFailure {
+                if (progressFailureLogged.compareAndSet(false, true)) {
+                    HookRuntime.logError("$LOG_PREFIX online progress observer failed", it)
+                }
+            }
+            if (!notificationsEnabled) return true
+            return runCatching {
+                val control = onlineCompletionRunningDownloadsByNotificationId[notificationId]?.control
+                    ?: notificationKey.takeIf { it.startsWith("update:") }
+                        ?.let { onlineCompletionUpdateControls[it.removePrefix("update:")] }
+                updateOnlineCompletionNotification(context, notificationId, notificationKey,
+                    cancellable && control?.canStop != false,
+                    bookName, update.message, update.progress, update.finished)
+            }.getOrElse {
+                if (progressFailureLogged.compareAndSet(false, true)) {
+                    HookRuntime.logError("$LOG_PREFIX online notification delivery failed", it)
+                }
+                false
+            }
+        }
 
         @Synchronized
         fun running(progress: Int, message: String, force: Boolean = false): Boolean {
-            val now = System.currentTimeMillis()
-            val compactMessage = message.replace(Regex("\\s+"), " ").trim()
-            val displayProgress = onlineCompletionDisplayProgress(progress, compactMessage)
-            val progressChanged = displayProgress != lastProgress
-            val failedCountChanged = onlineCompletionFailedCount(compactMessage) != onlineCompletionFailedCount(lastMessage)
-            val phaseChanged = compactMessage != lastMessage &&
-                !compactMessage.startsWith("下载章节 ") &&
-                !compactMessage.startsWith("重试章节 ")
-            val shouldSend = force ||
-                progressChanged ||
-                failedCountChanged ||
-                phaseChanged ||
-                now - lastNotificationAtMs >= ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS ||
-                displayProgress >= 100
-            if (!shouldSend) {
-                return true
-            }
-            lastNotificationAtMs = now
-            lastProgress = displayProgress
-            lastMessage = compactMessage
-            if (tracker != null && workId != null) {
-                setTrackedWorkState(tracker, workId, "Running", displayProgress, null, null, "$bookName：$compactMessage")
-            }
-            if (!notificationsEnabled) return true
-            return updateOnlineCompletionNotification(
-                context,
-                notificationId,
-                notificationKey,
-                cancellable,
-                bookName,
-                compactMessage,
-                displayProgress,
-                false,
-            )
+            val update = progressState.running(progress, message, android.os.SystemClock.elapsedRealtime(), force)
+                ?: return true
+            return publish(update, null)
         }
 
         @Synchronized
         fun finish(message: String, data: String?, success: Boolean) {
-            if (tracker != null && workId != null) {
-                setTrackedWorkState(
-                    tracker,
-                    workId,
-                    if (success) "Success" else "Error",
-                    100,
-                    if (success) null else message,
-                    data,
-                    bookName,
-                )
-            }
-            if (notificationsEnabled) {
-                updateOnlineCompletionNotification(context, notificationId, notificationKey, cancellable, bookName, message, 100, true)
-            }
+            val text = if (!success && !message.contains("取消") && !message.contains("暂停")) "失败：$message" else message
+            val update = progressState.finish(text, success) ?: return
+            publish(update, data)
+            onlineCompletionProgressNotifiers.remove(notificationId, this)
         }
     }
 
@@ -255,7 +253,7 @@ class WebDavDriveHook(
     ) {
         private val cachedBodies = mutableMapOf<String, String>()
         private val attemptedItemIds = mutableSetOf<String>()
-        private var disabled = !supportsOnlineFanqieBatch(
+        private var disabled = target.result.parsingState?.enhanced == true || !supportsOnlineFanqieBatch(
             sourceUrl = target.source.sourceUrl,
             endpointTemplate = target.source.chapterBatchEndpoint,
             batchSize = target.source.chapterBatchSize,

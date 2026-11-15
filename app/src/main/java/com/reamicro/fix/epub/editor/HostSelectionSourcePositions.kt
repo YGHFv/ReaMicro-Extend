@@ -1,8 +1,7 @@
 package com.reamicro.fix.epub.editor
 
 import com.reamicro.fix.core.HostHtmlParser
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.HostEpubSourceBindings
 import java.util.IdentityHashMap
 
 /** 逐树、逐节点验证原生 DOM 后才赋予位置，绝不按同一段文本的出现次序猜测。 */
@@ -10,17 +9,14 @@ internal class HostSelectionSourcePositions(
     loader: ClassLoader, source: String, body: Any, private val positions: NormalizedSelectionPositions,
 ) {
     private val ranges = IdentityHashMap<Any, Pair<Int, Int>>()
-    private val names = loader.hostClass("com.fleeksoft.ksoup.nodes.Node").hostMethod("nodeName")
-    private val children = loader.hostClass("com.fleeksoft.ksoup.nodes.Node").hostMethod("childNodes")
-    private val wholeText = loader.hostClass("com.fleeksoft.ksoup.nodes.TextNode").hostMethod("getWholeText")
+    private val host = requireNotNull(HostEpubSourceBindings.current)
     private val parser = HostHtmlParser(loader)
-    private val bodyMethod = loader.hostClass("com.fleeksoft.ksoup.nodes.Document").hostMethod("body")
     private val decoded = HashMap<String, String>()
 
     init {
         val raw = SelectionHtmlSourceTree(source)
-        fun name(node: Any) = (names.invoke(node) as String).lowercase()
-        fun nativeChildren(node: Any): List<Any> = (children.invoke(node) as List<*>).filterNotNull()
+        fun name(node: Any) = host.nodeName(node).lowercase(java.util.Locale.ROOT)
+        fun nativeChildren(node: Any): List<Any> = host.children(node)
             .filterNot { name(it) == "#comment" }
         fun match(rawNodes: List<SelectionHtmlSourceTree.Node>, nativeNodes: List<Any>, depth: Int) {
             require(depth < 256) { "章节嵌套过深" }
@@ -40,7 +36,7 @@ internal class HostSelectionSourcePositions(
                 }
                 if (nativeName == "#text" || nativeName == "#cdata") {
                     val expected = if (nativeName == "#cdata") raw.text(original) else unescape(raw.text(original))
-                    require(wholeText.invoke(native) == expected) { "宿主文本与原文件不一致，无法证明源码位置" }
+                    require(host.wholeText(native) == expected) { "宿主文本与原文件不一致，无法证明源码位置" }
                 } else if (nativeName !in SelectionHtmlSourceTree.rawTextTags) {
                     match(original.children.filterNot { it.name == "#comment" }, nativeChildren(native), depth + 1)
                 }
@@ -59,10 +55,10 @@ internal class HostSelectionSourcePositions(
     fun unescape(value: String): String = decoded.getOrPut(value) {
         if ('&' !in value && '<' !in value) value.replace("\r\n", "\n").replace('\r', '\n')
         else {
-            val root = bodyMethod.invoke(parser.parse("<body>$value</body>", "/selection-entity.xhtml"))
-            val nodes = (children.invoke(root) as List<*>).filterNotNull()
-            require(nodes.all { names.invoke(it) == "#text" }) { "实体解码产生了非文本节点" }
-            nodes.joinToString("") { wholeText.invoke(it) as String }
+            val root = host.body(parser.parse("<body>$value</body>", "/selection-entity.xhtml"))
+            val nodes = host.children(root)
+            require(nodes.all { host.nodeName(it) == "#text" }) { "实体解码产生了非文本节点" }
+            nodes.joinToString("") { host.wholeText(it) }
         }
     }
 }

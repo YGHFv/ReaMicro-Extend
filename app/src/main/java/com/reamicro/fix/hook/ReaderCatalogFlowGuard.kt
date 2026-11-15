@@ -1,9 +1,7 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.Host234CatalogRuntime
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
 import java.util.Collections
@@ -26,50 +24,52 @@ internal object ReaderCatalogFlowGuard {
         (tables[0] == "book_item_ref" || tables[0] == "book_chapter")
 
     fun collector(loader: ClassLoader, original: Any): Any {
-        val type = loader.loadClass("pl3")
+        val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.catalog)
+        val type = host.type("collector")
+        require(type.isInstance(original))
         val gate = CatalogEmissionGate()
-        val unit = Host234CatalogRuntime(loader).unit()
         return Proxy.newProxyInstance(loader, arrayOf(type)) { proxy, method, args ->
-            when (method.name) {
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.get(0)
-                "toString" -> "ReaMicroDistinctCatalogCollector"
-                else -> {
-                    require(method.parameterCount == 2 && args?.size == 2)
-                    if (!gate.accept(args[0])) unit
+            when {
+                method == host.method("emit") -> {
+                    require(args?.size == 2)
+                    if (!gate.accept(args[0])) requireNotNull(host.field("unit").get(null))
                     else try {
-                        // 原样传递 continuation、挂起标记及取消异常，不使用模块协程。
                         method.invoke(original, *args)
                     } catch (error: InvocationTargetException) {
                         throw error.targetException
                     }
                 }
+                method.name == "hashCode" -> System.identityHashCode(proxy)
+                method.name == "equals" -> proxy === args?.get(0)
+                method.name == "toString" -> "ReaMicroDistinctCatalogCollector"
+                else -> error("Unknown catalog collector method: $method")
             }
         }
     }
 
     fun install(loader: ClassLoader) {
-        if (!Host234CatalogRuntime.supported()) return
+        val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.catalog)
         val flows = Collections.synchronizedMap(WeakHashMap<Any, Boolean>())
-        val factory = loader.loadClass("t71").getDeclaredMethod(
-            "w", loader.loadClass("cf9"), Array<String>::class.java,
-            loader.hostClass("kotlin.jvm.functions.Function1"),
-        )
-        val collect = factory.returnType.getDeclaredMethod(
-            "b", loader.loadClass("pl3"), loader.hostClass("kotlin.coroutines.Continuation"),
-        )
-        XposedBridge.hookMethod(collect, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (!flows.containsKey(param.thisObject)) return
-                param.args[0] = collector(loader, param.args[0])
-            }
-        })
-        XposedBridge.hookMethod(factory, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val tables = param.args.getOrNull(1) as? Array<*> ?: return
-                if (param.throwable == null && relevant(tables)) param.result?.let { flows[it] = true }
-            }
-        })
-        XposedBridge.logAlways("ReaMicro reader catalog invalidation guard installed (2.3.4-b1)")
+        val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        try {
+            handles += HookRuntime.hookMethod(host.method("collect"), object : HookCallback() {
+                override fun before(param: Call) {
+                    if (!flows.containsKey(param.thisObject)) return
+                    param.args[0] = collector(loader, requireNotNull(param.args[0]))
+                }
+            })
+            handles += HookRuntime.hookMethod(host.method("flow"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val tables = param.args[1] as? Array<*> ?: return
+                    if (param.throwable == null && relevant(tables)) param.result?.let { flows[it] = true }
+                }
+            })
+            HookRuntime.deoptimize(host.method("flow"))
+            com.reamicro.fix.reload.ModuleResources.cleanup { flows.clear() }
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            throw error
+        }
+        HookRuntime.logAlways("ReaMicro reader catalog invalidation guard installed")
     }
 }

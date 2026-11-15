@@ -1,257 +1,191 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostNameStartsWith
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.hostClassOrNull
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.typeMatches
-
+import com.reamicro.fix.core.HostReaderLifecycleBindings
+import com.reamicro.fix.core.HostSelectionBindings
 import com.reamicro.fix.core.HookInstallReport
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.online.OnlineReaderContextBridge
-import com.reamicro.fix.settings.ReaderHighlightBookContext
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
 import com.reamicro.fix.hook.reader.*
 
 internal fun ReaderHook.hookReaderViewModel() {
     HookInstallReport.install(FEATURE_ID, "hookReaderViewModel") {
-        val cls = classLoader.hostClass(READER_VIEW_MODEL_CLASS)
-        installSelectionWindowHook(cls)
-        XposedBridge.hookAllConstructors(cls, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                if (currentViewModelRef?.get() !== param.thisObject) {
-                    invalidateOnDemandRefreshes()
-                    cancelSelectionPagerConfirmation()
-                }
-                currentViewModelRef = WeakReference(param.thisObject)
-                param.args?.firstOrNull {
-                    it != null && HostSymbols.logicalClass(it.javaClass.name) == SESSION_CLASS
-                }
-                    ?.let { session ->
-                        currentSessionRef = WeakReference(session)
-                        initializeScrollCrashRecovery()
-                }
-                XposedBridge.log("$LOG_PREFIX ReaderViewModel created")
-                scheduleRestorePersistedSearchOrigin("viewModel created")
+        val host = requireNotNull(HostReaderLifecycleBindings.current) { "Reader lifecycle contract unavailable" }
+        val selection = requireNotNull(HostSelectionBindings.current) { "Reader selection contract unavailable" }
+        val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        fun capture(value: Any?, session: Any? = null) {
+            if (value == null || !host.type("vm").isInstance(value)) return
+            val changed = currentViewModelRef?.get() !== value
+            if (changed) {
+                cancelHighlightRefresh()
+                invalidateOnDemandRefreshes()
+                cancelSelectionPagerConfirmation()
+                currentViewModelRef = WeakReference(value)
+                currentSessionRef = null
             }
-        })
-        hookViewModelCleared(cls) { viewModel ->
-            if (currentViewModelRef?.get() !== viewModel) return@hookViewModelCleared
-            XposedBridge.log("$LOG_PREFIX ReaderViewModel cleared")
-            currentViewModelRef = null
-            currentSessionRef = null
-            currentScrollElement = null
-            clearScrollCrashPending("ReaderViewModel cleared")
-            currentSelectionControllerRef = null
-            currentEpubRef = null
-            currentPageRef = null
-            currentEpubStrong = null
-            currentPageStrong = null
-            OnlineReaderContextBridge.clear()
-            onDemandPrefetchInFlight.clear()
-            onDemandPrefetchRetryCount.clear()
-            onDemandRefreshPending.clear()
-            invalidateOnDemandRefreshes()
-            lastHandledReaderStatisticsKey = ""
-            lastOnDemandPrefetchSpineKey = ""
-            onDemandNormalizedHrefsCache = null
-            resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
+            val currentSession = session ?: currentSessionRef?.get() ?: runCatching { AccountHostRuntime.session() }.getOrNull()
+            if (currentSession != null && host.type("session").isInstance(currentSession) && currentSessionRef?.get() !== currentSession) {
+                currentSessionRef = WeakReference(currentSession)
+                initializeScrollCrashRecovery()
+            }
+            if (changed) scheduleRestorePersistedSearchOrigin("reader captured")
         }
-        val readerUiIntentClass = classLoader.hostClass(READER_UI_INTENT_CLASS)
-        runCatching {
-            val highlightIntentClass = classLoader.hostClass("$READER_UI_INTENT_CLASS\$MarkUpsertHighlight")
-            XposedBridge.hookAllConstructors(highlightIntentClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val selection = param.thisObject.hostField("selection")?.get(param.thisObject)
-                    val start = selection.hostField("a")?.get(selection)?.toString().orEmpty()
-                    val end = selection.hostField("b")?.get(selection)?.toString().orEmpty()
-                    val quote = selection.hostField("c")?.get(selection)?.toString().orEmpty()
-                    val style = param.thisObject.hostField("style")?.get(param.thisObject)
-                    val color = param.thisObject.hostField("color")?.get(param.thisObject)
-                    XposedBridge.log(
-                        "$LOG_PREFIX highlight intent created start=$start end=$end " +
-                            "quote=${quote.take(160)} style=$style color=$color",
-                    )
+        fun logHighlight(intent: Any, source: String) {
+            val payload = host.field("MarkUpsertHighlight.selection").get(intent) ?: return
+            val quote = selection.field("payload.quote").get(payload) as? String
+            HookRuntime.log("$LOG_PREFIX highlight $source quoteLength=${quote?.length ?: 0} " +
+                "style=${host.field("MarkUpsertHighlight.style").getInt(intent)} " +
+                "color=${host.field("MarkUpsertHighlight.color").get(intent)}")
+        }
+        try {
+            host.vmConstructors().forEach { constructor ->
+                val sessionIndex = constructor.parameterTypes.indexOf(host.type("session"))
+                handles += HookRuntime.hookMethod(constructor, object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable == null) capture(param.thisObject, param.args?.getOrNull(sessionIndex))
+                    }
+                })
+            }
+            // Existing readers can be recovered on their next state read after a module reload.
+            handles += HookRuntime.hookMethod(host.method("current"), object : HookCallback() {
+                override fun before(param: Call) { capture(param.thisObject) }
+            })
+            handles += HookRuntime.hookMethod(host.method("cleared"), object : HookCallback() {
+                override fun after(param: Call) {
+                    if (currentViewModelRef?.get() !== param.thisObject) return
+                    cancelHighlightRefresh()
+                    cancelSelectionPagerConfirmation()
+                    currentViewModelRef = null
+                    currentSessionRef = null
+                    currentScrollElement = null
+                    clearScrollCrashPending("ReaderViewModel cleared")
+                    currentSelectionControllerRef = null
+                    currentEpubRef = null
+                    currentPageRef = null
+                    currentEpubStrong = null
+                    currentPageStrong = null
+                    OnlineReaderContextBridge.clear()
+                    onDemandPrefetchInFlight.clear()
+                    onDemandPrefetchRetryCount.clear()
+                    onDemandRefreshPending.clear()
+                    invalidateOnDemandRefreshes()
+                    lastHandledReaderStatisticsKey = ""
+                    lastOnDemandPrefetchSpineKey = ""
+                    onDemandNormalizedHrefsCache = null
+                    resetFullTextSearchState("ReaderViewModel cleared", removeOverlays = true)
+                    updateReaderHighlightBookContext("", "", "ReaderViewModel cleared", requestRefresh = false)
                 }
             })
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX highlight intent diagnostic failed: ${it.stackTraceToString()}")
-        }
-        val onIntentCallback = object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            handles += HookRuntime.hookMethod(host.constructor("MarkUpsertHighlight"), object : HookCallback() {
+                override fun after(param: Call) {
+                    if (param.throwable == null) param.thisObject?.let { logHighlight(it, "created") }
+                }
+            })
+            handles += HookRuntime.hookMethod(host.method("dispatch"), object : HookCallback() {
+                override fun before(param: Call) {
+                    capture(param.thisObject)
                     if (currentViewModelRef?.get() !== param.thisObject) return
-                    val intent = param.args?.getOrNull(0) ?: return
-                    if (HostSymbols.logicalClass(intent.javaClass.name) ==
-                        "$READER_UI_INTENT_CLASS\$MarkUpsertHighlight"
-                    ) {
-                        val selection = intent.hostField("selection")?.get(intent)
-                        XposedBridge.log(
-                            "$LOG_PREFIX highlight intent received " +
-                                "start=${selection.hostField("a")?.get(selection)} " +
-                                "end=${selection.hostField("b")?.get(selection)} " +
-                                "quote=${selection.hostField("c")?.get(selection)?.toString().orEmpty().take(160)} " +
-                                "style=${intent.hostField("style")?.get(intent)} " +
-                                "color=${intent.hostField("color")?.get(intent)}",
-                        )
-                    }
+                    val intent = param.args?.firstOrNull() ?: return
+                    val name = host.intentName(intent)
+                    if (name == "MarkUpsertHighlight") logHighlight(intent, "received")
                     if (replayingOnDemandJump.get() != true) {
-                        val intercepted = when (HostSymbols.logicalClass(intent.javaClass.name)) {
-                            "$READER_UI_INTENT_CLASS\$JumpChapter" ->
-                                interceptOnDemandJump(param, intent)
-                            "$READER_UI_INTENT_CLASS\$JumpNextChapter" ->
-                                interceptOnDemandChapterStep(param, intent, step = 1)
-                            "$READER_UI_INTENT_CLASS\$JumpPreviousChapter" ->
-                                interceptOnDemandChapterStep(param, intent, step = -1)
+                        val intercepted = when (name) {
+                            "JumpChapter" -> interceptOnDemandJump(param, intent)
+                            "JumpNextChapter" -> interceptOnDemandChapterStep(param, intent, step = 1)
+                            "JumpPreviousChapter" -> interceptOnDemandChapterStep(param, intent, step = -1)
                             else -> false
                         }
                         if (intercepted) return
                     }
-                    if (HostSymbols.logicalClass(intent.javaClass.name) == "$READER_UI_INTENT_CLASS\$Scroll") {
-                    currentScrollElement = callNoArg(intent, "getElement")
+                    if (name == "Scroll") {
+                        currentScrollElement = host.field("Scroll.element").get(intent)
                         currentSearchPagerMode = 3
-                    currentPageRef = null
-                    currentPageStrong = null
-                    return
-                }
-                if (HostSymbols.logicalClass(intent.javaClass.name) != "$READER_UI_INTENT_CLASS\$Statistics") return
-                currentScrollElement = null
-
-                    if (selectionEditSaving.get()) {
-                        param.result = null
+                        currentPageRef = null
+                        currentPageStrong = null
                         return
                     }
-                val page = callNoArg(intent, "getPage") ?: return
-                if (filterSelectionPagerTransition(param.thisObject, page)) {
-                    param.result = null
-                    return
+                    if (name != "Statistics") return
+                    currentScrollElement = null
+                    if (selectionEditSaving.get()) { param.result = null; return }
+                    val page = host.field("Statistics.page").get(intent) ?: return
+                    if (filterSelectionPagerTransition(param.thisObject, page)) { param.result = null; return }
+                    currentPageRef = WeakReference(page)
+                    currentPageStrong = page
+                    scheduleRestorePersistedSearchOrigin("visible page")
+                    val pageSignature = epubPageSignature(page)
+                    currentVisiblePageSignature = pageSignature
+                    currentVisiblePageNumber = epubPageNumber(page)
+                    scheduleOnDemandVisiblePageRefresh(param.thisObject, page)
+                    val statisticsKey = pageSignature
+                        ?: "spine=${epubPageSpine(page) ?: -1}|number=${currentVisiblePageNumber ?: -1}"
+                    if (statisticsKey == lastHandledReaderStatisticsKey) return
+                    lastHandledReaderStatisticsKey = statisticsKey
+                    publishOnlineReaderPage(page)
+                    prefetchOnlineOnDemandChapters(page)
                 }
-                currentPageRef = WeakReference(page)
-                currentPageStrong = page
-                scheduleRestorePersistedSearchOrigin("visible page")
-                val pageSignature = epubPageSignature(page)
-                currentVisiblePageSignature = pageSignature
-                currentVisiblePageNumber = epubPageNumber(page)
-
-                scheduleOnDemandVisiblePageRefresh(param.thisObject, page)
-                val statisticsKey = pageSignature
-                    ?: "spine=${callNoArg(page, "getSpineIndex") ?: -1}|number=${currentVisiblePageNumber ?: -1}"
-                if (statisticsKey == lastHandledReaderStatisticsKey) return
-                lastHandledReaderStatisticsKey = statisticsKey
-                publishOnlineReaderPage(page)
-                XposedBridge.log(
-                    "$LOG_PREFIX reader visible page " +
-                        "number=${currentVisiblePageNumber ?: -1} sig=${pageSignature.orEmpty()}",
-                )
-                prefetchOnlineOnDemandChapters(page)
+            })
+            handles += HookRuntime.hookMethod(host.method("saveMark"), object : HookCallback() {
+                override fun after(param: Call) {
+                    HookRuntime.log("$LOG_PREFIX saveMark result=${param.result?.javaClass?.name ?: "null"} " +
+                        "throwable=${param.throwable?.javaClass?.name}")
                 }
+            })
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() } }
+            throw error
         }
-        // R8 在不同版本保留不同的重载：2.3.3-b2 留下 onIntent(ReaderUiIntent)，而 2.3.3-b3 只留下
-        // 父接口重载 onIntent(arch.UiIntent)。按「同名 + 单参 + 形参是 ReaderUiIntent 的父类型」
-        // 收集，避免精确签名匹配失败导致整条 ReaderHook 链装不上。
-        val onIntentMethods = cls.declaredMethods.filter { method ->
-            method.hostNameMatches("onIntent") &&
-                method.parameterTypes.size == 1 &&
-                method.parameterTypes[0].isAssignableFrom(readerUiIntentClass)
-        }
-        if (onIntentMethods.isEmpty()) {
-            error("ReaderViewModel onIntent(${readerUiIntentClass.name}) not found on ${cls.name}")
-        }
-        onIntentMethods.forEach { XposedBridge.hookMethod(it, onIntentCallback) }
-        runCatching {
-            val repositoryClass = classLoader.hostClass(READ_REPOSITORY_CLASS)
-            val saveMarkName = HostSymbols.resolveMethodName(READ_REPOSITORY_CLASS, "saveMark")
-            val saveMarkMethods = repositoryClass.declaredMethods.filter {
-                it.hostNameMatches(saveMarkName) && it.parameterTypes.size == 11
-            }
-            check(saveMarkMethods.isNotEmpty()) { "ReadRepository.saveMark not found" }
-            saveMarkMethods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val args = param.args.orEmpty()
-                        XposedBridge.log(
-                            "$LOG_PREFIX saveMark invoke book=${args.getOrNull(0)} " +
-                                "chapter=${args.getOrNull(1)} start=${args.getOrNull(2)} " +
-                                "end=${args.getOrNull(3)} quote=${args.getOrNull(4)?.toString().orEmpty().take(160)} " +
-                                "kind=${args.getOrNull(5)} style=${args.getOrNull(6)} " +
-                                "color=${args.getOrNull(7)} extra=${args.getOrNull(8)} flag=${args.getOrNull(9)}",
-                        )
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        XposedBridge.log(
-                            "$LOG_PREFIX saveMark result=${param.result?.javaClass?.name ?: "null"} " +
-                                "throwable=${param.throwable?.javaClass?.name}:${param.throwable?.message}",
-                        )
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX saveMark diagnostic installed count=${saveMarkMethods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX saveMark diagnostic failed: ${it.stackTraceToString()}")
-        }
-        XposedBridge.log(
-            "$LOG_PREFIX ReaderViewModel onIntent(${onIntentMethods.joinToString { it.name }}) hook installed",
-        )
+        HookRuntime.deoptimize(host.method("dispatch"))
+        HookInstallReport.install(FEATURE_ID, "selectionWindow") { installSelectionWindowHook() }
+        HookRuntime.log("$LOG_PREFIX reader lifecycle hooks installed")
     }
 }
 
 internal fun ReaderHook.hookScrollPagerCrashGuard() {
     HookInstallReport.install(FEATURE_ID, "hookScrollPagerCrashGuard") {
-        val scrollPagerClass = classLoader.hostClass(HostSymbols.resolveMethodOwner(SCROLL_PAGER_KT_CLASS, "ScrollPager"))
-        val methodName = HostSymbols.resolveMethodName(SCROLL_PAGER_KT_CLASS, "ScrollPager")
-        val methods = scrollPagerClass.declaredMethods.filter {
-            it.hostNameMatches(methodName) && it.parameterTypes.size >= 9
-        }
-        check(methods.isNotEmpty()) { "hookScrollPagerCrashGuard: no matching host method" }
+        val host = requireNotNull(HostReaderLifecycleBindings.current)
+        val methods = listOf(host.method("scroll"))
         methods.forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     val session = currentSessionRef?.get()
 
                     if (session != null && restoreTranslateFlipStyleIfScrollCrashed(session, "ScrollPager")) {
                         param.result = null
                     }
                 }
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun after(param: Call) {
                     val error = param.throwable
                     if (error != null) markScrollRenderFailure(error)
                     else if (scrollCrashMarkerOwnedByThisProcess) clearScrollCrashPending("successful scroll render")
                 }
             })
         }
-        XposedBridge.log("$LOG_PREFIX scroll crash guard hook installed count=${methods.size}")
+        HookRuntime.log("$LOG_PREFIX scroll crash guard hook installed count=${methods.size}")
     }
 }
 
 internal fun ReaderHook.hookContentDomRenderTextWidthFallback() {
     HookInstallReport.install(FEATURE_ID, "hookContentDomRenderTextWidthFallback") {
-        val contentDomClass = classLoader.hostClass(CONTENT_DOM_CLASS)
-        val methodName = HostSymbols.resolveMethodName(CONTENT_DOM_CLASS, "getRenderTextWidthDp")
-        val methods = contentDomClass.declaredMethods.filter {
-            it.hostNameMatches(methodName) && it.parameterTypes.isEmpty()
-        }
-        check(methods.isNotEmpty()) { "hookContentDomRenderTextWidthFallback: no matching host method" }
+        val host = requireNotNull(HostReaderLifecycleBindings.current)
+        val methods = listOf(host.method("width"))
         methods.forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun after(param: Call) {
                     val error = param.throwable ?: return
                     if (!isUninitializedContentDomParent(error)) return
 
                     val fallback = fallbackRenderTextWidthDp(param.thisObject) ?: return
                     param.result = fallback
-                    XposedBridge.log("$LOG_PREFIX ContentDom parent fallback render width=$fallback")
+                    HookRuntime.log("$LOG_PREFIX ContentDom parent fallback render width=$fallback")
                 }
             })
         }
-        XposedBridge.log("$LOG_PREFIX ContentDom render width fallback hook installed count=${methods.size}")
+        HookRuntime.log("$LOG_PREFIX ContentDom render width fallback hook installed count=${methods.size}")
     }
 }
 
@@ -269,34 +203,28 @@ internal fun ReaderHook.installNativeSelectionHooks() {
 
 internal fun ReaderHook.hookReaderCatalog() {
     HookInstallReport.install(FEATURE_ID, "hookReaderCatalog") {
-        val catalogClass = classLoader.hostClass(READER_CATALOG_CLASS)
-        val methodName = HostSymbols.resolveMethodName(READER_CATALOG_CLASS, "ReaderCatalog")
-        val methods = catalogClass.declaredMethods.filter {
-            it.hostNameMatches(methodName) &&
-                it.parameterTypes.size >= 8 &&
-                it.parameterTypes.getOrNull(4)?.let { type -> List::class.java.isAssignableFrom(type) } == true
-        }
-        if (methods.isEmpty()) error("ReaderCatalog composable not found")
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderMenuBindings.current) { "Reader catalog contract unavailable" }
+        val methods = listOf(symbols.method("catalog"))
         methods.forEach { method ->
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     val status = param.args?.getOrNull(1)
                     param.args?.let { args ->
                         val composer = args.getOrNull(args.size - 2)
                         if (composer != null) cacheThemeColors(composer)
                     }
                     if (!canRunFullTextSearch()) {
-                        activityProvider()?.runOnUiThread {
+                        activityProvider()?.runOnModuleUiThread {
                             clearSearchOverlays(clearNavigationState = true)
                         }
                         return
                     }
                     if (status?.toString() != "Catalog") {
-                        XposedBridge.log("$LOG_PREFIX catalog skip status='${status}'")
+                        HookRuntime.log("$LOG_PREFIX catalog skip status='${status}'")
                         return
                     }
-                    XposedBridge.log("$LOG_PREFIX catalog captured status='${status}'")
+                    HookRuntime.log("$LOG_PREFIX catalog captured status='${status}'")
                     val catalog = (param.args?.getOrNull(4) as? List<*>)?.filterNotNull().orEmpty()
                     val context = CatalogContext(
                         intentReceiver = param.args?.getOrNull(0),
@@ -314,58 +242,40 @@ internal fun ReaderHook.hookReaderCatalog() {
                 }
             })
         }
-        XposedBridge.log("$LOG_PREFIX reader catalog full-text search hook installed: ${methods.size}")
-        if (HostSymbols.abiProfileId == "2.3.3-b4") B4ReaderSearchEntryBridge(this).install()
+        HookRuntime.log("$LOG_PREFIX reader catalog full-text search hook installed: ${methods.size}")
     }
 }
 
 internal fun ReaderHook.hookHomeBookshelfScreen() {
-    val targets = listOf(
-        HOME_SCREEN_CLASS to "HomeScreen",
-        BOOKSHELF_SCREEN_CLASS to "BookshelfScreen",
-    )
-    targets.forEach { (className, methodName) ->
-        HookInstallReport.install(FEATURE_ID, "homeBookshelf.$methodName") {
-            val entryName = if (methodName == "BookshelfScreen" && HostSymbols.usesRc3Abi)
-                "BookshelfScreen-kWc7xho" else methodName
-            val cls = classLoader.hostClass(HostSymbols.resolveMethodOwner(className, entryName))
-            val resolvedName = HostSymbols.resolveMethodName(className, entryName)
-            val methods = cls.declaredMethods.filter {
-                (if (HostSymbols.isIdentity) it.hostNameStartsWith(methodName) else it.name == resolvedName) &&
-                    it.parameterTypes.any { type -> typeMatches(type, "androidx.compose.runtime.Composer") }
-            }
-            if (methods.isEmpty()) error("$methodName not found")
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        handleHomeBookshelfRendered(methodName)
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX home search cleanup hook installed: $methodName/${methods.size}")
+    for (role in listOf("home", "bookshelf")) {
+        HookInstallReport.install(FEATURE_ID, "homeBookshelf.$role") {
+            val host = requireNotNull(HostReaderLifecycleBindings.current)
+            HookRuntime.hookMethod(host.method(role), object : HookCallback() {
+                override fun before(param: Call) { handleHomeBookshelfRendered(role) }
+            })
         }
     }
 }
 
 internal fun ReaderHook.hookReaderBottomBar() {
+    HookInstallReport.install(FEATURE_ID, "readerMenuSearch") { HostReaderSearchEntryBridge(this).install() }
     HookInstallReport.install(FEATURE_ID, "hookReaderBottomBar") {
-        val cls = classLoader.hostClass(READER_BOTTOM_BAR_CLASS)
-        val methodName = HostSymbols.resolveMethodName(READER_BOTTOM_BAR_CLASS, "ReaderBottomBar")
-        val methods = cls.declaredMethods.filter {
-            it.hostNameMatches(methodName) && it.parameterTypes.size >= 7
-        }
-        if (methods.isEmpty()) error("ReaderBottomBar composable not found")
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderMenuBindings.current) { "Reader bottom bar contract unavailable" }
+        val methods = listOf(symbols.method("bottomBar"))
         methods.forEach { method ->
             method.isAccessible = true
-            val composerIndex = method.parameterTypes.indexOfFirst {
-                HostSymbols.logicalClass(it.name) == "androidx.compose.runtime.Composer"
-            }
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val composerIndex = method.parameterTypes.indexOf(symbols.method("icon").parameterTypes[4])
+            val function0 = symbols.method("clickable").parameterTypes[4]
+            val backIndex = method.parameterTypes.indexOf(function0)
+            HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
                     beginReaderSearchBar(param.args?.getOrNull(0), param.args?.getOrNull(1))
 
-                    param.args?.getOrNull(composerIndex)?.let { cacheThemeColors(it, captureSearchTheme = true) }
+                    param.args?.getOrNull(composerIndex)?.let {
+                        cacheThemeColors(it, captureSearchTheme = true)
+                        // The caller's native restart scope must also rebuild the back callback.
+                        ReaderAutoPageHook.observeAutoPageState()
+                    }
 
                     val status = param.args?.getOrNull(2)
                     val statusName = readerUiStatusName(status)
@@ -374,21 +284,39 @@ internal fun ReaderHook.hookReaderBottomBar() {
                     if (menuVisible && ReaderAutoPageHook.isAutoPageEnabled()) {
 
                         val args = param.args ?: return
-                        val backIdx = args.indexOfFirst { it != null &&
-                            it.javaClass.interfaces.any { iface ->
-                                HostSymbols.logicalClass(iface.name) == "kotlin.jvm.functions.Function0"
-                            } }
-                        if (backIdx >= 0) {
-                            args[backIdx] = nativeFunction0 { ReaderAutoPageHook.toggleAutoPage() }
+                        val activity = activityProvider()?.takeUnless { it.isFinishing || it.isDestroyed }
+                        val identity = activity?.let { AccountHostRuntime.storageSnapshot(it) }
+                        if (backIndex >= 0 && activity != null && identity != null) {
+                            val activityRef = WeakReference(activity)
+                            val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+                            args[backIndex] = ui.callback(function0) {
+                                val ownerActivity = activityRef.get() ?: return@callback
+                                if (activityProvider() !== ownerActivity || ownerActivity.isFinishing ||
+                                    ownerActivity.isDestroyed || !AccountHostRuntime.isCurrentStorage(identity, ownerActivity) ||
+                                    !ReaderAutoPageHook.isAutoPageEnabled()) return@callback
+                                runCatching {
+                                    AccountHostRuntime.withCurrentStorage(identity, ownerActivity) {
+                                        if (activityProvider() === ownerActivity && !ownerActivity.isFinishing &&
+                                            !ownerActivity.isDestroyed && ReaderAutoPageHook.isAutoPageEnabled()) {
+                                            ReaderAutoPageHook.toggleAutoPage()
+                                        }
+                                    }
+                                }.onFailure {
+                                    if (activityProvider() === ownerActivity &&
+                                        AccountHostRuntime.isCurrentStorage(identity, ownerActivity)) {
+                                        HookRuntime.logError("$LOG_PREFIX auto-page shortcut update failed", it)
+                                    }
+                                }
+                            }
                         }
                     }
                     readerBottomMenuVisible = menuVisible
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun after(param: Call) {
                     endReaderSearchBar()
                     if (!canRunFullTextSearch()) {
-                        activityProvider()?.runOnUiThread {
+                        activityProvider()?.runOnModuleUiThread {
                             readerBottomMenuVisible = false
                             bottomSearchReceiverRef = null
                             bottomSearchBookRef = null
@@ -400,482 +328,165 @@ internal fun ReaderHook.hookReaderBottomBar() {
                     val statusName = readerUiStatusName(status)
                     readerBottomMenuVisible = statusName.isNotBlank() && statusName != "Reader"
                     val activity = activityProvider() ?: return
-                    activity.runOnUiThread {
+                    activity.runOnModuleUiThread {
                         updateSearchNavigationForBottomState(activity)
                     }
                 }
             })
         }
-        hookReaderBottomBarContent(cls)
-        XposedBridge.log("$LOG_PREFIX reader bottom search hook installed: ${methods.size}")
+        hookReaderBottomBarContent()
+        HookRuntime.log("$LOG_PREFIX reader bottom search hook installed: ${methods.size}")
     }
 }
 
-internal fun ReaderHook.hookReaderBottomBarContent(bottomBarClass: Class<*>) {
+internal fun ReaderHook.hookReaderBottomBarContent() {
     HookInstallReport.install(FEATURE_ID, "hookReaderBottomBarContent") {
-        val methods = bottomBarClass.declaredMethods.mapNotNull { method ->
-            readerBottomBarContentBinding(
-                method.name,
-                method.parameterTypes.map { HostSymbols.logicalClass(it.name) },
-            )
-                ?.let { method to it }
-        }
-        if (methods.isEmpty() && !HostSymbols.isIdentity) {
-            // R8 删除静态 lambda 桥接后，作用域转到真实重组闭包，按捕获对象过滤合并分支。
-            val content = classLoader.hostClass(
-                "$READER_BOTTOM_BAR_CLASS\$\$ExternalSyntheticLambda19",
-            )
-            val receiverField = content.hostField("f\$0")
-            val bookField = content.hostField("f\$1")
-            val bookClass = classLoader.hostClass("app.zhendong.reamicro.data.db.entity.Book")
-            val callback = content.hostMethod("invoke", Any::class.java, Any::class.java)
-            XposedBridge.hookMethod(callback, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val closure = param.thisObject ?: return
-                    val book = bookField.get(closure)
-                    val receiver = receiverField.get(closure)
-                    if (!bookClass.isInstance(book) || receiver !== currentViewModelRef?.get()) return
-                    beginReaderSearchBar(receiver, book)
-                    param.setObjectExtra("reamicro.bottom.scope", true)
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderMenuBindings.current) { "Reader bottom content contract unavailable" }
+        HookRuntime.hookMethod(symbols.method("bottomContent"), object : HookCallback() {
+            override fun before(param: Call) {
+                val callback = param.thisObject ?: return
+                if (!symbols.bottomMatches(callback)) return
+                val receiver = symbols.field("bottom.receiver").get(callback) ?: return
+                if (receiver !== currentViewModelRef?.get()) return
+                val book = symbols.field("bottom.book").get(callback) ?: return
+                if (!symbols.type("book").isInstance(book)) return
+                beginReaderSearchBar(receiver, book)
+                param.setObjectExtra("reamicro.bottom.scope", true)
+                readerBottomMenuVisible = readerUiStatusName(symbols.field("bottom.status").get(callback)).let { it.isNotBlank() && it != "Reader" }
+                param.args.getOrNull(1)?.let {
+                    cacheThemeColors(it, captureSearchTheme = true)
+                    // Native lambda Function3 runs after its restart scope has opened.
+                    ReaderAutoPageHook.observeAutoPageState()
                 }
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (param.getObjectExtra("reamicro.bottom.scope") == true) endReaderSearchBar()
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX reader bottom search content closure hook installed")
-            return@install
-        }
-        check(methods.isNotEmpty()) { "ReaderBottomBar content callbacks not found" }
-        methods.forEach { (method, binding) ->
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    beginReaderSearchBar(
-                        param.args?.getOrNull(binding.receiverIndex),
-                        param.args?.getOrNull(binding.bookIndex),
-                    )
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    endReaderSearchBar()
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX reader bottom search content hooks installed: ${methods.size}")
+            }
+            override fun after(param: Call) {
+                if (param.getObjectExtra("reamicro.bottom.scope") != true) return
+                endReaderSearchBar()
+                activityProvider()?.let { activity -> activity.runOnModuleUiThread { updateSearchNavigationForBottomState(activity) } }
+            }
+        })
+        HookRuntime.deoptimize(symbols.method("bottomContent"))
+        HookRuntime.deoptimize(symbols.method("bottomBar"))
     }
 }
-
 internal fun ReaderHook.hookInlineSearchIcon() {
     HookInstallReport.install(FEATURE_ID, "hookInlineSearchIcon") {
-
-        runCatching {
-            val cls = classLoader.hostClass(ARROW_BACK_ICON_CLASS)
-            val getArrowBack = HostSymbols.resolveMethodName(ARROW_BACK_ICON_CLASS, "getArrowBack")
-            cls.declaredMethods.filter { it.name == getArrowBack && it.parameterTypes.size == 1 }.forEach { m ->
-                m.isAccessible = true
-                XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (!ReaderAutoPageHook.isAutoPageEnabled()) return
-                        if (!readerBottomMenuVisible) return
-                        nextIconIsAutoPage = true
-                    }
-                })
-            }
-        }
-
-        val iconClass = classLoader.hostClass("androidx.compose.material3.IconKt")
-        val iconMethod = HostSymbols.resolveMethodName("androidx.compose.material3.IconKt", "Icon-ww6aTOc")
-        iconClass.declaredMethods.filter {
-            it.name == iconMethod && it.parameterTypes.size == 7 &&
-                HostSymbols.logicalClass(it.parameterTypes[0].name) ==
-                "androidx.compose.ui.graphics.vector.ImageVector"
-        }.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!nextIconIsAutoPage && !readerBottomBarComposeScope.active) return
-                    val args = param.args ?: return
-                    val vectorName = callString(args.getOrNull(0), "getName")
-                    if (nextIconIsAutoPage && vectorName.endsWith(".ArrowBack")) {
-                        nextIconIsAutoPage = false
-                        val icon = ReaderAutoPageHook.autoPageIcon(ReaderAutoPageHook.isAutoPageRunning()) ?: return
-                        param.args?.set(0, icon)
-                        return
-                    }
-                    replaceReaderThemeIcon(args, vectorName)
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderMenuBindings.current) { "Reader icon contract unavailable" }
+        val vectorNameField = symbols.field("vectorName")
+        HookRuntime.hookMethod(symbols.method("icon"), object : HookCallback() {
+            override fun before(param: Call) {
+                if (!readerBottomBarComposeScope.active) return
+                val args = param.args
+                val vector = args.getOrNull(0) ?: return
+                val vectorName = vectorNameField.get(vector) as? String ?: return
+                if (readerBottomMenuVisible && ReaderAutoPageHook.isAutoPageEnabled() && vectorName.endsWith(".ArrowBack")) {
+                    args[0] = ReaderAutoPageHook.autoPageIcon(ReaderAutoPageHook.isAutoPageRunning()) ?: return
+                    args[5] = searchPaintChangedFlags(args[5] as? Int ?: 0, 0)
+                    return
                 }
-            })
-        }
-
-        if (!HostSymbols.isIdentity) {
-            val clickable = classLoader.hostClass("androidx.compose.foundation.ClickableElement")
-            XposedBridge.hookAllConstructors(clickable, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!readerBottomBarComposeScope.active) return
-                    val constructor = param.method as java.lang.reflect.Constructor<*>
-                    val index = constructor.parameterTypes.indexOfFirst {
-                        typeMatches(it, "kotlin.jvm.functions.Function0")
-                    }
-                    val original = param.args?.getOrNull(index) ?: return
-                    param.args[index] = bindReaderThemeClick(original)
-                }
-            })
-        }
-        runCatching {
-            val clickableClass = classLoader.hostClass("androidx.compose.foundation.ClickableKt")
-            clickableClass.declaredMethods.filter {
-                it.name.startsWith("clickable-") && it.name.endsWith("\$default") && it.parameterTypes.size == 8
-            }.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!readerBottomBarComposeScope.active) return
-                        val onClick = param.args?.getOrNull(5) ?: return
-                        extractNavGraphScopeFromLambda(onClick)?.let { currentReaderNavGraphScopeRef = WeakReference(it) }
-                        param.args[5] = bindReaderThemeClick(onClick)
-                    }
-                })
+                replaceReaderThemeIcon(args, vectorName)
             }
-        }
-        XposedBridge.log("$LOG_PREFIX inline search icon replacement hook installed")
+        })
     }
 }
-
 internal fun ReaderHook.hookReaderHighlightScreenEntry() {
-    HookInstallReport.install(FEATURE_ID, "hookReaderHighlightScreenEntry") {
-        val screenClass = classLoader.hostClass(READER_HIGHLIGHT_SCREEN_CLASS)
-        val composerClass = classLoader.hostClass(COMPOSER_CLASS)
-
-        val pageContentMethod = screenClass.declaredMethods.firstOrNull { method ->
-            method.hostNameMatches("HighlightPageContent") &&
-                typeMatches(method.parameterTypes.firstOrNull(), "java.util.List") &&
-                method.parameterTypes.any { it == composerClass }
-        } ?: error("HighlightPageContent main method not found")
-        pageContentMethod.isAccessible = true
-        XposedBridge.hookMethod(pageContentMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                highlightScreenEntryInjected.set(false)
-            }
-        })
-
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            // B4 只在高亮页签的滚动 Column 中调用预置对话行；入口作为它的前一个子项，
-            // 继承卡片宽度和滚动范围，不再占用角色/高亮切换栏外的空间。
-            val presetMethod = screenClass.declaredMethods.firstOrNull { method ->
-                method.hostNameMatches("PresetDialogueRow") &&
-                    method.parameterTypes.size == 7 &&
-                    method.parameterTypes[1] == String::class.java &&
-                    method.parameterTypes[2] == Boolean::class.javaPrimitiveType &&
-                    typeMatches(method.parameterTypes[3], "kotlin.jvm.functions.Function0") &&
-                    typeMatches(method.parameterTypes[4], "kotlin.jvm.functions.Function0") &&
-                    method.parameterTypes[5] == composerClass
-            } ?: error("PresetDialogueRow main method not found")
-            presetMethod.isAccessible = true
-            XposedBridge.hookMethod(presetMethod, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val composer = param.args?.getOrNull(5) ?: return
-                    ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
-                        bookKey = ReaderHighlightBookContext.bookKey,
-                        bookTitle = ReaderHighlightBookContext.bookTitle,
-                        composer = composer,
-                    ) {
-                        XposedBridge.log("$LOG_PREFIX highlight entry card clicked")
-                        openReaderCompletionPlanPage()
-                    }
-                }
-            })
-            // 仅反优化已取证的分页内容调用方，保证内联后的预置行仍命中入口 hook。
-            val pagerContent = classLoader.hostClass("ReaMicroHost.ReaderHighlightPagerContent")
-                .declaredMethods.single { it.hostNameMatches("invoke") && it.parameterCount == 4 }
-            XposedBridge.deoptimize(pagerContent)
-            XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook installed before B4 preset dialogue")
-            return@install
-        }
-
-        // SectionTitleLikeMore 是旧 UI API，b2/b3 的 ReaderHighlightScreenKt 已没有同名成员。
-        // 缺省回退到同一屏的 HighlightPageContent：它每次组屏都会执行，且以 Composer 为参数，
-        // 卡片会落在分页标签栏上方，与旧版插入位置一致。
-        val sectionTitleMethod = screenClass.declaredMethods.firstOrNull { method ->
-            method.hostNameMatches("SectionTitleLikeMore") &&
-                method.parameterTypes.firstOrNull() == String::class.java &&
-                method.parameterTypes.any { it == composerClass }
-        }
-        val entryMethod = sectionTitleMethod ?: pageContentMethod
-        if (sectionTitleMethod == null) {
-            XposedBridge.log("$LOG_PREFIX SectionTitleLikeMore 缺失，高亮页入口卡片迁移到 HighlightPageContent")
-        }
-        entryMethod.isAccessible = true
-        val composerIndex = entryMethod.parameterTypes.indexOfFirst { it == composerClass }
-        XposedBridge.hookMethod(entryMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val composer = param.args?.getOrNull(composerIndex) ?: return
-
-                if (highlightScreenEntryInjected.get() == true) return
-                highlightScreenEntryInjected.set(true)
-                val bookKey = ReaderHighlightBookContext.bookKey
-                val bookTitle = ReaderHighlightBookContext.bookTitle
-                ReaMicroSettingsHook.renderReaderHighlightScreenEntryCard(
-                    bookKey = bookKey,
-                    bookTitle = bookTitle,
-                    composer = composer,
-                ) {
-                    XposedBridge.log("$LOG_PREFIX highlight entry card clicked")
-                    openReaderCompletionPlanPage()
-                }
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX reader highlight screen entry hook installed")
-    }
+    HookInstallReport.install(FEATURE_ID, "hookReaderHighlightScreenEntry") { ReaderHighlightUiBridge(this).installEntry() }
 }
 
 internal fun ReaderHook.hookReaderHighlightRuleSheet() {
-    HookInstallReport.install(FEATURE_ID, "hookReaderHighlightRuleSheet") {
-        val cls = classLoader.hostClass(READER_FAMILY_EPUB_CLASS)
-        val clearMethods = cls.declaredMethods.filter {
-            it.hostNameMatches("ReaderFamilyEpub") && it.parameterTypes.size == 5
-        }
-        clearMethods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val status = param.args?.getOrNull(1)
-                    if (isReaderSheetStatus(status, "Hidden")) {
-                        pendingReaderHighlightSheet = null
-                    }
-                }
-            })
-        }
-        val contentMethods = cls.declaredMethods.filter {
-            it.hostNameMatches("ReaderFamilyEpub\$lambda\$2") && it.parameterTypes.size == 6
-        }
-        contentMethods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val request = pendingReaderHighlightSheet
-
-                    if (request == null) return
-                    val status = param.args?.getOrNull(0)
-                    if (!isReaderSheetStatus(status, "EpubFamily")) return
-                    val receiver = param.args?.getOrNull(1) ?: return
-                    val composer = param.args?.getOrNull(4) ?: return
-                    updateReaderHighlightBookContext(request.bookKey, request.bookTitle, "highlight sheet render")
-                    val rendered = ReaMicroSettingsHook.renderReaderHighlightRulesSheetFromReader(
-                        globalRules = request.globalRules,
-                        bookKey = request.bookKey,
-                        bookTitle = request.bookTitle,
-                        composer = composer,
-                    ) {
-                        pendingReaderHighlightSheet = null
-                        sendReaderUiSheetStatus(receiver, "Hidden")
-                    }
-                    if (rendered) param.result = targetUnit()
-                }
-            })
-        }
-        XposedBridge.log(
-            "$LOG_PREFIX reader highlight rule sheet hook installed: " +
-                "clear=${clearMethods.size} content=${contentMethods.size}",
-        )
-    }
+    HookInstallReport.install(FEATURE_ID, "hookReaderHighlightRuleSheet") { ReaderHighlightUiBridge(this).installRules() }
 }
 
 internal fun ReaderHook.hookReaderFamilySheetHeight() {
-    HookInstallReport.install(FEATURE_ID, "hookReaderFamilySheetHeight") {
-        val heightMethod = composeMethod(SIZE_KT_CLASS, HEIGHT_METHOD, 2)
-        XposedBridge.hookMethod(heightMethod, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-
-                val currentHeight = param.args?.getOrNull(1) as? Float ?: return
-                val hostHeight = cachedUdp(HOST_READER_FAMILY_SHEET_HEIGHT_DP) ?: return
-                if (currentHeight - hostHeight > 0.01f || hostHeight - currentHeight > 0.01f) return
-                if (!isInReaderFamilySheetCompose()) return
-                param.args[1] = cachedUdp(READER_RULE_SHEET_HEIGHT_DP) ?: return
-            }
-        })
-        XposedBridge.log("$LOG_PREFIX reader family sheet height hook installed")
-    }
+    HookInstallReport.install(FEATURE_ID, "hookReaderFamilySheetHeight") { ReaderHighlightUiBridge(this).installHeight() }
 }
 
 internal fun ReaderHook.hookNativeSelectionController() {
     HookInstallReport.install(FEATURE_ID, "hookNativeSelectionController") {
-        val controllerClass = classLoader.hostClass("org.epub.ui.EpubSelectionController")
-        XposedBridge.hookAllConstructors(controllerClass, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                currentSelectionControllerRef = WeakReference(param.thisObject)
-            }
-        })
-        controllerClass.declaredMethods
-            .filter { method ->
-                method.name.contains("Selection", ignoreCase = true) ||
-                    method.hostNameMatches("selectedPayload") ||
-                    method.hostNameMatches("selectedText")
-            }
-            .forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+        val symbols = requireNotNull(com.reamicro.fix.core.HostSelectionBindings.current) { "Selection contract unavailable" }
+        val handles = mutableListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        try {
+            handles += HookRuntime.hookMethod(symbols.constructor("controller"), object : HookCallback() {
+                override fun after(param: Call) {
+                    if (param.throwable == null) currentSelectionControllerRef = WeakReference(param.thisObject)
+                }
+            })
+            for (key in listOf("begin", "selection", "payload", "text", "clear")) {
+                handles += HookRuntime.hookMethod(symbols.method(key), object : HookCallback() {
+                    override fun before(param: Call) {
                         currentSelectionControllerRef = WeakReference(param.thisObject)
                     }
                 })
             }
-        XposedBridge.log("$LOG_PREFIX native EpubSelectionController hook installed")
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            throw error
+        }
+        HookRuntime.log("$LOG_PREFIX native selection controller installed from current APK")
     }
 }
 
 internal fun ReaderHook.hookNativeSelectionMenu() {
     HookInstallReport.install(FEATURE_ID, "hookNativeSelectionMenu") {
-        val bodyClass = classLoader.hostClass("org.epub.ui.BodyKt")
-        val menuMethods = bodyClass.declaredMethods.filter {
-            it.hostNameMatches("SelectionBubbleMenu") &&
-                it.parameterTypes.size >= 2 &&
-                List::class.java.isAssignableFrom(it.parameterTypes[0])
-        }
-        if (menuMethods.isEmpty()) error("SelectionBubbleMenu not found")
-        menuMethods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val original = (param.args?.getOrNull(0) as? List<*>) ?: return
-                    val next = ArrayList<Any>(original.filterNotNull())
-                    val fallbackIcon = original.firstNotNullOfOrNull { callNoArg(it, "getIcon") }
-                    if (canShowReaderDictionary() && original.none { callString(it, "getTitle") == "\u8bcd\u5178" }) {
-                        val action = (dictionaryImageVector() ?: fallbackIcon)?.let(::createNativeDictionaryAction)
-                        if (action != null) next.add(action)
+        val symbols = requireNotNull(com.reamicro.fix.core.HostSelectionBindings.current) { "Selection menu contract unavailable" }
+        val handles = mutableListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        try {
+            handles += HookRuntime.hookMethod(symbols.method("bubble"), object : HookCallback() {
+                override fun before(param: Call) {
+                    val original = param.args[0] as? List<*> ?: return
+                    if (original.any { !symbols.type("action").isInstance(it) }) return
+                    val next = ArrayList(original.filterNotNull())
+                    val fallbackIcon = next.firstOrNull()?.let(symbols::icon)
+                    if (canShowReaderDictionary() && next.none { symbols.title(it) == "词典" }) {
+                        fallbackIcon?.let(::createNativeDictionaryAction)?.let(next::add)
                     }
-                    if (canEditReaderSelection() && original.none { callString(it, "getTitle") == "\u7f16\u8f91" }) {
-                        val action = (editImageVector() ?: fallbackIcon)?.let(::createNativeEditAction)
-                        if (action != null) next.add(action)
+                    if (canEditReaderSelection() && next.none { symbols.title(it) == "编辑" }) {
+                        (editImageVector() ?: fallbackIcon)?.let(::createNativeEditAction)?.let(next::add)
                     }
                     if (canHighlightReaderSelection()) {
-                        val nativeHighlightIndex = next.indexOfFirst {
-                            callString(it, "getTitle") == "\u9ad8\u4eae"
-                        }
-                        val nativeHighlightIcon = nativeHighlightIndex
-                            .takeIf { it >= 0 }
-                            ?.let { callNoArg(next[it], "getIcon") }
-                        val action = (highlightImageVector() ?: nativeHighlightIcon ?: fallbackIcon)
-                            ?.let(::createNativeHighlightAction)
-                        if (action != null) {
-                            // B4 新增了宿主高亮动作，但模块选择高亮仍走自己的本书规则链路。
-                            // 仅替换同名动作，保留原有位置和划线等其它宿主动作。
-                            if (HostSymbols.abiProfileId == "2.3.3-b4" && nativeHighlightIndex >= 0) {
-                                next[nativeHighlightIndex] = action
-                            } else if (nativeHighlightIndex < 0) {
-                                next.add(action)
-                            }
+                        val index = next.indexOfFirst { symbols.title(it) == "高亮" }
+                        val icon = next.getOrNull(index)?.let(symbols::icon) ?: fallbackIcon
+                        icon?.let(::createNativeHighlightAction)?.let {
+                            if (index >= 0) next[index] = it else next.add(it)
                         }
                     }
-                    val compact = if (settingsProvider().canUseCompactReaderSelectionMenu) {
-                        compactSelectionMenuActions(next)
-                    } else {
-                        next
-                    }
-                    if (next.size != original.size || compact !== next) param.args[0] = compact
-                    if (!HostSymbols.isIdentity && method.parameterTypes.size == 7 &&
-                        method.parameterTypes[3] == Boolean::class.javaPrimitiveType &&
-                        (settingsProvider().canUseCompactReaderSelectionMenu ||
-                            (HostSymbols.abiProfileId == "2.3.3-b4" && selectionMenuMaxItemsPerRow(next.size) != null))
-                    ) {
-                        // B4 的第四参控制 widthIn/固定全宽；换行内容也必须按实测宽度收缩气泡。
+                    val actions = if (settingsProvider().canUseCompactReaderSelectionMenu) compactSelectionMenuActions(next) else next
+                    if (actions.size != original.size || actions.indices.any { actions[it] !== original[it] }) param.args[0] = actions
+                    if (settingsProvider().canUseCompactReaderSelectionMenu || selectionMenuMaxItemsPerRow(actions.size) != null) {
                         param.args[3] = true
-                        param.args[6] = ((param.args[6] as? Int) ?: 0) and 0x1C00.inv()
+                        param.args[6] = (param.args[6] as Int) and 0x1C00.inv()
                     }
                 }
             })
-        }
-        hookNativeSelectionMenuContent(bodyClass)
-        XposedBridge.log("$LOG_PREFIX native SelectionBubbleMenu hook installed: ${menuMethods.size}")
-    }
-}
-
-internal fun ReaderHook.hookNativeSelectionMenuContent(bodyClass: Class<*>) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        // 定位 Modifier、气泡背景和上下箭头仍由 SelectionBubbleMenu 处理，只替换内部动作布局。
-        listOf(
-            "ReaMicroHost.SelectionMenuFloatingContent" to true,
-            "ReaMicroHost.SelectionMenuInlineContent" to false,
-        ).forEach { (name, merged) ->
-            val content = classLoader.hostClass(name)
-            val target = content.hostMethod("invoke", Any::class.java, Any::class.java)
-            XposedBridge.hookMethod(target, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val closure = param.thisObject ?: return
-                    if (merged && content.getDeclaredField("a").getByte(closure) != 0.toByte()) return
-                    val actionsField = if (merged) "e" else "a"
-                    val tintField = if (merged) "d" else "b"
-                    val actions = (content.getDeclaredField(actionsField).get(closure) as? List<*>)
-                        ?.filterNotNull().orEmpty()
-                    val maxPerRow = selectionMenuMaxItemsPerRow(actions.size) ?: return
-                    val tint = content.getDeclaredField(tintField).getLong(closure)
-                    val composer = param.args?.getOrNull(0) ?: return
-                    val arrowOnTop = if (merged) content.getDeclaredField("b").getBoolean(closure) else null
-                    renderSelectionMenuReplacement(param, actions, tint, composer, maxPerRow, arrowOnTop)
-                }
-            })
-            XposedBridge.deoptimize(target)
-        }
-        bodyClass.declaredMethods.filter { it.hostNameMatches("SelectionBubbleMenu") }
-            .forEach(XposedBridge::deoptimize)
-        XposedBridge.logAlways("ReaMicro B4 selection menu content hooked; native position and bubble retained")
-        return
-    }
-    val contentMethods = bodyClass.declaredMethods.filter { method ->
-        method.name.contains("SelectionBubbleMenu") &&
-            method.name.contains("lambda") &&
-            method.parameterTypes.size == 4 &&
-            List::class.java.isAssignableFrom(method.parameterTypes[0]) &&
-            method.parameterTypes[1] == Long::class.javaPrimitiveType
-    }
-    if (contentMethods.isNotEmpty()) {
-        contentMethods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val actions = (param.args?.getOrNull(0) as? List<*>)?.filterNotNull().orEmpty()
-                    val maxPerRow = selectionMenuMaxItemsPerRow(actions.size) ?: return
-                    val tint = (param.args?.getOrNull(1) as? Number)?.toLong() ?: return
-                    val composer = param.args?.getOrNull(2) ?: return
-                    renderSelectionMenuReplacement(param, actions, tint, composer, maxPerRow)
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX native SelectionBubbleMenu content hook installed: ${contentMethods.size}")
-        return
-    }
-
-    // B4 删除了旧版 SelectionBubbleMenu$lambda 桥接，布局入口直接变成
-    // SelectionBubbleMenu(List, boolean, int, boolean, Modifier, Composer, int)。
-    // 仍在这里接管内容布局，否则原生 8 等分分支会把双字菜单标题裁成首字。
-    val fallbackMethods = bodyClass.declaredMethods.filter { method ->
-        method.hostNameMatches("SelectionBubbleMenu") &&
-            method.parameterTypes.size == 7 &&
-            List::class.java.isAssignableFrom(method.parameterTypes[0]) &&
-            method.parameterTypes[1] == Boolean::class.javaPrimitiveType &&
-            method.parameterTypes[3] == Boolean::class.javaPrimitiveType
-    }
-    if (fallbackMethods.isEmpty()) {
-        XposedBridge.log("$LOG_PREFIX SelectionBubbleMenu content lambda not found; native layout kept")
-        return
-    }
-    fallbackMethods.forEach { method ->
-        method.isAccessible = true
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val actions = (param.args?.getOrNull(0) as? List<*>)?.filterNotNull().orEmpty()
-                val maxPerRow = selectionMenuMaxItemsPerRow(actions.size) ?: return
-                val composer = param.args?.getOrNull(5) ?: return
-                val tint = selectionMenuTint(composer)
-                    ?: (latestThemeColors?.primaryText?.let { composeColorFromArgb(it) })
-                    ?: return
-                renderSelectionMenuReplacement(param, actions, tint, composer, maxPerRow)
+            for (role in listOf("floating", "inline")) {
+                val method = symbols.method("$role.content")
+                handles += HookRuntime.hookMethod(method, object : HookCallback() {
+                    override fun before(param: Call) {
+                        val closure = param.thisObject ?: return
+                        if (!symbols.matches(role, closure)) return
+                        val values = symbols.field("$role.actions").get(closure) as? List<*> ?: return
+                        if (values.any { !symbols.type("action").isInstance(it) }) return
+                        val actions = values.filterNotNull()
+                        val maxPerRow = selectionMenuMaxItemsPerRow(actions.size) ?: return
+                        val composer = param.args[0] ?: return
+                        val tint = symbols.field("$role.tint").getLong(closure)
+                        val arrow = if (role == "floating") symbols.field("floating.arrow").getBoolean(closure) else null
+                        renderSelectionMenuReplacement(param, actions, tint, composer, maxPerRow, arrow)
+                    }
+                })
+                HookRuntime.deoptimize(method)
             }
-        })
+            HookRuntime.deoptimize(symbols.method("bubble"))
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            throw error
+        }
+        HookRuntime.log("$LOG_PREFIX native selection menu and both content closures installed")
     }
-    XposedBridge.log("$LOG_PREFIX native SelectionBubbleMenu layout hook installed: ${fallbackMethods.size}")
 }
 
 private fun ReaderHook.renderSelectionMenuReplacement(
-    param: XC_MethodHook.MethodHookParam,
+    param: HookCallback.Call,
     actions: List<Any>,
     tint: Long,
     composer: Any,
@@ -887,20 +498,17 @@ private fun ReaderHook.renderSelectionMenuReplacement(
     }.onSuccess {
         param.result = targetUnit()
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX wrap native selection menu failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX wrap native selection menu failed: ${it.stackTraceToString()}")
     }
 }
 
 internal fun ReaderHook.hookCurrentEpub() {
     HookInstallReport.install(FEATURE_ID, "hookCurrentEpub") {
-        val epubClass = classLoader.hostClass("app.zhendong.reamicro.data.epub.Epub")
-        val readMethod = HostSymbols.resolveMethodName("app.zhendong.reamicro.data.epub.Epub", "read")
-        epubClass.declaredMethods
-            .filter { it.hostNameMatches(readMethod) }
-            .forEach { method ->
+        val host = requireNotNull(HostReaderLifecycleBindings.current)
+        listOf(host.method("read"), host.method("readElements")).forEach { method ->
                 method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                HookRuntime.hookMethod(method, object : HookCallback() {
+                    override fun before(param: Call) {
                         val previousEpub = currentEpubRef?.get()
                         if (previousEpub != null && previousEpub !== param.thisObject) {
                             val previousDirectory = epubDirectory(previousEpub)
@@ -936,275 +544,144 @@ internal fun ReaderHook.hookCurrentEpub() {
                     }
                 })
             }
-        XposedBridge.log("$LOG_PREFIX current Epub hook installed")
+        HookRuntime.log("$LOG_PREFIX current Epub hook installed")
     }
 }
 
 internal fun ReaderHook.hookCurrentEpubPage() {
     HookInstallReport.install(FEATURE_ID, "hookCurrentEpubPage") {
-        val containerName = "app.zhendong.reamicro.ui.reader.components.EpubContainerKt"
-        val containerClass = classLoader.hostClass(HostSymbols.resolveMethodOwner(containerName, "EpubContainer"))
-        val epubContainerMethod = HostSymbols.resolveMethodName(containerName, "EpubContainer")
-        val methods = containerClass.declaredMethods.filter {
-            it.hostNameMatches(epubContainerMethod) && it.parameterTypes.size >= 2
-        }
-        check(methods.isNotEmpty()) { "EpubContainer not found" }
-        methods.forEach { method ->
-            val marksIndex = epubContainerMarksIndex(method.parameterTypes)
-            check(marksIndex >= 0) { "EpubContainer marks parameter not found: $method" }
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val page = param.args?.getOrNull(1)
-                    renderingEpubPage.set(page)
-                    currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
-                        updateReaderHighlightBookContext(bookKey, bookTitle, "page rendered")
-                    }
-                    val args = param.args ?: return
-                    val originalMarks = args.getOrNull(marksIndex) as? List<*> ?: return
-                    val nextMarks = appendActiveSearchHighlightMark(originalMarks, "EpubContainer") ?: return
-                    args[marksIndex] = nextMarks
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRenderBindings.current)
+        val method = symbols.method("container")
+        val marksIndex = symbols.index("container.marks")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                param.setObjectExtra("reamicro.render.previousPage", renderingEpubPage.get())
+                renderingEpubPage.set(param.args[symbols.index("container.page")])
+                currentHighlightBookIdentity()?.let { (bookKey, bookTitle) ->
+                    updateReaderHighlightBookContext(bookKey, bookTitle, "page rendered")
                 }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    renderingEpubPage.remove()
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX current EpubPage hook installed")
-    }
-}
-
-internal fun ReaderHook.hookReaderSharedStateMarks() {
-    HookInstallReport.install(FEATURE_ID, "hookReaderSharedStateMarks") {
-        val sharedStateClass = classLoader.hostClass(READER_SHARED_STATE_CLASS)
-        XposedBridge.hookAllMethods(sharedStateClass, "getMarks", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-
-                val original = (param.result as? List<*>) ?: return
-                val nextMarks = appendActiveSearchHighlightMark(original, "ReaderSharedState") ?: return
-                param.result = nextMarks
+                val original = param.args[marksIndex] as? List<*> ?: return
+                appendActiveSearchHighlightMark(original, "EpubContainer")?.let { param.args[marksIndex] = it }
+            }
+            override fun after(param: Call) {
+                val previous = param.getObjectExtra("reamicro.render.previousPage")
+                if (previous == null) renderingEpubPage.remove() else renderingEpubPage.set(previous)
             }
         })
-        XposedBridge.log("$LOG_PREFIX full-text search highlight ReaderSharedState hook installed")
+        HookRuntime.log("$LOG_PREFIX current EpubPage hook installed")
     }
 }
-
+internal fun ReaderHook.hookReaderSharedStateMarks() {
+    HookInstallReport.install(FEATURE_ID, "hookReaderSharedStateMarks") {
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRenderBindings.current)
+        val index = symbols.index("shared.marks")
+        HookRuntime.hookMethod(symbols.constructor("shared"), object : HookCallback() {
+            override fun before(param: Call) {
+                val original = param.args[index] as? List<*> ?: return
+                appendActiveSearchHighlightMark(original, "ReaderSharedState")?.let { param.args[index] = it }
+            }
+        })
+        HookRuntime.log("$LOG_PREFIX full-text search highlight ReaderSharedState constructor hook installed")
+    }
+}
 internal fun ReaderHook.hookReaderCatalogHighlightPrecomputations() {
     HookInstallReport.install(FEATURE_ID, "hookReaderCatalogHighlightPrecomputations") {
-        val viewModelClass = classLoader.hostClass(READER_VIEW_MODEL_CLASS)
-        val methodName = HostSymbols.resolveMethodName(
-            READER_VIEW_MODEL_CLASS,
-            "computeCatalogPrecomputations",
-        )
-        val methods = viewModelClass.declaredMethods.filter { method ->
-            method.hostNameMatches(methodName) &&
-                method.parameterTypes.size >= 3 &&
-                List::class.java.isAssignableFrom(method.parameterTypes[2])
-        }
-        check(methods.isNotEmpty()) { "hookReaderCatalogHighlightPrecomputations: no matching host method" }
-        methods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val args = param.args ?: return
-                    val originalMarks = args.getOrNull(2) as? List<*> ?: return
-                    val nextMarks = appendActiveSearchHighlightMark(originalMarks, "CatalogPrecompute") ?: return
-                    args[2] = nextMarks
-                }
-            })
-        }
-        XposedBridge.log(
-            "$LOG_PREFIX full-text search highlight CatalogPrecompute hook installed count=${methods.size}",
-        )
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRenderBindings.current)
+        val index = symbols.index("catalog.marks")
+        HookRuntime.hookMethod(symbols.method("catalog"), object : HookCallback() {
+            override fun before(param: Call) {
+                val original = param.args[index] as? List<*> ?: return
+                appendActiveSearchHighlightMark(original, "CatalogPrecompute")?.let { param.args[index] = it }
+            }
+        })
+        HookRuntime.log("$LOG_PREFIX full-text search highlight CatalogPrecompute hook installed")
     }
 }
-
 internal fun ReaderHook.hookSearchHighlightRenderInputs() {
-    hookSearchHighlightMarksArgument(
-        className = "org.epub.ui.BodyKt",
-        methodName = "Body",
-        marksIndex = 4,
-        label = "Body",
-    )
-    hookSearchHighlightMarksArgument(
-        className = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt",
-        methodName = "ScrollPagerElement",
-        marksIndex = if (HostSymbols.profileId == "2.3.4-b1") 2 else 1, label = "ScrollElement",
-    )
+    hookSearchHighlightMarksArgument("body", "Body")
+    hookSearchHighlightMarksArgument("scroll", "ScrollElement")
     ReaderSearchContentBridge(this).install()
     hookSearchHighlightContentOverlays()
-    if (HostSymbols.isIdentity) {
-        hookSearchHighlightMarksArgument(
-            className = "app.zhendong.reamicro.ui.reader.components.ScrollPagerKt",
-            methodName = "resolveMarksForElement",
-            marksIndex = 1,
-            label = "ScrollResolve",
-        )
-    }
 }
-
-internal fun ReaderHook.hookSearchHighlightMarksArgument(
-    className: String,
-    methodName: String,
-    marksIndex: Int,
-    label: String,
-) {
+private fun ReaderHook.hookSearchHighlightMarksArgument(role: String, label: String) {
     HookInstallReport.install(FEATURE_ID, "hookSearchHighlightMarksArgument.$label") {
-        val targetClass = classLoader.hostClass(HostSymbols.resolveMethodOwner(className, methodName))
-        val resolvedMethodName = HostSymbols.resolveMethodName(className, methodName)
-        var count = 0
-        targetClass.declaredMethods
-            .filter { it.hostNameMatches(resolvedMethodName) && it.parameterTypes.size > marksIndex }
-            .forEach { method ->
-                method.isAccessible = true
-                val composerIndex = method.parameterTypes.indexOfFirst {
-                    HostSymbols.logicalClass(it.name) == "androidx.compose.runtime.Composer"
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRenderBindings.current)
+        val marksIndex = symbols.index("$role.marks")
+        val composerIndex = symbols.index("$role.composer")
+        val method = symbols.method(role)
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                val args = param.args
+                val owner = args[composerIndex]?.let { symbols.method("scope").invoke(it) } ?: args.firstOrNull()
+                if (owner != null && observeSearchPaint(owner)) {
+                    args[composerIndex + 1] = searchPaintChangedFlags(args[composerIndex + 1] as Int, marksIndex)
                 }
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val args = param.args ?: return
-                        if (label == "Body" || label == "ScrollElement") {
-
-                            val owner = args.getOrNull(composerIndex)?.let { callNoArg(it, "getRecomposeScope") }
-                                ?: (if (label == "Body") args.getOrNull(2) else args.firstOrNull()) ?: return
-                            if (observeSearchPaint(owner) && composerIndex >= 0) {
-
-                                val flags = args.getOrNull(composerIndex + 1) as? Int ?: 0
-                                args[composerIndex + 1] = searchPaintChangedFlags(flags, marksIndex)
-                            }
-                        }
-                        val originalMarks = args.getOrNull(marksIndex) as? List<*> ?: return
-                        if (label == "ScrollResolve" && currentSearchPaintSession() != null &&
-                            originalMarks.all { it == null || isSearchResultHighlightMark(it) }) {
-
-                            param.result = appendSearchResolvedMarker(emptyList<Any>())
-                            return
-                        }
-                        val nextMarks = appendActiveSearchHighlightMark(originalMarks, label) ?: return
-                        args[marksIndex] = nextMarks
-                    }
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (label == "ScrollResolve" && param.throwable == null) {
-                            param.result = appendSearchResolvedMarker((param.result as? List<*>).orEmpty())
-                        }
-                    }
-                })
-                count++
+                val original = args[marksIndex] as? List<*> ?: return
+                appendActiveSearchHighlightMark(original, label)?.let { args[marksIndex] = it }
             }
-        check(count > 0) { "$label marks input was not hooked" }
-        XposedBridge.log("$LOG_PREFIX full-text search highlight $label hook installed count=$count")
+        })
+        HookRuntime.log("$LOG_PREFIX full-text search highlight $label hook installed")
     }
 }
-
-internal fun ReaderHook.hookSearchHighlightResolvedPage() {
-    HookInstallReport.install(FEATURE_ID, "hookSearchHighlightResolvedPage") {
-        val bodyClass = classLoader.hostClass("org.epub.ui.BodyKt")
-        val methodName = HostSymbols.resolveMethodName("org.epub.ui.BodyKt", "resolveMarksForPage")
-        val methods = bodyClass.declaredMethods.filter {
-            it.hostNameMatches(methodName) && it.parameterTypes.size >= 2
-        }
-        check(methods.isNotEmpty()) { "hookSearchHighlightResolvedPage: no matching host method" }
-        methods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val args = param.args ?: return
-                    val originalMarks = args.getOrNull(0) as? List<*> ?: return
-                    val nextMarks = appendActiveSearchHighlightMark(originalMarks, "ResolvePageInput") ?: return
-                    args[0] = nextMarks
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val current = (param.result as? List<*>)?.filterNotNull().orEmpty()
-                    val additions = ArrayList<Any>()
-                    activeTransientHighlightMarks().forEach { mark ->
-                        val id = transientHighlightMarkId(mark) ?: return@forEach
-                        if (current.any { transientHighlightResolvedMarkId(it) == id } ||
-                            additions.any { transientHighlightResolvedMarkId(it) == id }
-                        ) {
-                            logSearchHighlightResolvePage("hit", current.size, mark)
-                            return@forEach
-                        }
-                        val resolved = createResolvedSearchHighlightMark(mark) ?: return@forEach
-                        additions += resolved
-                        logSearchHighlightResolvePage("forced", current.size + additions.size, mark)
-                    }
-                    if (additions.isEmpty()) return
-                    param.result = ArrayList<Any>(current.size + 1).apply {
-                        addAll(current)
-                        addAll(additions)
-                    }
-                }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX full-text search highlight ResolvePage hook installed count=${methods.size}")
-    }
-}
-
 internal fun ReaderHook.hookSearchHighlightContentOverlays() {
     HookInstallReport.install(FEATURE_ID, "hookSearchHighlightContentOverlays") {
-        val contentClass = classLoader.hostClass("org.epub.ui.ContentKt")
-        val candidates = contentClass.declaredMethods.filter { method ->
-            List::class.java.isAssignableFrom(method.returnType) &&
-                method.parameterTypes.any { List::class.java.isAssignableFrom(it) } &&
-                method.parameterTypes.any { it == Int::class.javaPrimitiveType }
-        }
-        val methods = candidates.filter(::isSearchHighlightContentOverlayMethod)
-        check(methods.isNotEmpty()) { "hookSearchHighlightContentOverlays: no matching host method" }
-        methods.forEach { method ->
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val args = param.args ?: return
-                    val original = (args.getOrNull(1) as? List<*>)?.filterNotNull().orEmpty()
-                    val session = currentSearchPaintSession()
-                    param.setObjectExtra("reamicro.search.renderSession", session)
+        val symbols = requireNotNull(com.reamicro.fix.core.HostReaderRenderBindings.current)
+        val marksIndex = symbols.index("overlay.marks")
+        val domIndex = symbols.index("overlay.dom")
+        val windowIndex = symbols.index("overlay.window")
+        val lengthIndex = symbols.index("overlay.length")
+        val method = symbols.method("overlay")
+        HookRuntime.hookMethod(method, object : HookCallback() {
+            override fun before(param: Call) {
+                val args = param.args ?: return
+                val original = (args.getOrNull(marksIndex) as? List<*>)?.filterNotNull().orEmpty()
+                val session = currentSearchPaintSession()
+                param.setObjectExtra("reamicro.search.renderSession", session)
 
-                    val next = original.filterNot(::isSearchResultHighlightMark).toMutableList()
-                    activeTransientHighlightMarks().filterNot(::isSearchResultHighlightMark).forEach { mark ->
-                        val resolved = createResolvedSearchHighlightMark(mark) ?: return@forEach
-                        val id = transientHighlightResolvedMarkId(resolved) ?: return@forEach
-                        if (next.none { transientHighlightResolvedMarkId(it) == id }) next += resolved
-                    }
-                    if (next != original) args[1] = next
+                val next = original.filterNot(::isSearchResultHighlightMark).toMutableList()
+                activeTransientHighlightMarks().filterNot(::isSearchResultHighlightMark).forEach { mark ->
+                    val resolved = createResolvedSearchHighlightMark(mark) ?: return@forEach
+                    val id = transientHighlightResolvedMarkId(resolved) ?: return@forEach
+                    if (next.none { transientHighlightResolvedMarkId(it) == id }) next += resolved
+                }
+                if (next != original) args[marksIndex] = next
 
+            }
+
+            override fun after(param: Call) {
+                if (param.throwable != null) return
+                val original = (param.result as? List<*>)?.filterNotNull().orEmpty()
+                val args = param.args ?: return
+                val renderedSession = param.getObjectExtra("reamicro.search.renderSession") as? ReaderSearchHighlightSession
+                fun isSearchOverlay(overlay: Any) = searchResultHighlightOverlayMarkId(overlay)?.let {
+                    com.reamicro.fix.reader.SearchHighlightPlanner.isHighlightId(it,
+                        SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)
+                } == true
+                val current = if (original.any(::isSearchOverlay)) original.filterNot(::isSearchOverlay) else original
+                val additions = ArrayList<Any>()
+                if (com.reamicro.fix.reader.SearchHighlightSet.sameGeneration(renderedSession, currentSearchPaintSession())) {
+                    additions.addAll(renderedSession!!.paintOverlays(this@hookSearchHighlightContentOverlays,
+                        args.getOrNull(domIndex), args.getOrNull(windowIndex), (args.getOrNull(lengthIndex) as? Number)?.toInt() ?: 0))
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (param.throwable != null) return
-                    val original = (param.result as? List<*>)?.filterNotNull().orEmpty()
-                    val args = param.args ?: return
-                    val renderedSession = param.getObjectExtra("reamicro.search.renderSession") as? ReaderSearchHighlightSession
-                    fun isSearchOverlay(overlay: Any) = searchResultHighlightOverlayMarkId(overlay)?.let {
-                        com.reamicro.fix.reader.SearchHighlightPlanner.isHighlightId(it,
-                            SEARCH_HIGHLIGHT_MARK_ID_BASE, SEARCH_HIGHLIGHT_MARK_ID_RANGE)
-                    } == true
-                    val current = if (original.any(::isSearchOverlay)) original.filterNot(::isSearchOverlay) else original
-                    val additions = ArrayList<Any>()
-                    if (com.reamicro.fix.reader.SearchHighlightSet.sameGeneration(renderedSession, currentSearchPaintSession())) {
-                        additions.addAll(renderedSession!!.paintOverlays(this@hookSearchHighlightContentOverlays,
-                            args.getOrNull(0), args.getOrNull(2), (args.getOrNull(3) as? Number)?.toInt() ?: 0))
-                    }
-
-                    activeTransientHighlightMarks().filterNot(::isSearchResultHighlightMark).forEach { mark ->
-                        val id = transientHighlightMarkId(mark) ?: return@forEach
-                        if (current.any { searchResultHighlightOverlayMarkId(it) == id } ||
-                            additions.any { searchResultHighlightOverlayMarkId(it) == id }) return@forEach
-                        val forced = createSearchHighlightContentOverlay(
-                            contentDom = args.getOrNull(0), visibleWindow = args.getOrNull(2),
-                            renderedTextLength = (args.getOrNull(3) as? Number)?.toInt() ?: 0, mark = mark,
-                        ) ?: return@forEach
-                        additions += forced
-                    }
-                    if (current !== original || additions.isNotEmpty()) {
-                        param.result = ArrayList<Any>(current.size + additions.size).apply {
-                            addAll(current); addAll(additions)
-                        }
+                activeTransientHighlightMarks().filterNot(::isSearchResultHighlightMark).forEach { mark ->
+                    val id = transientHighlightMarkId(mark) ?: return@forEach
+                    if (current.any { searchResultHighlightOverlayMarkId(it) == id } ||
+                        additions.any { searchResultHighlightOverlayMarkId(it) == id }) return@forEach
+                    val forced = createSearchHighlightContentOverlay(
+                        contentDom = args.getOrNull(domIndex), visibleWindow = args.getOrNull(windowIndex),
+                        renderedTextLength = (args.getOrNull(lengthIndex) as? Number)?.toInt() ?: 0, mark = mark,
+                    ) ?: return@forEach
+                    additions += forced
+                }
+                if (current !== original || additions.isNotEmpty()) {
+                    param.result = ArrayList<Any>(current.size + additions.size).apply {
+                        addAll(current); addAll(additions)
                     }
                 }
-            })
-        }
-        XposedBridge.log("$LOG_PREFIX full-text search projected overlay hook installed count=${methods.size}")
+            }
+        })
+        HookRuntime.deoptimize(symbols.method("content"))
+        HookRuntime.log("$LOG_PREFIX full-text search projected overlay hook installed")
     }
 }

@@ -120,6 +120,7 @@ from app.responses import response
 from app.scheduler import (
     apply_task_action,
     normalized_task_schedule,
+    upsert_task_configuration,
 )
 from app.security import (
     admin_actor,
@@ -138,11 +139,9 @@ from app.security import (
     validate_admin_session_token,
 )
 from app.state import (
-    find_duplicate_task,
     load_credentials,
     load_tasks,
-    save_credentials,
-    save_tasks,
+    remove_credential_documents,
     task_credential_id,
 )
 
@@ -619,7 +618,7 @@ async def admin_audit(
         f"<form class='toolbar' method='get' action='/admin/audit'>"
         f"<input name='q' value='{esc(q)}' placeholder='搜索操作、操作者或详情'>"
         f"<button class='button' type='submit'>搜索</button>"
-        + (f"<a class='button subtle' href='/admin/audit'>清除</a>" if q.strip() else "")
+        + ("<a class='button subtle' href='/admin/audit'>清除</a>" if q.strip() else "")
         + f"</form>"
         f"<div class='table-wrap'><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>结果</th><th>详情</th></tr></thead>"
         f"<tbody>{table}</tbody></table></div>"
@@ -878,21 +877,20 @@ async def admin_task_action(
     require_admin_permission(actor, "tasks:write")
     config = load_config()
     require_admin_csrf(config, actor, csrf_token)
-    tasks = load_tasks()
-    task = tasks.get(task_id)
-    if not task:
-        return admin_html(admin_page(config, "任务不存在", actor=actor, section="tasks"), status_code=404)
-    if action == "delete":
-
-        tasks.pop(task_id, None)
-        save_tasks(tasks)
-        audit_event("admin_task_action", audit_actor(actor), metadata={"taskId": task_id, "action": action})
-        return admin_html(admin_page(config, f"任务 {task_id} 已删除", actor=actor, section="tasks"))
+    def change(tasks):
+        task = tasks.get(task_id)
+        if task is None:
+            return None
+        if action == "delete":
+            tasks.pop(task_id)
+            return f"任务 {task_id} 已删除"
+        return apply_task_action(task, action)
     try:
-        message = apply_task_action(task, action)
+        message = runtime.get_state_store().mutate_namespace("tasks", change)
     except ValueError:
         return admin_html(admin_page(config, "不支持的任务操作", actor=actor, section="tasks"), status_code=400)
-    save_tasks(tasks)
+    if message is None:
+        return admin_html(admin_page(config, "任务不存在", actor=actor, section="tasks"), status_code=404)
     task_log(task_id, message)
     audit_event("admin_task_action", audit_actor(actor), metadata={"taskId": task_id, "action": action})
     return admin_html(admin_page(config, message, actor=actor, section="tasks"))
@@ -915,39 +913,43 @@ async def admin_credential_action(
     if not record:
         return admin_html(admin_page(config, "同步密钥不存在", actor=actor, section="tasks"), status_code=404)
     if action == "verify":
+        expected_secret = str(record.get("secretEncrypted", ""))
+        expected_owner = str(record.get("owner", ""))
         try:
-            secret = decrypt_secret(str(record.get("secretEncrypted", "")))
+            secret = decrypt_secret(expected_secret)
         except Exception:
             secret = {}
         token = str(secret.get("token", "")) if isinstance(secret, dict) else ""
         if not token:
-            update_credential_health(credential_id.strip(), False, "密钥密文无法解密")
+            update_credential_health(credential_id.strip(), False, "密钥密文无法解密",
+                                     expected_owner=expected_owner, expected_secret_encrypted=expected_secret)
             return admin_html(admin_page(config, "验证失败：密钥密文无法解密，请让模块重新上传", actor=actor, section="tasks"), status_code=409)
-        success, detail = await verify_reamicro_secret(token, "")
-        update_credential_health(credential_id.strip(), success, detail)
+        success, detail = await verify_reamicro_secret(token, str(secret.get("baseUrl", "")))
+        accepted = update_credential_health(credential_id.strip(), success, detail,
+                                            expected_owner=expected_owner, expected_secret_encrypted=expected_secret)
+        if not accepted:
+            return admin_html(admin_page(load_config(), "同步密钥已更新，请重新验证", actor=actor, section="tasks"), status_code=409)
         audit_event("admin_credential_verified", audit_actor(actor), success=success, metadata={"credentialId": credential_id.strip()})
         return admin_html(admin_page(load_config(), f"{'验证通过' if success else '验证失败'}：{detail}", actor=actor, section="tasks"), status_code=200 if success else 409)
     if action == "toggle":
-        record = dict(record)
-        record["enabled"] = not bool(record.get("enabled", True))
-        record["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
-        stored[credential_id.strip()] = record
-        save_credentials(stored)
+        def toggle(records):
+            current = records.get(credential_id.strip())
+            if current is None:
+                return None
+            current["enabled"] = not bool(current.get("enabled", True))
+            current["updatedAt"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+            return current
+        record = runtime.get_state_store().mutate_namespace("credentials", toggle)
+        if record is None:
+            return admin_html(admin_page(config, "同步密钥不存在", actor=actor, section="tasks"), status_code=404)
         audit_event("admin_credential_toggled", audit_actor(actor), metadata={"credentialId": credential_id.strip(), "enabled": record["enabled"]})
         return admin_html(admin_page(load_config(), f"同步密钥已{'启用' if record['enabled'] else '停用'}", actor=actor, section="tasks"))
     if action == "delete":
-        stored.pop(credential_id.strip(), None)
-        save_credentials(stored)
-
-        tasks = load_tasks()
-        affected = 0
-        for task in tasks.values():
-            if task_credential_id(task) == credential_id.strip() and task.get("enabled", True):
-                task["enabled"] = False
-                task["status"] = "paused"
-                affected += 1
-        if affected:
-            save_tasks(tasks)
+        affected = runtime.get_state_store().mutate_namespaces(
+            ("credentials", "tasks"), lambda values: remove_credential_documents(values, credential_id.strip()),
+        )
+        if affected is None:
+            return admin_html(admin_page(config, "同步密钥不存在", actor=actor, section="tasks"), status_code=404)
         audit_event("admin_credential_deleted", audit_actor(actor), metadata={"credentialId": credential_id.strip()})
         suffix = f"，并暂停了 {affected} 个关联任务" if affected else ""
         return admin_html(admin_page(load_config(), f"同步密钥 {credential_id.strip()} 已删除{suffix}", actor=actor, section="tasks"))
@@ -1094,7 +1096,8 @@ async def admin_settings(
     if remove_account.strip():
         accounts.pop(remove_account.strip(), None)
     next_config["accounts"] = accounts
-    saved = save_config(next_config)
+    current.update(next_config)
+    saved = save_config(current)
     audit_event("admin_settings_updated", audit_actor(actor), success=True, metadata={"serverId": saved.get("serverId")})
     notices = []
     if generated_api_key:
@@ -1368,7 +1371,6 @@ async def admin_create_task(
                 owner = credential_owner
         task_id = "task_" + secrets.token_hex(10)
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        tasks = load_tasks()
         new_task = {
             "id": task_id,
             "owner": owner,
@@ -1379,7 +1381,6 @@ async def admin_create_task(
                 "timeOfDay": time_of_day if task_type in {"yeshe_checkin", "cloud_auto_read"} else "",
                 "timezoneOffsetMinutes": 480,
             }),
-            "requestEncrypted": encrypt_secret(request_value),
             "status": "scheduled",
             "enabled": True,
             "createdAt": now,
@@ -1387,19 +1388,13 @@ async def admin_create_task(
             "runCount": 0,
             "maxRetries": 3,
             "consecutiveFailures": 0,
+            "automationStateVersion": 1,
         }
-        duplicate = find_duplicate_task(tasks, new_task)
-        if duplicate:
-            task_id = duplicate[0]
-            previous = duplicate[1]
-            new_task["id"] = task_id
-            new_task["createdAt"] = previous.get("createdAt", now)
-            new_task["updatedAt"] = now
-            for field in ("executionHistory", "lastExecution", "runCount", "consecutiveFailures", "dailyCounterDate", "dailyCounter", "dailyReadDate", "dailyReadMinutes", "bookRotation", "lastCheckinDate", "lastCheckinAt", "claimDueAt", "claimRetryCount", "claimFinalAttemptDate", "claimCompletedDate", "claimFinalFailedDate", "lastClaimAt"):
-                if field in previous:
-                    new_task[field] = previous[field]
-        tasks[task_id] = new_task
-        save_tasks(tasks)
+        def create(tasks):
+            new_task["requestEncrypted"] = encrypt_secret(request_value)
+            return upsert_task_configuration(tasks, new_task, now)
+        new_task, duplicate = runtime.get_state_store().mutate_namespace("tasks", create)
+        task_id = str(new_task["id"])
         task_log(task_id, "管理员更新任务" if duplicate else "管理员创建任务")
         return HTMLResponse(admin_page(load_config(), f"任务 {task_id} {'已更新' if duplicate else '已创建'}", actor=actor, section="tasks"))
     except Exception as error:

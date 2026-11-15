@@ -3,7 +3,7 @@ package com.reamicro.fix.settings
 import android.content.Context
 import android.content.SharedPreferences
 import com.reamicro.fix.logging.ModuleLogState
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
 import java.security.MessageDigest
 import org.json.JSONArray
@@ -12,6 +12,9 @@ import org.json.JSONObject
 class XposedModuleSettings(
     private val contextProvider: () -> Context? = { null },
 ) {
+    @Volatile var onModuleEnabledChanged: ((Boolean) -> Unit)? = null
+    @Volatile var onModuleExecutionInvalidated: (() -> Unit)? = null
+    private var lastModuleEnabled: Boolean? = null
     @Volatile private var attachedContext: Context? = null
     private val snapshotCache = PreferenceSnapshotCache<ModuleSettingsSnapshot>()
     private val fontSettingsCache = PreferenceSnapshotCache<FontSettingsSnapshot>()
@@ -23,9 +26,23 @@ class XposedModuleSettings(
     @Volatile private var observedPrefs: SharedPreferences? = null
     private val preferenceHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
     private val notifyPreferenceChange = Runnable { ReaderHighlightBookContext.refreshRequester?.invoke("highlight-preferences") }
-    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
         snapshotCache.clear()
         fontSettingsCache.clear()
+        if (key == null || key == ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED ||
+            key == ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED ||
+            key == ModuleSettings.KEY_MODULE_ENABLED
+        ) {
+            com.reamicro.fix.online.OnlineParserMode.publish(
+                prefs.getBoolean(ModuleSettings.KEY_MODULE_ENABLED, ModuleSettings.DEFAULT_MODULE_ENABLED) &&
+                    prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, false) &&
+                    prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, false),
+            )
+        }
+        if (key == null || key == ModuleSettings.KEY_MODULE_ENABLED) {
+            publishModuleEnabled(prefs.getBoolean(
+                ModuleSettings.KEY_MODULE_ENABLED, ModuleSettings.DEFAULT_MODULE_ENABLED))
+        }
         if (HighlightPreferencePolicy.affectsReader(key)) {
             ReaderHighlightBookContext.bumpVersion("highlight-preferences", requestRefresh = false)
             preferenceHandler.removeCallbacks(notifyPreferenceChange)
@@ -41,6 +58,27 @@ class XposedModuleSettings(
         attachedContext = null
         snapshotCache.clear()
         fontSettingsCache.clear()
+        onModuleEnabledChanged = null
+        onModuleExecutionInvalidated = null
+        synchronized(this) { lastModuleEnabled = null }
+    }
+
+    private fun publishModuleEnabled(enabled: Boolean) {
+        synchronized(this) {
+            HookRuntime.setFeaturesEnabled(enabled)
+            if (lastModuleEnabled == enabled) return
+            lastModuleEnabled = enabled
+            if (!enabled) {
+                runCatching { onModuleExecutionInvalidated?.invoke() }
+                    .onFailure { HookRuntime.logError("ReaMicro module execution invalidation failed", it) }
+            }
+            val listener = onModuleEnabledChanged ?: return
+            // Publish in the same order as the synchronous invalidations, including background writers.
+            preferenceHandler.post {
+                runCatching { listener(enabled) }
+                    .onFailure { HookRuntime.logError("ReaMicro module activation listener failed", it) }
+            }
+        }
     }
 
     fun attachContext(context: Context) {
@@ -52,6 +90,8 @@ class XposedModuleSettings(
         cachedDialogueHighlightSettingsAtMs = 0L
         cachedHighlightSettings = null
         cachedHighlightSettingsAtMs = 0L
+        publishModuleEnabled(snapshot().moduleEnabled)
+        com.reamicro.fix.online.OnlineParserMode.publish(snapshot().canUseEnhancedOnlineParser)
     }
 
     fun snapshot(): ModuleSettingsSnapshot {
@@ -63,8 +103,19 @@ class XposedModuleSettings(
         } ?: ModuleSettingsSnapshot()
     }
 
-    fun setModuleEnabled(enabled: Boolean) {
-        putBoolean(ModuleSettings.KEY_MODULE_ENABLED, enabled)
+    fun setModuleEnabled(enabled: Boolean): Boolean {
+        val preferences = prefs() ?: return false
+        val previous = preferences.getBoolean(ModuleSettings.KEY_MODULE_ENABLED, ModuleSettings.DEFAULT_MODULE_ENABLED)
+        val saved = runCatching {
+            preferences.edit().putBoolean(ModuleSettings.KEY_MODULE_ENABLED, enabled).commit()
+        }.getOrDefault(false)
+        if (!saved) {
+            runCatching { preferences.edit().putBoolean(ModuleSettings.KEY_MODULE_ENABLED, previous).commit() }
+        }
+        snapshotCache.clear()
+        val actual = snapshot().moduleEnabled
+        publishModuleEnabled(actual)
+        return saved && actual == enabled
     }
 
     fun setApiDebugUnlocked(unlocked: Boolean) {
@@ -77,6 +128,56 @@ class XposedModuleSettings(
 
     fun setAssociationManualEditEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED, enabled)
+    }
+
+    fun setAssociationManualEditUnlocked(unlocked: Boolean): Boolean {
+        val editor = prefs()?.edit() ?: return false
+        editor.putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED, unlocked)
+        if (!unlocked) editor.putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED, false)
+        if (!editor.commit()) return false
+        snapshotCache.clear()
+        snapshot()
+        return true
+    }
+
+    fun setHiddenSourceFeaturesUnlocked(unlocked: Boolean): Boolean {
+        val preferences = prefs() ?: return false
+        val previous = snapshot()
+        val editor = preferences.edit()
+            .putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED, unlocked)
+            .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, unlocked)
+        if (!unlocked) {
+            editor.putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED, false)
+                .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, false)
+        }
+        val saved = runCatching { editor.commit() }.getOrDefault(false)
+        if (!saved) {
+            runCatching { preferences.edit()
+                .putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED, previous.associationManualEditUnlocked)
+                .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, previous.onlineEnhancedParserUnlocked)
+                .putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED, previous.associationManualEditEnabled)
+                .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, previous.onlineEnhancedParserEnabled)
+                .commit() }
+        }
+        snapshotCache.clear()
+        snapshot()
+        return saved
+    }
+
+    fun setOnlineEnhancedParserEnabled(enabled: Boolean): Boolean {
+        val preferences = prefs() ?: return false
+        val before = snapshot()
+        if (enabled && !before.onlineEnhancedParserUnlocked) return false
+        val saved = runCatching { preferences.edit()
+            .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, enabled).commit() }.getOrDefault(false)
+        if (!saved) {
+            runCatching { preferences.edit().putBoolean(
+                ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, before.onlineEnhancedParserEnabled,
+            ).commit() }
+        }
+        snapshotCache.clear()
+        snapshot()
+        return saved
     }
 
     fun setAssociationUnlinkEnabled(enabled: Boolean) {
@@ -98,6 +199,16 @@ class XposedModuleSettings(
     fun setReaderAutoPageEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_AUTO_PAGE_ENABLED, enabled)
     }
+
+    fun setReaderPageAnimationEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, enabled)
+    fun setHomeDefaultPageEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, enabled)
+    fun setOnlineDiscoverEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, enabled)
+    fun setMerchantEndTimeEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_MERCHANT_END_TIME_ENABLED, enabled)
+    fun setBookImageSelectionEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, enabled)
+    fun setBookLocalExportEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED, enabled)
+    fun setBookBackupScrollEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, enabled)
+    fun setAccountPreferenceRestoreEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED, enabled)
+    fun setAccountSwitchEntryEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ACCOUNT_SWITCH_ENTRY_ENABLED, enabled)
 
     fun setReaderOverwriteCheckEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_OVERWRITE_CHECK_ENABLED, enabled)
@@ -131,7 +242,7 @@ class XposedModuleSettings(
     fun setHostCrashUploadEnabled(enabled: Boolean): Boolean {
         val saved = HostCrashUploadSettings.save(prefs(), enabled)
         snapshotCache.clear()
-        if (!saved) XposedBridge.logError("ReaMicro privacy: failed to persist crash-upload switch")
+        if (!saved) HookRuntime.logError("ReaMicro privacy: failed to persist crash-upload switch")
         return saved
     }
 
@@ -655,7 +766,7 @@ class XposedModuleSettings(
         )
         if (prefs.getBoolean(ModuleSettings.KEY_READER_LONG_PRESS_ENABLED, false)) {
             prefs.edit().putBoolean(ModuleSettings.KEY_READER_LONG_PRESS_ENABLED, false).commit()
-            XposedBridge.log("ReaMicro LSP reader long-press menu disabled by migration")
+            HookRuntime.log("ReaMicro LSP reader long-press menu disabled by migration")
         }
         val readerLongPressEnabled = false
         val readerAutoPageEnabled = prefs.getBoolean(
@@ -735,6 +846,12 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED,
                 ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_ENABLED,
             ),
+            associationManualEditUnlocked = prefs.getBoolean(
+                ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED,
+                ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_UNLOCKED,
+            ),
+            onlineEnhancedParserUnlocked = prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, false),
+            onlineEnhancedParserEnabled = prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, false),
             associationUnlinkEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_ASSOCIATION_UNLINK_ENABLED,
                 ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED,
@@ -756,6 +873,15 @@ class XposedModuleSettings(
             ),
             readerLongPressEnabled = readerLongPressEnabled,
             readerAutoPageEnabled = readerAutoPageEnabled,
+            readerPageAnimationEnabled = prefs.getBoolean(ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, true),
+            homeDefaultPageEnabled = prefs.getBoolean(ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, true),
+            onlineDiscoverEnabled = prefs.getBoolean(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, true),
+            merchantEndTimeEnabled = prefs.getBoolean(ModuleSettings.KEY_MERCHANT_END_TIME_ENABLED, true),
+            bookImageSelectionEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, true),
+            bookLocalExportEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED, true),
+            bookBackupScrollEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, true),
+            accountPreferenceRestoreEnabled = prefs.getBoolean(ModuleSettings.KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED, true),
+            accountSwitchEntryEnabled = prefs.getBoolean(ModuleSettings.KEY_ACCOUNT_SWITCH_ENTRY_ENABLED, true),
             readerOverwriteCheckEnabled = readerOverwriteCheckEnabled,
             readerEditOverwriteEnabled = readerEditOverwriteEnabled,
             readerDictionaryEnabled = readerDictionaryEnabled,
@@ -936,7 +1062,7 @@ class XposedModuleSettings(
             }
             .commit()
         if (hadExistingSettings) {
-            XposedBridge.log("ReaMicro LSP WanFengLi source kept enabled by migration")
+            HookRuntime.log("ReaMicro LSP WanFengLi source kept enabled by migration")
         }
     }
 
@@ -948,7 +1074,7 @@ class XposedModuleSettings(
         val editor = prefs.edit()
         disabledKeys.forEach { key -> editor.putBoolean(key, true) }
         editor.commit()
-        XposedBridge.log("ReaMicro LSP legacy parent switches forced on: ${disabledKeys.joinToString()}")
+        HookRuntime.log("ReaMicro LSP legacy parent switches forced on: ${disabledKeys.joinToString()}")
     }
 
     private fun normalizeHighlightColor(value: String): String {
@@ -1356,6 +1482,7 @@ class XposedModuleSettings(
             snapshot.moduleEnabled,
             snapshot.associationEnabled,
             snapshot.associationManualEditEnabled,
+            snapshot.associationManualEditUnlocked,
             snapshot.associationUnlinkEnabled,
             snapshot.associationCoverFixEnabled,
             snapshot.readerEnabled,
@@ -1400,7 +1527,7 @@ class XposedModuleSettings(
         if (key == lastLogKey) return
         lastLogKey = key
         runCatching {
-            XposedBridge.log(
+            HookRuntime.log(
                 "ReaMicro LSP settings from reamicro-settings: " +
                     "module=${snapshot.moduleEnabled}, " +
                     "hostCrashUploadEnabled=${snapshot.hostCrashUploadEnabled}, " +

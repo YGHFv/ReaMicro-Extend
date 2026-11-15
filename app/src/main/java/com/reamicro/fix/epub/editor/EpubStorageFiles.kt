@@ -4,9 +4,15 @@ import java.io.File
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.Locale
 
 internal class EpubStorageFiles(directory: File) {
+    data class Entry(val file: File, val path: String, val size: Long) {
+        val group: String = path.substringBeforeLast('/', "")
+        val typeOrder: Int = structureTypeOrder(file.name)
+    }
+
     val root: File = directory.canonicalFile.also { require(it.isDirectory) { "图书目录不存在" } }
 
     fun child(path: String, allowRoot: Boolean = false): File {
@@ -27,23 +33,25 @@ internal class EpubStorageFiles(directory: File) {
         require(it.isDirectory) { "目录不存在" }
     }
 
-    fun visibleFiles(): List<File> {
-        data class SortEntry(val file: File, val path: String, val group: String, val typeOrder: Int)
+    fun visibleFiles(): List<File> = visibleEntries().map { it.file }
+
+    /** A fresh, validated inventory; reuse paths and file attributes within this one listing. */
+    fun visibleEntries(): List<Entry> {
         val entries = root.walkTopDown()
             .onEnter { !Files.isSymbolicLink(it.toPath()) && !it.name.startsWith(".reamicro-") }
-
-            .filter { it.name != "mimetype" && it.name != ".font-obfuscated" && !it.name.startsWith(".reamicro-") &&
-                Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) }
-            .map {
-                val path = relative(it)
-                SortEntry(it, path, path.substringBeforeLast('/', ""), structure130TypeOrder(it.name))
+            .filter { it.name != "mimetype" && it.name != ".font-obfuscated" && !it.name.startsWith(".reamicro-") }
+            .mapNotNull { file ->
+                val attributes = runCatching {
+                    Files.readAttributes(file.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                }.getOrNull() ?: return@mapNotNull null
+                if (!attributes.isRegularFile) return@mapNotNull null
+                Entry(file, relative(file), attributes.size())
             }.toList()
         val spineOrder = EpubStructureOrder.spineOrder(root, entries.map { it.file })
 
-        return entries.sortedWith(compareBy<SortEntry> { it.group }.thenBy { it.typeOrder }
+        return entries.sortedWith(compareBy<Entry> { it.group }.thenBy { it.typeOrder }
             .thenBy { if (usesScriptaEpubEditor(it.path)) spineOrder[it.path] ?: Int.MAX_VALUE else Int.MAX_VALUE }
             .thenComparator { a, b -> EpubStructureOrder.compareNames(a.file.name, b.file.name) })
-            .map { it.file }
     }
     fun byteSize(): Long = root.walkTopDown()
         .onEnter { !Files.isSymbolicLink(it.toPath()) }
@@ -70,7 +78,8 @@ internal class EpubStorageFiles(directory: File) {
         return target
     }
 
-    fun importFile(path: String, name: String, input: InputStream, checkCancelled: () -> Unit = {}): File {
+    fun importFile(path: String, name: String, input: InputStream,
+        commit: (() -> File) -> File = { it() }, checkCancelled: () -> Unit = {}): File {
         val dir = directory(path)
         val cleanName = validName(name)
         val temp = File.createTempFile(".reamicro-import-", ".tmp", dir)
@@ -95,7 +104,11 @@ internal class EpubStorageFiles(directory: File) {
             for (i in 0..999) {
                 val target = File(dir, if (i == 0) cleanName else "$stem-$i$ext")
                 try {
-                    val moved = Files.move(temp.toPath(), target.toPath()).toFile()
+                    val moved = commit {
+                        checkCancelled()
+                        require(directory(path) == dir) { "目标目录已变更" }
+                        Files.move(temp.toPath(), target.toPath()).toFile()
+                    }
                     VerifiedFileIO.requireMatches(moved, expected)
                     return moved
                 } catch (_: java.nio.file.FileAlreadyExistsException) {
@@ -119,7 +132,7 @@ internal class EpubStorageFiles(directory: File) {
             return clean
         }
 
-        internal fun structure130TypeOrder(name: String): Int {
+        internal fun structureTypeOrder(name: String): Int {
             val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
             val stem = name.substringBeforeLast('.', name)
             return when (extension) {

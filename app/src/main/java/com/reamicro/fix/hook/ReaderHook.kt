@@ -2,15 +2,10 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.app.Dialog
-import android.content.BroadcastReceiver
 import android.content.ComponentCallbacks2
-import android.content.Context
 import android.view.View
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.ComposeInterop
-import com.reamicro.fix.core.HostObject
-import com.reamicro.fix.core.HostObjects
-import com.reamicro.fix.core.HostReflect
 import com.reamicro.fix.core.hostClass
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.settings.ReaderHighlightBookContext
@@ -75,6 +70,10 @@ class ReaderHook(
     internal val onDemandPrefetchRetryCount = ConcurrentHashMap<String, Int>()
     internal val onDemandRefreshPending = ConcurrentHashMap.newKeySet<String>()
     internal val onDemandRefreshCoordinator = ReaderRefreshCoordinator()
+    internal val onDemandHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    internal val readerUiHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    @Volatile internal var readerActivityPaused = true
+    @Volatile internal var readerActivityRef: WeakReference<Activity>? = null
     @Volatile internal var onDemandSpineTable: ReaderOnDemandSpineTable? = null
     @Volatile internal var onDemandVisibleRefreshKey: String? = null
     @Volatile internal var onDemandVisibleBusyRetries = 0
@@ -89,16 +88,7 @@ class ReaderHook(
 
     internal val udpValueCache = HashMap<Int, Float>()
 
-    internal val noArgAccessors = HostReflect(classLoader)
-    /**
-     * 宿主 `org.epub.UIEpubWindow` 访问器。
-     *
-     * 混淆版（B2）会被 R8 归约成纯静态类并删除 INSTANCE，必须走这里而不是
-     * `getField("INSTANCE")`，否则排版测量与 CFI 解析全部失效。
-     */
-    internal val epubWindow: HostObject by lazy { HostObjects.get(classLoader, UI_EPUB_WINDOW_CLASS) }
     internal val renderingHighlightScreenEntry = ThreadLocal.withInitial { false }
-    internal val highlightScreenEntryInjected = ThreadLocal.withInitial { false }
 
     internal val renderingEpubPage = ThreadLocal<Any?>()
     @Volatile internal var lastCatalogContext: CatalogContext? = null
@@ -120,7 +110,7 @@ class ReaderHook(
     @Volatile internal var activeSearchPageUpdate: ((SearchState, Boolean) -> Unit)? = null
     @Volatile internal var readerBottomMenuVisible: Boolean = false
     @Volatile internal var cachedThemeColors: ThemeColors? = null
-    @Volatile internal var readerSearchTheme: StructureHost232Colors.Snapshot? = null
+    @Volatile internal var readerSearchTheme: HostThemeColors.Snapshot? = null
     @Volatile internal var activeSearchHighlightSession: ReaderSearchHighlightSession? = null
     @Volatile internal var activeSearchHighlightId: Long? = null
     @Volatile internal var activeSearchHighlightMark: Any? = null
@@ -133,20 +123,48 @@ class ReaderHook(
     internal val scrollCrashRecoveryInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile internal var catalogDumpLoggedForKey: String? = null
     @Volatile internal var lastReaderHighlightBookIdentity: String = ""
-    private val highlightRefreshHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    internal val highlightRefreshHandler = com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
+    internal val highlightContextRefresh = Runnable {
+        if (readerActivityPaused || !isActivityResumedProvider()) return@Runnable
+        val identity = currentHighlightBookIdentity() ?: return@Runnable
+        if ("${identity.first.trim()}\n${identity.second.trim()}" == lastReaderHighlightBookIdentity) {
+            ReaderHighlightBookContext.bumpVersion("book-context-delayed")
+        }
+    }
     private val highlightRefreshQueue = ReaderHighlightRefreshQueue(
-        post = { task -> highlightRefreshHandler.post { task() } },
+        post = { task ->
+            !readerActivityPaused && isActivityResumedProvider() && highlightRefreshHandler.post { task() }
+        },
         context = { ReaderHighlightBookContext.bookKey to currentViewModelRef?.get() },
         refresh = { source ->
             val activity = activityProvider()
-            if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
+            if (!readerActivityPaused && isActivityResumedProvider() &&
+                activity != null && !activity.isFinishing && !activity.isDestroyed
+            ) {
                 refreshReaderHighlightWindow(source)
             }
         },
     )
+    private val requestHighlightRefresh: (String) -> Unit = highlightRefreshQueue::request
+
+    internal fun cancelHighlightRefresh() {
+        highlightRefreshQueue.cancel()
+        highlightRefreshHandler.removeCallbacksAndMessages(null)
+    }
 
     fun install() {
-        ReaderHighlightBookContext.refreshRequester = highlightRefreshQueue::request
+        ReaderHighlightBookContext.refreshRequester = requestHighlightRefresh
+        com.reamicro.fix.reload.ModuleResources.cleanup {
+            if (ReaderHighlightBookContext.refreshRequester === requestHighlightRefresh) {
+                ReaderHighlightBookContext.refreshRequester = null
+            }
+            try {
+                onHostActivityDestroyed("module generation retired")
+            } finally {
+                searchWorker.close()
+                onDemandRefreshCoordinator.close()
+            }
+        }
 
         HookInstallReport.installAll(
             FEATURE_ID,
@@ -170,9 +188,67 @@ class ReaderHook(
         )
     }
 
+    internal fun onHostActivityCreated(activity: Activity) {
+        if (readerActivityRef?.get() === activity) return
+        if (readerActivityRef != null) onHostActivityDestroyed("MainActivity replaced")
+        readerActivityRef = WeakReference(activity)
+        readerActivityPaused = true
+    }
+
+    internal fun onHostActivityResumed(activity: Activity) {
+        onHostActivityCreated(activity)
+        if (!readerActivityPaused) return
+        readerActivityPaused = false
+        // 后台返回沿用宿主的阅读窗口；高亮重排由配置或内容变更触发。
+        resumeSelectionPagerTarget()
+        pendingSearchOriginRestore = false
+        resumeSearchPageWork()
+        refreshSearchNavigationBarTheme()
+        val viewModel = currentViewModelRef?.get()
+        val page = currentReaderPage()
+        if (viewModel != null && page != null) {
+            scheduleOnDemandVisiblePageRefresh(viewModel, page)
+            prefetchOnlineOnDemandChapters(page)
+        }
+    }
+
+    internal fun onHostActivityPaused(activity: Activity) {
+        if (readerActivityRef?.get() === activity) pauseReaderWork()
+    }
+
+    private fun pauseReaderWork() {
+        readerActivityPaused = true
+        cancelSearchPageWork()
+        searchNavigator?.cancel()
+        pendingSearchOriginRestore = false
+        cancelHighlightRefresh()
+        cancelSelectionPagerConfirmation()
+        onDemandHandler.removeCallbacksAndMessages(null)
+        readerUiHandler.removeCallbacksAndMessages(null)
+        suspendOnDemandRefreshes()
+        lastOnDemandPrefetchSpineKey = ""
+    }
+
     fun onHostActivityDestroyed(reason: String) {
+        pauseReaderWork()
+        readerActivityRef = null
+        cancelHighlightRefresh()
+        cancelSelectionPagerConfirmation()
         unregisterSearchOverlayThemeCallbacks()
-        releaseReaderMemory(reason, releaseEpub = true)
+        releaseReaderMemory(reason, releaseEpub = true, removeOverlays = true)
+        currentViewModelRef = null
+        currentSessionRef = null
+        currentSelectionControllerRef = null
+        currentReaderNavGraphScopeRef = null
+        pendingReaderHighlightSheet = null
+        readerHighlightScreenBackRef = null
+        selectionWindow = null
+        readerInlineSearchClick = null
+        readerBottomMenuVisible = false
+        renderingHighlightScreenEntry.remove()
+        renderingEpubPage.remove()
+        replayingOnDemandJump.remove()
+        updateReaderHighlightBookContext("", "", reason, requestRefresh = false)
     }
 
     fun onTrimMemory(level: Int) {

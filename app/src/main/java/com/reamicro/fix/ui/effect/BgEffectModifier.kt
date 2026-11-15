@@ -30,6 +30,7 @@ internal fun Modifier.bgEffectDraw(
     playing: Boolean,
     colorStage: () -> Float,
     alpha: () -> Float,
+    state: BgEffectState,
 ): Modifier = this then BgEffectElement(
     painter = painter,
     preset = preset,
@@ -41,6 +42,7 @@ internal fun Modifier.bgEffectDraw(
     playing = playing,
     colorStage = colorStage,
     alpha = alpha,
+    state = state,
 )
 
 @SuppressLint("ModifierNodeInspectableProperties")
@@ -55,6 +57,7 @@ private data class BgEffectElement(
     val playing: Boolean,
     val colorStage: () -> Float,
     val alpha: () -> Float,
+    val state: BgEffectState,
 ) : ModifierNodeElement<BgEffectNode>() {
 
     override fun create(): BgEffectNode = BgEffectNode(
@@ -68,6 +71,7 @@ private data class BgEffectElement(
         playing = playing,
         colorStage = colorStage,
         alpha = alpha,
+        state = state,
     )
 
     override fun update(node: BgEffectNode) {
@@ -82,6 +86,7 @@ private data class BgEffectElement(
             playing = playing,
             colorStage = colorStage,
             alpha = alpha,
+            state = state,
         )
     }
 }
@@ -97,12 +102,15 @@ private class BgEffectNode(
     private var playing: Boolean,
     private var colorStage: () -> Float,
     private var alpha: () -> Float,
+    private var state: BgEffectState,
 ) : Modifier.Node(),
     DrawModifierNode {
 
     private var animationJob: Job? = null
     private var revealJob: Job? = null
-    private var animTime: Float = 0f
+    private var animTime: Float
+        get() = state.animationTimeSeconds
+        set(value) { state.animationTimeSeconds = value }
     private var startOffset: Float = 0f
     private var revealAlpha: Float = 1f
     private var drewFallback: Boolean = false
@@ -132,6 +140,7 @@ private class BgEffectNode(
         playing: Boolean,
         colorStage: () -> Float,
         alpha: () -> Float,
+        state: BgEffectState,
     ) {
         val needsReveal = effectBackground && painter != null &&
             (this.painter == null || !this.effectBackground) && drewFallback
@@ -144,6 +153,11 @@ private class BgEffectNode(
         this.isFullSize = isFullSize
         this.colorStage = colorStage
         this.alpha = alpha
+        if (this.state !== state) {
+            animationJob?.cancel()
+            animationJob = null
+            this.state = state
+        }
 
         this.playing = playing
         if (!effectBackground || painter == null) {

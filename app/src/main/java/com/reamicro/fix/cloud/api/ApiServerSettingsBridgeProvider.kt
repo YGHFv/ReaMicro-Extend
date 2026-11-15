@@ -7,7 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Binder
 import com.reamicro.fix.cloud.local.LocalTaskBridgeRuntime
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 class ApiServerSettingsBridgeProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
@@ -16,7 +16,7 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
         val appContext = context?.applicationContext ?: return null
         val caller = callingPackage
         if (caller !in ALLOWED_CALLERS || !LocalTaskBridgeRuntime.trustedUid(appContext, Binder.getCallingUid())) {
-            XposedBridge.log("ReaMicro API settings mirror rejected caller=$caller method=$method")
+            HookRuntime.log("ReaMicro API settings mirror rejected caller=$caller method=$method")
             return Bundle().apply { putBoolean("saved", false) }
         }
         if (method == LocalTaskBridgeRuntime.PROVIDER_EXCHANGE) {
@@ -39,7 +39,7 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
         val saved = persisted.enabled == settings.enabled &&
             persisted.baseUrl == settings.baseUrl.trim().removeSuffix("/") &&
             persisted.hostAccountId == settings.hostAccountId.trim()
-        XposedBridge.log(
+        HookRuntime.log(
             "ReaMicro API settings mirror caller=$caller saved=$saved enabled=${persisted.enabled} " +
                 "baseUrl=${persisted.baseUrl.isNotBlank()}",
         )
@@ -56,7 +56,7 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
         const val AUTHORITY = "com.reamicro.fix.api-settings"
         const val METHOD_SAVE = "save"
         val URI: Uri = Uri.parse("content://$AUTHORITY")
-        private val ALLOWED_CALLERS = setOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix", "com.reamicro.fix")
+        private val ALLOWED_CALLERS = com.reamicro.fix.core.HostPackages.all + "com.reamicro.fix"
     }
 }
 
@@ -81,7 +81,7 @@ fun ApiServerSettings.mirrorToModule(context: android.content.Context): Boolean 
             ?.getBoolean("saved", false) == true
     }.onFailure {
 
-        XposedBridge.log("ReaMicro API settings provider mirror unavailable: ${it.message}")
+        HookRuntime.log("ReaMicro API settings provider mirror unavailable: ${it.message}")
     }.getOrDefault(false)
 }
 

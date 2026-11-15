@@ -55,7 +55,7 @@ internal object ModuleDialogTheme {
         return fallbackPalette(context, darkHint)
     }
 
-    internal fun fromHost(native: StructureHost232Colors.Snapshot): Palette = Palette(
+    internal fun fromHost(native: HostThemeColors.Snapshot): Palette = Palette(
         pageBackground = native.pageArgb, rowBackground = native.brightArgb,
         border = native.borderVariantArgb, title = native.roles.getValue("OnBackground"), body = native.captionArgb,
         primary = native.roles.getValue("Primary"), primarySoft = native.roles.getValue("PrimaryContainer"),

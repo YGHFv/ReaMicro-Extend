@@ -6,165 +6,128 @@ import android.content.SharedPreferences
 import com.reamicro.fix.settings.HostCrashUploadSettings
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.core.HookInstallReport
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostStaticMethod
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.core.HostCrashBindings
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
+import io.github.libxposed.api.XposedInterface
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal object HostCrashReportBlocker {
     private const val FEATURE = "HostCrashReportBlocker"
+    internal const val GUARD_ID_PREFIX = "ReaMicro:privacy.crash:"
     private val installedMethods = mutableSetOf<Method>()
     @Volatile private var preferences: SharedPreferences? = null
     private var settingsBootstrapInstalled = false
+    private var cleanupRegistered = false
 
     internal fun isBlockingEnabled(): Boolean = HostCrashUploadSettings.shouldBlock(preferences)
 
     internal fun attachExistingApplication(application: Application) {
-        preferences = application.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
+        readPreferences(application)
     }
 
-    internal enum class ResultKind { VOID, PROVIDER_READY, TRANSPORT_SUCCESS }
-    internal data class Target(val className: String, val methodName: String, val result: ResultKind)
-    internal val targets = listOf(
-
-        Target("io.sentry.transport.HttpConnection", "send", ResultKind.TRANSPORT_SUCCESS),
-        Target("io.sentry.android.core.SentryAndroid", "init", ResultKind.VOID),
-        Target("io.sentry.Sentry", "init", ResultKind.VOID),
-        Target("io.sentry.ndk.SentryNdk", "init", ResultKind.VOID),
-        Target("io.sentry.ndk.SentryNdk", "preload", ResultKind.VOID),
-        Target("io.sentry.android.core.SentryInitProvider", "onCreate", ResultKind.PROVIDER_READY),
-        Target("io.sentry.android.core.SentryPerformanceProvider", "onCreate", ResultKind.PROVIDER_READY),
-        Target("io.sentry.ndk.SentryNdkPreloadProvider", "onCreate", ResultKind.PROVIDER_READY),
-    )
+    private fun readPreferences(context: Context) {
+        // Do not retain an earlier permission to upload if the replacement read fails.
+        preferences = null
+        val result = runCatching {
+            checkNotNull(context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE))
+        }
+        preferences = result.getOrNull()
+        val error = result.exceptionOrNull()
+        HookInstallReport.record(FEATURE, "settings-read", error == null, error)
+        if (error != null) runCatching {
+            HookRuntime.logError("ReaMicro privacy: cannot read crash-upload switch; upload OFF, blocking ON", error)
+        }
+    }
 
     @Synchronized
-    fun install(classLoader: ClassLoader, packageName: String) {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            installB4InitGuard(classLoader, packageName)
-            return
-        }
-        val loadClass = { name: String -> Class.forName(name, false, classLoader) }
-        try {
-            loadClass("io.sentry.android.core.SentryAndroid")
-        } catch (_: ClassNotFoundException) {
-            XposedBridge.logAlways("ReaMicro privacy: named Sentry SDK not found; no hooks applied (not a protection guarantee for other SDKs)")
-            return
-        }
-        installSettingsBootstrap(packageName)
-        val count = installHooks(loadClass, { method, callback ->
-            if (method !in installedMethods) {
-                checkNotNull(XposedBridge.hookMethod(method, callback)) { "Framework did not install $method" }
-                installedMethods += method
-            }
-        }, { target, error ->
-            HookInstallReport.record(FEATURE, "${target.className}.${target.methodName}", error == null, error)
-            if (error != null) XposedBridge.logError("ReaMicro privacy: Sentry hook failed: $target", error)
-        }, shouldBlock = ::isBlockingEnabled)
-        val failed = HookInstallReport.snapshot().count { it.feature == FEATURE && !it.ok }
-        XposedBridge.logAlways("ReaMicro privacy: Sentry guards registered=$count, failed=$failed; upload permission defaults OFF; registration alone is not proof of protection")
-    }
+    fun install(classLoader: ClassLoader, packageName: String) =
+        install(classLoader, packageName, emptyList())
 
-    private fun installB4InitGuard(classLoader: ClassLoader, packageName: String) {
+    @Synchronized
+    fun install(
+        classLoader: ClassLoader,
+        packageName: String,
+        previousGuards: List<XposedInterface.HookHandle>,
+    ) {
+        val contract = requireNotNull(HostCrashBindings.current) { "Crash reporting bindings unavailable" }
+        check(contract.guards.all { it.first.declaringClass.classLoader === classLoader })
+        val previous = previousGuards.associateBy { it.executable }
+        check(previous.size == previousGuards.size) { "Duplicate previous privacy guards" }
+        check(previousGuards.all { it.id == null || it.id?.startsWith(GUARD_ID_PREFIX) == true } &&
+            previous.keys.all { executable -> contract.guards.any { it.first == executable } }) {
+            "Previous privacy guards do not match the current host"
+        }
         installSettingsBootstrap(packageName)
-        HookInstallReport.install(FEATURE, "b4-sdk-init") {
-            // R8 将 SentryAndroid.init 收窄为 App 与配置对象；只拦截已取证的 SDK 初始化入口。
-            val app = classLoader.hostClass("app.zhendong.reamicro.App")
-            val config = classLoader.hostClass("ReaMicroHost.SentryOptionsConfig")
-            val method = classLoader.hostStaticMethod("io.sentry.android.core.SentryAndroid", "init", app, config)
+        if (!cleanupRegistered) {
+            com.reamicro.fix.reload.ModuleResources.cleanup {
+                installedMethods.clear(); preferences = null; settingsBootstrapInstalled = false
+                cleanupRegistered = false
+            }
+            cleanupRegistered = true
+        }
+        var failure: Throwable? = null
+        fun remember(error: Throwable) {
+            val first = failure
+            if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
+        }
+        contract.guards.forEach { (method, value) ->
             if (method !in installedMethods) {
-                val guard = replacement(method, ResultKind.VOID, ::isBlockingEnabled)
-                checkNotNull(XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        guard.callBeforeHookedMethod(param)
-                        if (param.isReturnEarly) {
-                            XposedBridge.logAlways("ReaMicro privacy: B4 Sentry init suppressed (upload disabled)")
+                val seen = AtomicBoolean()
+                val callback = object : HookCallback() {
+                    override fun before(param: Call) {
+                        if (!isBlockingEnabled()) return
+                        param.result = value
+                        if (seen.compareAndSet(false, true)) runCatching {
+                            val role = when (value) {
+                                null -> "initialization"
+                                true -> "provider"
+                                else -> "envelope transport"
+                            }
+                            HookRuntime.logAlways("ReaMicro privacy: blocked Sentry $role " +
+                                "target=${method.declaringClass.name}.${method.name}")
                         }
                     }
-                })) { "Framework did not install $method" }
-                installedMethods += method
+                }
+                val error = runCatching {
+                    checkNotNull(HookRuntime.hookProcessGuardMethod(
+                        method, callback, GUARD_ID_PREFIX + method.toGenericString(), previous[method],
+                    )) { "Framework did not install $method" }
+                    installedMethods += method
+                }.exceptionOrNull()
+                HookInstallReport.record(FEATURE, method.toGenericString(), error == null, error)
+                error?.let(::remember)
             }
-            XposedBridge.deoptimize(app.getDeclaredMethod("onCreate"))
-            XposedBridge.logAlways(
-                "ReaMicro privacy: B4 Sentry init guard registered; upload switch retained; " +
-                    "registration alone is not proof of protection",
-            )
         }
+        contract.deopt.forEach { method ->
+            val error = runCatching {
+                check(HookRuntime.deoptimize(method)) { "Framework could not deoptimize $method" }
+            }.exceptionOrNull()
+            HookInstallReport.record(FEATURE, "deopt:${method.toGenericString()}", error == null, error)
+            if (error != null) {
+                remember(error)
+            }
+        }
+        // Keep every successful guard and any unreplaced old guard on failure.
+        // Removing them here would turn a registration error into permission to upload.
+        failure?.let { throw IllegalStateException("Crash-report guards incomplete; existing guards retained", it) }
+        HookRuntime.logAlways("ReaMicro privacy: dynamic Sentry guards registered=${contract.guards.size}; upload switch retained; registration alone is not proof of protection")
     }
-
     private fun installSettingsBootstrap(packageName: String) {
         if (settingsBootstrapInstalled) return
         HookInstallReport.install(FEATURE, "settings-bootstrap") {
 
             val attach = Application::class.java.getDeclaredMethod("attach", Context::class.java)
-            checkNotNull(XposedBridge.hookMethod(attach, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            checkNotNull(HookRuntime.hookMethod(attach, object : HookCallback() {
+                override fun before(param: Call) {
                     val context = param.args.firstOrNull() as? Context ?: return
                     if (context.packageName != packageName) return
-                    val error = runCatching {
-
-                        preferences = context.getSharedPreferences(ModuleSettings.PREFS_NAME, Context.MODE_PRIVATE)
-                    }.exceptionOrNull()
-                    if (error != null) {
-                        preferences = null
-                        XposedBridge.logError("ReaMicro privacy: cannot read crash-upload switch; upload OFF, blocking ON", error)
-                    }
-                    HookInstallReport.record(FEATURE, "settings-read", error == null, error)
-                    XposedBridge.logAlways("ReaMicro privacy: crash-upload allowed=${HostCrashUploadSettings.uploadsAllowed(preferences)}, blocking=${isBlockingEnabled()}; changes require host restart for complete SDK lifecycle")
+                    readPreferences(context)
+                    HookRuntime.logAlways("ReaMicro privacy: crash-upload allowed=${HostCrashUploadSettings.uploadsAllowed(preferences)}, blocking=${isBlockingEnabled()}; changes require host restart for complete SDK lifecycle")
                 }
             })) { "Framework did not install Application.attach settings bootstrap" }
             settingsBootstrapInstalled = true
-        }
-    }
-
-    internal fun installHooks(
-        loadClass: (String) -> Class<*>,
-        hook: (Method, XC_MethodHook) -> Unit,
-        report: (Target, Throwable?) -> Unit,
-        shouldBlock: () -> Boolean = { true },
-    ): Int {
-        var installed = 0
-        targets.forEach { target ->
-            val error = runCatching {
-                val methods = loadClass(target.className).declaredMethods.filter { it.name == target.methodName }
-                check(methods.isNotEmpty()) { "Missing ${target.className}.${target.methodName}" }
-                methods.forEach { method ->
-                    hook(method, replacement(method, target.result, shouldBlock))
-                    installed += 1
-                }
-            }.exceptionOrNull()
-
-            report(target, error)
-        }
-        return installed
-    }
-
-    internal fun replacement(method: Method, kind: ResultKind, shouldBlock: () -> Boolean = { true }): XC_MethodHook {
-        val value: Any? = when (kind) {
-            ResultKind.VOID -> {
-                check(method.returnType == Void.TYPE && Modifier.isStatic(method.modifiers)) { "Unexpected init signature: $method" }
-                null
-            }
-            ResultKind.PROVIDER_READY -> {
-                check(method.returnType == Boolean::class.javaPrimitiveType && method.parameterCount == 0) { "Unexpected provider signature: $method" }
-                true
-            }
-            ResultKind.TRANSPORT_SUCCESS -> {
-                check(!method.returnType.isPrimitive && method.parameterCount == 1) { "Unexpected transport signature: $method" }
-                val factory = method.returnType.getMethod("success")
-                check(Modifier.isStatic(factory.modifiers) && factory.returnType == method.returnType)
-                checkNotNull(factory.invoke(null))
-            }
-        }
-        return object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-
-                if (!runCatching(shouldBlock).getOrDefault(true)) return
-
-                param.result = value
-            }
         }
     }
 }

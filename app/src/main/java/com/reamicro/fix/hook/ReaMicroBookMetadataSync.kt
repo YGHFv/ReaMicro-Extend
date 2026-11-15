@@ -1,48 +1,21 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostAbiMethod
-import com.reamicro.fix.core.HostSymbols
-
-import com.reamicro.fix.core.hostNameMatches
-
-
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.core.HostCoroutines
+import com.reamicro.fix.core.HostReaderExtrasBindings
+import com.reamicro.fix.core.HostReaderPositionBindings
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
-import java.lang.reflect.InvocationTargetException
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
-import java.util.concurrent.CountDownLatch
-
-internal data class BookMetadataPatch(
-    val title: String? = null,
-    val subtitle: String? = null,
-    val author: String? = null,
-    val cover: String? = null,
-    val size: Long? = null,
-    val cloudId: Long? = null,
-    val publisher: String? = null,
-)
-
-internal fun BookMetadataPatch.withPreservedAssociation(cloudId: Long?, publisher: String?): BookMetadataPatch =
-    if (cloudId == null || cloudId <= 0L) this else copy(
-        cloudId = cloudId,
-        publisher = publisher?.takeIf { it.isNotBlank() } ?: this.publisher,
-    )
 
 internal object ReaMicroBookMetadataSync {
     private const val LOG_PREFIX = "ReaMicro LSP"
-    private const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
-    private const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
-    private const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
-    private const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
-    private const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
     private const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
-
+    private val host get() = requireNotNull(HostReaderExtrasBindings.importMetadata) { "Import metadata contract unavailable" }
     @Volatile private var bookshelfRepositoryRef: WeakReference<Any>? = null
+
+    fun requireAvailable() {
+        val copy = requireNotNull(HostReaderPositionBindings.current) { "Exact book copy contract unavailable" }
+        check(copy.type("book") == host.type("book"))
+    }
 
     fun rememberBookshelfRepository(repository: Any?) {
         if (repository == null) return
@@ -52,204 +25,59 @@ internal object ReaMicroBookMetadataSync {
     fun currentBookshelfRepository(): Any? = bookshelfRepositoryRef?.get()
 
     fun metadataFromOpf(opf: Any?, root: Any? = null): BookMetadataPatch {
-        val uuid = callStringPath(opf, "metadata", "uuid", "value")
-            ?: callStringPath(opf, "metadata", "uuid")
-        val isOnlineCompletion = uuid.orEmpty().startsWith(ONLINE_COMPLETION_UUID_PREFIX) ||
-            hasOnlineCompletionSourceMeta(opf)
-        val publisher = if (isOnlineCompletion) {
-            ""
-        } else {
-            callStringPath(opf, "metadata", "publisher", "value")
-                ?: callStringPath(opf, "metadata", "publisher", "name")
-                ?: callStringPath(opf, "metadata", "publisher")
-        }
+        if (opf == null) return BookMetadataPatch()
+        val metadata = requireNotNull(host.read("opf.metadata", opf))
+        val uuid = host.read("identifier.value", host.read("metadata.uuid", metadata)) as? String
+        val metas = host.read("metadata.metas", metadata) as? Iterable<*>
+        val online = uuid.orEmpty().startsWith(ONLINE_COMPLETION_UUID_PREFIX) || (metas?.any { meta ->
+            listOf("property", "id").any { name -> host.read("meta.$name", meta) == "reamicro-online-source-id" }
+        } == true)
+        val authors = host.read("metadata.authors", metadata) as? Iterable<*>
         return BookMetadataPatch(
-            title = callStringPath(opf, "metadata", "title", "value")?.takeIf { it.isNotBlank() },
-            subtitle = callStringPath(opf, "metadata", "subtitle", "value"),
-            author = authorsFromOpf(opf),
-            cover = coverFromOpf(opf, root),
-            publisher = publisher,
+            title = (host.read("title.value", host.read("metadata.title", metadata)) as? String)?.takeIf(String::isNotBlank),
+            subtitle = host.read("title.value", host.read("metadata.subtitle", metadata)) as? String,
+            author = authors?.mapNotNull { (host.read("creator.name", it) as? String)?.takeIf(String::isNotBlank) }
+                ?.joinToString(", ")?.takeIf(String::isNotBlank),
+            cover = if (root == null) null else (host.method("cover").invoke(opf, root) as? String)?.takeIf(String::isNotBlank),
+            publisher = if (online) "" else host.read("publisher.name", host.read("metadata.publisher", metadata)) as? String,
         )
     }
 
-    fun syncBookMetadataAsync(repository: Any?, book: Any?, patch: BookMetadataPatch, delayMs: Long = 0L) {
-        if (book == null) return
-        val targetRepository = repository ?: currentBookshelfRepository() ?: return
-        com.reamicro.fix.reload.ModuleResources.thread {
-            if (delayMs > 0L) runCatching { Thread.sleep(delayMs) }
-            syncBookMetadata(targetRepository, book, patch)
-        }.apply { name = "ReaMicro-BookMetadataSync" }.start()
-    }
-
     @Synchronized
-    fun syncBookMetadata(repository: Any?, book: Any?, patch: BookMetadataPatch): Boolean =
-        runCatching {
-            val targetRepository = repository ?: currentBookshelfRepository() ?: return false
-            val originalBook = book ?: return false
-            val sourceBook = latestBook(targetRepository, originalBook) ?: originalBook
-            val updated = copyBookWithMetadata(sourceBook, patch) ?: return false
-            val updateMethod = method(targetRepository.javaClass, "updateBook", 2)
-            invokeSuspendBlocking(targetRepository.javaClass.classLoader, updateMethod, targetRepository, updated)
-            val stored = latestBook(targetRepository, originalBook) ?: error("更新后未读到书架记录")
-            check(verifyPatch(stored, sourceBook, patch)) { "书架回读字段与提交值不同" }
-            XposedBridge.log(
-                "$LOG_PREFIX synced book metadata: uuid=${stringValue(updated, "getUuid")}, " +
-                    "title=${stringValue(updated, "getTitle")}, author=${stringValue(updated, "getAuthor")}",
-            )
-            true
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to sync book metadata: ${it.stackTraceToString()}")
-        }.getOrDefault(false)
+    fun syncBookMetadata(
+        repository: Any?, book: Any?, patch: BookMetadataPatch, checkCurrent: () -> Unit = {},
+    ): Boolean = runCatching {
+        checkCurrent()
+        requireAvailable()
+        val target = repository ?: currentBookshelfRepository() ?: return@runCatching false
+        val original = book ?: return@runCatching false
+        val source = latestBook(target, original) ?: error("更新前未读到书架记录")
+        checkCurrent()
+        val changes = patch.changes() + ("updated" to System.currentTimeMillis())
+        val updated = requireNotNull(HostReaderPositionBindings.current).copy("book", source, changes)
+        checkCurrent()
+        HostCoroutines.invokeTimed(host.type("repository").classLoader, host.method("update"), target, 30_000L, updated)
+        checkCurrent()
+        val stored = latestBook(target, original) ?: error("更新后未读到书架记录")
+        checkCurrent()
+        check(verifyPatch(stored, source, patch)) { "书架回读字段与提交值不同" }
+        HookRuntime.log("$LOG_PREFIX synced book metadata fields=${patch.changes().keys.sorted().joinToString(",")}")
+        true
+    }.onFailure { HookRuntime.logError("$LOG_PREFIX failed to sync book metadata", it) }.getOrDefault(false)
 
-    internal fun latestBook(repository: Any, book: Any): Any? =
-        runCatching {
-            val id = longValue(book, "getId")
-            if (id <= 0L) return@runCatching null
-            if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                // 宿主已内联仓库查找门面，保留原 DAO 查询而非返回传入的旧记录。
-                val dao = requireNotNull(repository.javaClass.hostField("bookDao").get(repository))
-                val loader = repository.javaClass.classLoader
-                val find = dao.javaClass.hostAbiMethod(
-                    "b", java.lang.Long.TYPE, loader.hostClass("kotlin.coroutines.Continuation"),
-                )
-                return@runCatching invokeSuspendBlocking(loader, find, dao, id)
-            }
-            val findMethod = method(repository.javaClass, "findBookById", 2)
-            invokeSuspendBlocking(repository.javaClass.classLoader, findMethod, repository, id)
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to reload book metadata target: ${it.stackTraceToString()}")
-        }.getOrNull()
+    internal fun latestBook(repository: Any, book: Any): Any? = runCatching {
+        val id = (host.read("book.id", book) as Number).toLong()
+        if (id <= 0L) return@runCatching null
+        val dao = requireNotNull(host.read("repository.dao", repository))
+        HostCoroutines.invokeTimed(host.type("repository").classLoader, host.method("find"), dao, 30_000L, id)
+            ?.also { require(host.type("book").isInstance(it)) }
+            ?.takeIf { stored -> listOf("id", "uid", "uuid").all { host.read("book.$it", stored) == host.read("book.$it", book) } }
+    }.onFailure { HookRuntime.logError("$LOG_PREFIX failed to reload book metadata target", it) }.getOrNull()
 
     internal fun verifyPatch(stored: Any, original: Any, patch: BookMetadataPatch): Boolean = runCatching {
-        fun value(target: Any, getter: String): Any? = XposedHelpers.callMethod(target, getter)
-        val id = (value(original, "getId") as Number).toLong()
-        val uuid = value(original, "getUuid") as String
-        if (id <= 0 || (value(stored, "getId") as Number).toLong() != id || value(stored, "getUuid") != uuid)
-            return@runCatching false
-        val values = listOf("getTitle" to patch.title?.takeIf { it.isNotBlank() },
-            "getSubtitle" to patch.subtitle, "getAuthor" to patch.author,
-            "getCover" to patch.cover, "getPublisher" to patch.publisher)
-        values.all { (getter, expected) -> expected == null || value(stored, getter) == expected } &&
-            (patch.size == null || (value(stored, "getSize") as Number).toLong() == patch.size) &&
-            (patch.cloudId == null || (value(stored, "getCloudId") as Number).toLong() == patch.cloudId)
+        val id = (host.read("book.id", original) as Number).toLong()
+        id > 0L && listOf("id", "uuid", "uid").all { host.read("book.$it", stored) == host.read("book.$it", original) } &&
+            patch.changes().all { (name, expected) -> host.read("book.$name", stored) == expected }
     }.getOrDefault(false)
 
-    private fun copyBookWithMetadata(book: Any, patch: BookMetadataPatch): Any? =
-        runCatching {
-            BookCopyCompat.copy(
-                book,
-                BookCopyPatch(
-                    title = patch.title?.takeIf { it.isNotBlank() },
-                    subtitle = patch.subtitle,
-                    author = patch.author,
-                    cover = patch.cover,
-                    size = patch.size,
-                    updated = System.currentTimeMillis(),
-                    cloudId = patch.cloudId,
-                    publisher = patch.publisher,
-                ),
-            )
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to copy book metadata: ${it.stackTraceToString()}")
-        }.getOrNull()
-
-    private fun authorsFromOpf(opf: Any?): String? =
-        runCatching {
-            val metadata = callValue(opf, "metadata") ?: return null
-            val authors = callValue(metadata, "authors") ?: callValue(metadata, "getAuthors") ?: return null
-            (authors as? Iterable<*>)?.mapNotNull { author ->
-                callStringPath(author, "name")?.takeIf { it.isNotBlank() }
-            }?.joinToString(", ")?.takeIf { it.isNotBlank() }
-        }.getOrNull()
-
-    private fun coverFromOpf(opf: Any?, root: Any?): String? =
-        runCatching {
-            opf ?: return null
-            if (HostSymbols.usesRc3Abi && root != null) {
-                // 无参封面查找已删除；交给宿主在同一 EPUB 根目录中解析，不猜 manifest 路径。
-                return XposedHelpers.callMethod(opf, "coverRelativePath", root)?.toString()
-                    ?.takeIf { it.isNotBlank() }
-            }
-            opf.javaClass.methods.firstOrNull { it.hostNameMatches("coverRelativePath") && it.parameterTypes.isEmpty() }
-                ?.apply { isAccessible = true }
-                ?.invoke(opf)
-                ?.toString()
-                ?.takeIf { it.isNotBlank() }
-        }.getOrNull()
-
-    private fun hasOnlineCompletionSourceMeta(opf: Any?): Boolean =
-        runCatching {
-            val metadata = callValue(opf, "metadata") ?: callValue(opf, "getMetadata") ?: return false
-            val metas = callValue(metadata, "metas") ?: callValue(metadata, "getMetas") ?: return false
-            (metas as? Iterable<*>)?.any { meta ->
-                sequenceOf("name", "property", "id", "getName", "getProperty", "getId")
-                    .mapNotNull { callStringPath(meta, it)?.trim() }
-                    .any { it.equals("reamicro-online-source-id", ignoreCase = true) }
-            } == true
-        }.getOrDefault(false)
-
-    private fun callStringPath(target: Any?, vararg path: String): String? {
-        var current = target ?: return null
-        for (name in path) {
-            current = callValue(current, name) ?: return null
-        }
-        return current.toString()
-    }
-
-    private fun callValue(target: Any?, name: String): Any? {
-        val current = target ?: return null
-        if (current is String) return current
-        return runCatching {
-            if (!HostSymbols.isIdentity) {
-                val getter = if (name.startsWith("get")) name
-                    else "get" + name.replaceFirstChar { it.uppercaseChar() }
-                HostSymbols.resolveAccessorFieldName(current.javaClass, getter)?.let {
-                    return XposedHelpers.callMethod(current, getter)
-                }
-            }
-            current.javaClass.methods.firstOrNull {
-                it.parameterTypes.isEmpty() &&
-                    (it.hostNameMatches(name) || it.name == "get" + name.replaceFirstChar { ch -> ch.uppercaseChar() })
-            }?.apply { isAccessible = true }?.invoke(current)
-        }.getOrNull()
-    }
-
-    private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
-        (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())
-            .firstOrNull { it.hostNameMatches(name) && it.parameterTypes.size == parameterCount }
-            ?.apply { isAccessible = true }
-            ?: error("Method not found: ${targetClass.name}#$name/$parameterCount")
-
-    private fun stringValue(target: Any, getter: String): String =
-        runCatching { XposedHelpers.callMethod(target, getter)?.toString().orEmpty() }.getOrDefault("")
-
-    private fun longValue(target: Any, getter: String): Long =
-        runCatching { (XposedHelpers.callMethod(target, getter) as? Number)?.toLong() ?: 0L }.getOrDefault(0L)
-
-    private fun intValue(target: Any, getter: String): Int =
-        runCatching { (method(target.javaClass, getter, 0).invoke(target) as? Number)?.toInt() ?: 0 }.getOrDefault(0)
-
-    private fun floatValue(target: Any, getter: String): Float =
-        runCatching { (method(target.javaClass, getter, 0).invoke(target) as? Number)?.toFloat() ?: 0f }.getOrDefault(0f)
-
-    private fun invokeSuspendBlocking(classLoader: ClassLoader, method: Method, target: Any?, vararg args: Any?): Any? =
-        com.reamicro.fix.core.HostCoroutines.invokeTimed(classLoader, method, target, 30_000L, *args)
-
-    private fun emptyCoroutineContext(classLoader: ClassLoader): Any =
-        XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
-            .hostField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null) ?: error("EmptyCoroutineContext unavailable")
-
-    private fun coroutineSuspended(classLoader: ClassLoader): Any =
-        runCatching {
-            XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
-                it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
-            }.apply { isAccessible = true }.invoke(null)
-        }.getOrElse {
-            XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader)
-                .enumConstants
-                ?.firstOrNull { value -> value.toString() == "COROUTINE_SUSPENDED" }
-                ?: error("COROUTINE_SUSPENDED unavailable")
-        }
 }

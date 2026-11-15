@@ -1,0 +1,7 @@
+Miuix sources: https://github.com/compose-miuix-ui/miuix
+Upstream commit: ca674992c9645395cdb0d5109d66504ff53d018c
+Integration version: 0.9.4-ca67499-SNAPSHOT
+
+The selected common and Android sources retain their upstream contents.
+Android build adapters and integration wrappers are provided by ReaMicro Extend.
+The upstream source is licensed under Apache License 2.0; see upstream/LICENSE.

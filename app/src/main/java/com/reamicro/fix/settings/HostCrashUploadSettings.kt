@@ -10,7 +10,11 @@ internal object HostCrashUploadSettings {
         ) ?: false
     }.getOrDefault(false)
 
-    fun shouldBlock(prefs: SharedPreferences?): Boolean = !uploadsAllowed(prefs)
+    fun shouldBlock(prefs: SharedPreferences?): Boolean =
+        runCatching {
+            prefs?.getBoolean(ModuleSettings.KEY_MODULE_ENABLED, ModuleSettings.DEFAULT_MODULE_ENABLED)
+                ?: ModuleSettings.DEFAULT_MODULE_ENABLED
+        }.getOrDefault(ModuleSettings.DEFAULT_MODULE_ENABLED) && !uploadsAllowed(prefs)
 
     fun save(prefs: SharedPreferences?, enabled: Boolean): Boolean {
         prefs ?: return false

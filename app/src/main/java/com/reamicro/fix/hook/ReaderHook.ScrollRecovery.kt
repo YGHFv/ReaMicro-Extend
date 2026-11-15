@@ -1,9 +1,6 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.reload.runOnModuleUiThread
 
 import android.app.ActivityManager
 import android.content.Context
@@ -11,7 +8,7 @@ import android.os.Build
 import android.os.Process
 import android.widget.Toast
 import com.reamicro.fix.hook.reader.*
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 private const val FAILURE_PID = "scroll_failure_v2_pid"
 private const val FAILURE_PROCESS = "scroll_failure_v2_process"
@@ -39,11 +36,11 @@ internal fun ReaderHook.initializeScrollCrashRecovery() {
 
             if (legacy || failure != null) prefs.edit().remove(SCROLL_CRASH_PENDING_KEY)
                 .remove(FAILURE_PID).remove(FAILURE_PROCESS).remove(FAILURE_TIME).apply()
-            if (legacy) XposedBridge.log("$LOG_PREFIX legacy scroll entry marker discarded; flip_style unchanged")
-            if (failure != null) XposedBridge.log("$LOG_PREFIX scroll recovery evidence verified=${scrollCrashRecoveryPending}")
+            if (legacy) HookRuntime.log("$LOG_PREFIX legacy scroll entry marker discarded; flip_style unchanged")
+            if (failure != null) HookRuntime.log("$LOG_PREFIX scroll recovery evidence verified=${scrollCrashRecoveryPending}")
         }.onFailure {
             scrollCrashRecoveryPending = false
-            XposedBridge.log("$LOG_PREFIX scroll recovery evidence unavailable; preserving flip_style: ${it.javaClass.simpleName}")
+            HookRuntime.log("$LOG_PREFIX scroll recovery evidence unavailable; preserving flip_style: ${it.javaClass.simpleName}")
         }
         scrollCrashRecoveryInitialized = true
     }
@@ -58,9 +55,9 @@ internal fun ReaderHook.markScrollRenderFailure(error: Throwable) {
         val saved = context.getSharedPreferences(SCROLL_CRASH_PREFS, Context.MODE_PRIVATE).edit()
             .remove(SCROLL_CRASH_PENDING_KEY).putInt(FAILURE_PID, Process.myPid())
             .putString(FAILURE_PROCESS, context.packageName).putLong(FAILURE_TIME, System.currentTimeMillis()).commit()
-        XposedBridge.log("$LOG_PREFIX scroll render exception recorded=$saved type=${error.javaClass.name}")
+        HookRuntime.log("$LOG_PREFIX scroll render exception recorded=$saved type=${error.javaClass.name}")
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX scroll failure evidence write failed: ${it.javaClass.simpleName}")
+        HookRuntime.log("$LOG_PREFIX scroll failure evidence write failed: ${it.javaClass.simpleName}")
     }
 }
 
@@ -72,7 +69,7 @@ internal fun ReaderHook.clearScrollCrashPending(reason: String) {
         activityProvider()?.applicationContext?.getSharedPreferences(SCROLL_CRASH_PREFS, Context.MODE_PRIVATE)
             ?.edit()?.remove(SCROLL_CRASH_PENDING_KEY)?.remove(FAILURE_PID)?.remove(FAILURE_PROCESS)?.remove(FAILURE_TIME)?.apply()
     }
-    XposedBridge.log("$LOG_PREFIX handled scroll failure evidence cleared: $reason")
+    HookRuntime.log("$LOG_PREFIX handled scroll failure evidence cleared: $reason")
 }
 
 internal fun ReaderHook.isPreviousScrollCrashPending(): Boolean {
@@ -86,20 +83,17 @@ internal fun ReaderHook.restoreTranslateFlipStyleIfScrollCrashed(session: Any, s
     com.reamicro.fix.reload.ModuleResources.thread {
         try {
             if (currentSessionRef?.get() !== session) return@thread
-            val flow = callNoArg(session, "getFlipStyleFlow") ?: return@thread
-            val continuation = classLoader.loadClass("kotlin.coroutines.Continuation")
-            val first = classLoader.loadClass("kotlinx.coroutines.flow.FlowKt")
-                .hostMethod("first", classLoader.loadClass("kotlinx.coroutines.flow.Flow"), continuation)
-            val style = (invokeSelectionHostSuspend { first.invoke(null, flow, it) } as? Number)?.toInt()
+            val preferences = requireNotNull(com.reamicro.fix.core.HostHomeBindings.preferences)
+            val style = (preferences.read(session, "flip_style") as? Number)?.toInt()
             if (!mayApplyScrollRecovery(style, currentSessionRef?.get() === session)) return@thread
             forceTranslateFlipStyle(session)
             val activity = activityProvider()
-            activity?.runOnUiThread {
+            activity?.runOnModuleUiThread {
                 Toast.makeText(activity, "上次滚动渲染发生崩溃，已切换为平移翻页", Toast.LENGTH_SHORT).show()
             }
-            XposedBridge.log("$LOG_PREFIX confirmed scroll crash fallback switched flip_style to translate from $source")
+            HookRuntime.log("$LOG_PREFIX confirmed scroll crash fallback switched flip_style to translate from $source")
         } catch (error: Throwable) {
-            XposedBridge.log("$LOG_PREFIX confirmed scroll recovery failed; releasing render guard: ${error.javaClass.simpleName}")
+            HookRuntime.log("$LOG_PREFIX confirmed scroll recovery failed; releasing render guard: ${error.javaClass.simpleName}")
         } finally {
             scrollCrashRecoveryPending = false
             scrollCrashRecoveryInFlight.set(false)
@@ -109,10 +103,5 @@ internal fun ReaderHook.restoreTranslateFlipStyleIfScrollCrashed(session: Any, s
 }
 
 private fun ReaderHook.forceTranslateFlipStyle(session: Any) {
-    val keys = classLoader.loadClass(PREF_KEYS_CLASS)
-    val instance = keys.hostField("INSTANCE").apply { isAccessible = true }.get(null)
-    val key = keys.hostMethod("getFLIP_STYLE").invoke(instance)
-    val update = session.javaClass.methods.single { it.hostNameMatches("update") && it.parameterTypes.size == 3 }
-        .apply { isAccessible = true }
-    invokeSelectionHostSuspend { update.invoke(session, key, Integer.valueOf(FLIP_STYLE_TRANSLATE), it) }
+    requireNotNull(com.reamicro.fix.core.HostHomeBindings.preferences).update(session, "flip_style", FLIP_STYLE_TRANSLATE)
 }

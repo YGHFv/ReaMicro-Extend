@@ -38,6 +38,17 @@ data class ApiServerSettings(
     val updateChannel: ApiUpdateChannel = ApiUpdateChannel.BETA,
 )
 
+/** Opaque identity for request ownership and per-server metadata/throttle caches. */
+internal fun ApiServerSettings.requestIdentity(): String {
+    val values = listOf(
+        baseUrl.trim().trimEnd('/'), enabled.toString(), authMode.wireValue,
+        apiKey, accountName, accountPassword, hostAccountId,
+    )
+    val key = values.joinToString("") { "${it.length}:$it" }.toByteArray(Charsets.UTF_8)
+    return java.security.MessageDigest.getInstance("SHA-256").digest(key)
+        .joinToString("") { "%02x".format(it.toInt() and 255) }
+}
+
 data class ApiServerMeta(
     val apiVersion: String,
     val serverId: String,

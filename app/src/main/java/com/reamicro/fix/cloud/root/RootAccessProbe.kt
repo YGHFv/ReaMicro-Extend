@@ -31,6 +31,9 @@ internal class RootAccessProbe(
                 execute(ProcessBuilder(path, "-c", PROBE), remaining.coerceAtLeast(1))
             } catch (_: RootCommandTimeout) {
                 return RootAccessReport(RootAccessState.TIMEOUT, path, "等待 SU 返回超时；这不代表设备没有 Root")
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw error
             } catch (error: IOException) {
                 unavailable += "$path: ${error.message.orEmpty().take(180)}"
                 continue

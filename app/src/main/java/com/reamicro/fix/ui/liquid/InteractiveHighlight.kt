@@ -47,6 +47,7 @@ class InteractiveHighlight(
         return color * intensity;
     }"""
     )
+    private val shaderBrush = ShaderBrush(shader)
 
     val modifier: Modifier = Modifier.drawWithContent {
         val progress = pressProgressAnimation.value
@@ -67,7 +68,7 @@ class InteractiveHighlight(
                 )
             }
             drawRect(
-                ShaderBrush(shader),
+                shaderBrush,
                 blendMode = BlendMode.Plus
             )
         }

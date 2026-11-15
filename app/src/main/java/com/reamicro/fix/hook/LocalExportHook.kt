@@ -1,24 +1,21 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.reload.runOnModuleUiThread
+
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.widget.Toast
-import com.reamicro.fix.core.ComposeInterop
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.B2NativeUi
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
-import java.io.BufferedInputStream
+import com.reamicro.fix.core.HostNativeUi
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
-import java.io.FileInputStream
+import java.io.FilterOutputStream
 import java.io.OutputStream
-import java.lang.reflect.Method
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -26,198 +23,157 @@ import java.util.zip.ZipOutputStream
 class LocalExportHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
+    private val enabledProvider: () -> Boolean = { true },
 ) {
 
-    private val composeInterop = ComposeInterop(
-        classLoader = classLoader,
-        resolveClass = ::cls,
-        unitInstance = ::targetUnit,
-        logPrefix = LOG_PREFIX,
-    )
-
-    private val methodCache = mutableMapOf<String, Method>()
-    private val currentBackupContext = ThreadLocal<BackupContext?>()
-    @Volatile private var pendingPickContext: BackupContext? = null
+    private val host get() = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.export)
+    private val ui get() = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+    private val contexts = ThreadLocal<java.util.ArrayDeque<BackupContext>>()
+    private val pickLock = Any()
+    private var nextPickRequestCode = REQUEST_PICK_EXPORT_DIR
+    @Volatile private var pendingPickContext: PendingExportPick? = null
 
     fun install() {
-        hookBookBackupContent()
-        hookLocalStorageCard()
-        hookActivityResult()
-    }
-
-    private fun hookBookBackupContent() {
-        runCatching {
-            val method = cls(BOOK_BACKUP_SCREEN_CLASS).declaredMethods.first {
-                it.hostNameMatches(BOOK_BACKUP_CONTENT_METHOD) && it.parameterTypes.size == 9
-            }.apply { isAccessible = true }
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val book = param.args?.getOrNull(0) ?: return
-                    currentBackupContext.set(BackupContext(book))
+        val symbols = host
+        val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        try {
+            handles += HookRuntime.hookMethod(symbols.method("content"), object : HookCallback() {
+                override fun before(param: Call) {
+                    val book = param.args.firstOrNull()?.takeIf(symbols.type("book")::isInstance) ?: return
+                    val frame = createBackupContext(book) ?: return
+                    (contexts.get() ?: java.util.ArrayDeque<BackupContext>().also(contexts::set)).addLast(frame)
+                    param.setObjectExtra(BACKUP_FRAME, frame)
                 }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    currentBackupContext.remove()
+                override fun after(param: Call) {
+                    val frame = param.getObjectExtra(BACKUP_FRAME) as? BackupContext ?: return
+                    val stack = contexts.get() ?: return
+                    if (stack.peekLast() === frame) stack.removeLast() else stack.remove(frame)
+                    if (stack.isEmpty()) contexts.remove()
                 }
             })
-            XposedBridge.log("$LOG_PREFIX local export backup content hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook backup content: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookLocalStorageCard() {
-        runCatching {
-            val method = staticMethod(LOCAL_STORAGE_CARD_CLASS, LOCAL_STORAGE_CARD_METHOD, 3)
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val context = currentBackupContext.get() ?: return
-                    val composer = param.args?.getOrNull(1) ?: return
-                    renderLocalExportCard(context, composer)
+            handles += HookRuntime.hookMethod(symbols.method("header"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val context = contexts.get()?.peekLast() ?: return
+                    if (param.throwable != null || param.args.firstOrNull() !== context.book || context.rendered) return
+                    val composer = param.args.getOrNull(1)?.takeIf(symbols.type("composer")::isInstance) ?: return
+                    context.rendered = true
+                    com.reamicro.fix.reload.ModuleResources.lease()?.use { renderLocalExportCard(context, composer) }
                 }
             })
-            XposedBridge.log("$LOG_PREFIX local export card hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook local storage card: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookActivityResult() {
-        runCatching {
-            val mainActivityClass = cls(MAIN_ACTIVITY_CLASS)
-            XposedHelpers.findAndHookMethod(
-                mainActivityClass,
-                "onActivityResult",
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-                Intent::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val requestCode = param.args?.getOrNull(0) as? Int ?: return
-                        if (requestCode != REQUEST_PICK_EXPORT_DIR) return
-                        val resultCode = param.args?.getOrNull(1) as? Int ?: return
-                        val data = param.args?.getOrNull(2) as? Intent
-                        val activity = param.thisObject as? Activity ?: activityProvider()
-                        val context = pendingPickContext.also { pendingPickContext = null } ?: return
-                        if (resultCode != Activity.RESULT_OK || data?.data == null) {
-                            activity?.toast("已取消选择目录")
-                            return
-                        }
-                        val uri = data.data ?: return
-                        val flags = data.flags and
-                            (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                        runCatching { activity?.contentResolver?.takePersistableUriPermission(uri, flags) }
-                        exportToPickedDirectory(context, uri)
+            handles += HookRuntime.hookMethod(symbols.method("activityResult"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val requestCode = param.args.getOrNull(0) as? Int ?: return
+                    val resultCode = param.args.getOrNull(1) as? Int ?: return
+                    val data = param.args.getOrNull(2) as? Intent
+                    val activity = param.thisObject as? Activity ?: return
+                    val context = synchronized(pickLock) {
+                        val pending = pendingPickContext ?: return
+                        if (pending.context.owner !== activity || pending.requestCode != requestCode) return
+                        pendingPickContext = null
+                        pending.context
                     }
-                },
-            )
-            XposedBridge.log("$LOG_PREFIX local export activity result hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook activity result for local export: ${it.stackTraceToString()}")
+                    if (!isExportCurrent(context)) return
+                    if (resultCode != Activity.RESULT_OK || data?.data == null) {
+                        context.toast("已取消选择目录")
+                        return
+                    }
+                    val uri = data.data ?: return
+                    val readPermission = if ((data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    } else 0
+                    val writePermission = if ((data.flags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0) {
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    } else 0
+                    runCatching {
+                        requireExportCurrent(context)
+                        activity.contentResolver.takePersistableUriPermission(uri, readPermission or writePermission)
+                    }
+                    if (!isExportCurrent(context)) return
+                    exportToPickedDirectory(context, uri)
+                }
+            })
+            listOf("content", "header", "activityResult").forEach { HookRuntime.deoptimize(symbols.method(it)) }
+            com.reamicro.fix.reload.ModuleResources.cleanup { contexts.remove(); synchronized(pickLock) { pendingPickContext = null } }
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            throw error
         }
     }
 
     private fun renderLocalExportCard(context: BackupContext, composer: Any) {
-        runCatching {
-            val onDefault = functionProxy("LocalExportDefault", FUNCTION0_CLASS) {
-                exportToDefaultDirectory(context)
-                targetUnit()
+        val onDefault = ui.callback(host.type("function")) { exportToDefaultDirectory(context) }
+        val onPick = ui.callback(host.type("function")) { openDirectoryPicker(context) }
+        ui.instance("startGroup", composer, 0x524D4558)
+        try {
+            val native = HostNativeUi(classLoader)
+            val content = ui.callback(ui.type("function3")) { args ->
+                host.call("drive", host.call("icon"), EXPORT_TITLE, DOWNLOADS_LABEL, false,
+                    onDefault, onPick, requireNotNull(args?.getOrNull(1)), 0)
             }
-            val onPick = functionProxy("LocalExportPick", FUNCTION0_CLASS) {
-                openDirectoryPicker(context)
-                targetUnit()
-            }
-            if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                // 恢复旧 authCardColumnModifier 的外层缩进，不能直接插入全宽的备份页 Column。
-                val ui = B2NativeUi(classLoader)
-                val content = functionProxy("LocalExportColumnContent", HostClasses.Kotlin.FUNCTION3) { args ->
-                    renderLocalExportDriveCard(context, requireNotNull(args?.getOrNull(1)), onDefault, onPick)
-                    targetUnit()
-                }
-                ui.column(ui.padding(ui.fillWidth(ui.modifier()), ui.dp(16), 0f, ui.dp(16), ui.dp(16)),
-                    ui.top(), ui.start(), content, composer)
-            } else renderLocalExportDriveCard(context, composer, onDefault, onPick)
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to render local export card: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun renderLocalExportDriveCard(
-        context: BackupContext,
-        composer: Any,
-        onDefault: Any = functionProxy("LocalExportDefault", FUNCTION0_CLASS) {
-            exportToDefaultDirectory(context)
-            targetUnit()
-        },
-        onPick: Any = functionProxy("LocalExportPick", FUNCTION0_CLASS) {
-            openDirectoryPicker(context)
-            targetUnit()
-        },
-    ) {
-        runCatching {
-            method(AUTH_CARD_CLASS, DRIVE_AUTH_CARD_METHOD, 8).invoke(
-                null,
-                localExportIcon(),
-                EXPORT_TITLE,
-                DOWNLOADS_LABEL,
-                false,
-                onDefault,
-                onPick,
-                composer,
-                0,
-            )
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to render local export drive card: ${it.stackTraceToString()}")
+            native.column(native.padding(native.fillWidth(native.modifier()), native.dp(16), 0f, native.dp(16), native.dp(16)),
+                native.top(), native.start(), content, composer)
+        } finally {
+            ui.instance("endGroup", composer, false)
         }
     }
 
     private fun exportToDefaultDirectory(context: BackupContext) {
-        val activity = activityProvider()
         val targetDir = File(downloadsDir())
-        exportAsync(activity, context.book, "dir=${targetDir.absolutePath}") {
-            targetDir.mkdirs()
-            val file = uniqueFile(targetDir, exportFileName(context.book))
-            file.outputStream().use { output ->
-                zipBookDirectory(context.book, output)
-            }
-            file.absolutePath
+        exportAsync(context, "dir=${targetDir.absolutePath}") { checkCurrent ->
+            LocalExportFiles.exportToDirectory(context.root, targetDir, context.fileName,
+                commit = { action ->
+                    AccountHostRuntime.withCurrentStorage(context.storageIdentity, context.owner) {
+                        checkCurrent(); action()
+                    }
+                }, checkCurrent = checkCurrent).absolutePath
         }
     }
 
     private fun exportToPickedDirectory(context: BackupContext, treeUri: Uri) {
-        val activity = activityProvider()
-        if (activity == null) {
-            XposedBridge.log("$LOG_PREFIX local export picker result skipped: no activity")
-            return
-        }
-        exportAsync(activity, context.book, "tree=$treeUri") {
+        val activity = context.owner
+        exportAsync(context, "tree=$treeUri") { checkCurrent ->
             val parent = DocumentsContract.buildDocumentUriUsingTree(
                 treeUri,
                 DocumentsContract.getTreeDocumentId(treeUri),
             )
-            val document = DocumentsContract.createDocument(
-                activity.contentResolver,
-                parent,
-                EPUB_MIME_TYPE,
-                exportFileName(context.book),
-            ) ?: error("无法创建导出文件")
-            activity.contentResolver.openOutputStream(document)?.use { output ->
-                zipBookDirectory(context.book, output)
-            } ?: error("无法写入导出文件")
-            document.toString()
+            val stage = File.createTempFile(".reamicro-export-", ".epub", activity.cacheDir)
+            try {
+                LocalExportFiles.writeArchive(context.root, stage, checkCurrent)
+                LocalExportFiles.publishCreatedOutput(
+                    create = {
+                        DocumentsContract.createDocument(activity.contentResolver, parent, EPUB_MIME_TYPE, context.fileName)
+                            ?: error("无法创建导出文件")
+                    },
+                    write = { document ->
+                        activity.contentResolver.openOutputStream(document)?.use { output ->
+                            stage.inputStream().use { LocalExportFiles.copyChecked(it, output, checkCurrent) }
+                        } ?: error("无法写入导出文件")
+                    },
+                    cleanup = { document ->
+                        check(DocumentsContract.deleteDocument(activity.contentResolver, document)) { "无法清理未完成的导出文件" }
+                    },
+                    commit = { action ->
+                        // A SAF provider can perform remote I/O; never hold the account lock around its IPC.
+                        checkCurrent(); action(); checkCurrent()
+                    },
+                    checkCurrent = checkCurrent,
+                ).toString()
+            } finally { stage.delete() }
         }
     }
 
-    private fun exportAsync(activity: Activity?, book: Any, targetLog: String, block: () -> String) {
-        activity?.toast("已开始导出到本地存储")
+    private fun exportAsync(context: BackupContext, targetLog: String, block: (() -> Unit) -> String) {
+        if (!isExportCurrent(context)) return
+        context.toast("已开始导出到本地存储")
         com.reamicro.fix.reload.ModuleResources.thread {
             runCatching {
-                val output = block()
-                activity?.toast("已导出到本地存储")
-                XposedBridge.log("$LOG_PREFIX local export completed $targetLog output=$output")
+                requireExportCurrent(context)
+                val output = block { requireExportCurrent(context) }
+                context.toast("已导出到本地存储")
+                HookRuntime.log("$LOG_PREFIX local export completed $targetLog output=$output")
             }.onFailure {
-                activity?.toast("导出失败：${it.message.orEmpty()}")
-                XposedBridge.log("$LOG_PREFIX failed to export local book: ${it.stackTraceToString()}")
+                context.toast("导出失败：${it.message.orEmpty()}")
+                HookRuntime.log("$LOG_PREFIX failed to export local book: ${it.stackTraceToString()}")
             }
         }.apply {
             name = "ReaMicroLocalExport"
@@ -226,223 +182,278 @@ class LocalExportHook(
     }
 
     private fun openDirectoryPicker(context: BackupContext) {
-        val activity = activityProvider()
-        if (activity == null) {
-            XposedBridge.log("$LOG_PREFIX local export picker skipped: no activity")
-            return
+        if (!isExportCurrent(context)) return
+        val activity = context.owner
+        val ticket = synchronized(pickLock) {
+            if (pendingPickContext?.context?.let(::isExportCurrent) == true) {
+                context.toast("目录选择器已打开")
+                return
+            }
+            PendingExportPick(context, nextPickRequestCode).also {
+                nextPickRequestCode = if (nextPickRequestCode == 0x7FFF) REQUEST_PICK_EXPORT_DIR else nextPickRequestCode + 1
+                pendingPickContext = it
+            }
         }
-        pendingPickContext = context
         runCatching {
+            requireExportCurrent(context)
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                 addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
                 addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
             }
-            activity.startActivityForResult(intent, REQUEST_PICK_EXPORT_DIR)
+            activity.startActivityForResult(intent, ticket.requestCode)
         }.onFailure {
-            pendingPickContext = null
-            activity.toast("无法打开目录选择器")
-            XposedBridge.log("$LOG_PREFIX failed to open local export picker: ${it.stackTraceToString()}")
+            synchronized(pickLock) { if (pendingPickContext === ticket) pendingPickContext = null }
+            context.toast("无法打开目录选择器")
+            HookRuntime.log("$LOG_PREFIX failed to open local export picker: ${it.stackTraceToString()}")
         }
     }
 
-    private fun zipBookDirectory(book: Any, output: OutputStream) {
-        val root = bookDirectory(book)
-        check(root.isDirectory) { "本地书籍数据不存在" }
-        ZipOutputStream(output.buffered()).use { zip ->
-            val mimetype = File(root, "mimetype")
-            if (mimetype.isFile) {
-                addStoredFile(zip, mimetype, "mimetype")
-            }
-            root.walkTopDown()
-                .filter { it.isFile && it != mimetype }
-                .forEach { file ->
-                    addDeflatedFile(zip, file, root.toPath().relativize(file.toPath()).toString().replace('\\', '/'))
-                }
-        }
+    private fun createBackupContext(book: Any): BackupContext? = runCatching {
+        val activity = activityProvider() ?: return null
+        val identity = AccountHostRuntime.storageSnapshot(activity) ?: return null
+        val uid = host.field("book.uid").getLong(book)
+        val uuid = host.field("book.uuid").get(book) as String
+        check(uid == identity.accountId) { "图书不属于当前账号" }
+        val root = LocalExportFiles.bookRoot(activity.filesDir, uid, uuid)
+        BackupContext(book, activity, identity, root, exportFileName(book)).also { requireExportCurrent(it) }
+    }.onFailure { HookRuntime.log("$LOG_PREFIX local export context skipped: ${it.message}") }.getOrNull()
+
+    private fun requireExportCurrent(context: BackupContext) {
+        check(enabledProvider()) { "本地导出已关闭" }
+        check(!Thread.currentThread().isInterrupted) { "导出已取消" }
+        check(!context.owner.isFinishing && !context.owner.isDestroyed) { "导出页面已关闭" }
+        check(AccountHostRuntime.isCurrentStorage(context.storageIdentity, context.owner)) { "账号已变更，请重新导出" }
+        val uid = host.field("book.uid").getLong(context.book)
+        val uuid = host.field("book.uuid").get(context.book) as String
+        check(uid == context.storageIdentity.accountId &&
+            LocalExportFiles.bookRoot(context.owner.filesDir, uid, uuid) == context.root) { "图书存储已变更，请重新导出" }
     }
 
-    private fun addStoredFile(zip: ZipOutputStream, file: File, name: String) {
-        val bytes = file.readBytes()
-        val crc = CRC32().apply { update(bytes) }
-        val entry = ZipEntry(name).apply {
-            method = ZipEntry.STORED
-            size = bytes.size.toLong()
-            compressedSize = bytes.size.toLong()
-            this.crc = crc.value
-        }
-        zip.putNextEntry(entry)
-        zip.write(bytes)
-        zip.closeEntry()
-    }
-
-    private fun addDeflatedFile(zip: ZipOutputStream, file: File, name: String) {
-        val patchedOpf = if (name.endsWith(".opf", ignoreCase = true)) patchedOpfBytes(file) else null
-        if (patchedOpf != null) {
-            addDeflatedBytes(zip, patchedOpf, name)
-            return
-        }
-        zip.putNextEntry(ZipEntry(name))
-        BufferedInputStream(FileInputStream(file)).use { input ->
-            input.copyTo(zip)
-        }
-        zip.closeEntry()
-    }
-
-    private fun addDeflatedBytes(zip: ZipOutputStream, bytes: ByteArray, name: String) {
-        zip.putNextEntry(ZipEntry(name))
-        zip.write(bytes)
-        zip.closeEntry()
-    }
-
-    private fun patchedOpfBytes(file: File): ByteArray? {
-        val content = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return null
-        val patched = ensureNcxSpineToc(content)
-        return patched.takeIf { it != content }?.toByteArray(Charsets.UTF_8)
-    }
-
-    private fun ensureNcxSpineToc(content: String): String {
-        if (Regex("""<spine\b[^>]*\btoc\s*=""", RegexOption.IGNORE_CASE).containsMatchIn(content)) {
-            return content
-        }
-        val ncxId = Regex(
-            """<item\b(?=[^>]*\bmedia-type\s*=\s*["']application/x-dtbncx\+xml["'])(?=[^>]*\bid\s*=\s*["']([^"']+)["'])[^>]*>""",
-            RegexOption.IGNORE_CASE,
-        ).find(content)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return content
-        return Regex("""<spine\b""", RegexOption.IGNORE_CASE)
-            .replaceFirst(content, "<spine toc=\"$ncxId\"")
-    }
-
-    private fun bookDirectory(book: Any): File {
-        val activity = activityProvider() ?: error("无法获取阅微上下文")
-        val uid = book.hostFieldLong(BOOK_CLASS, "uid")
-        val uuid = book.hostFieldString(BOOK_CLASS, "uuid")
-        return File(activity.filesDir, "$uid/books/$uuid")
-    }
+    private fun isExportCurrent(context: BackupContext): Boolean = runCatching { requireExportCurrent(context) }.isSuccess
 
     private fun exportFileName(book: Any): String =
-        "${book.hostFieldString(BOOK_CLASS, "title").sanitizeFileName().ifBlank { "book" }}.epub"
-
-    private fun uniqueFile(dir: File, name: String): File {
-        val base = name.substringBeforeLast('.', name)
-        val ext = name.substringAfterLast('.', "")
-        var candidate = File(dir, name)
-        var index = 1
-        while (candidate.exists()) {
-            val nextName = if (ext.isBlank()) "$base ($index)" else "$base ($index).$ext"
-            candidate = File(dir, nextName)
-            index++
-        }
-        return candidate
-    }
+        "${(host.field("book.title").get(book) as String).sanitizeFileName().ifBlank { "book" }}.epub"
 
     private fun String.sanitizeFileName(): String =
-        replace(Regex("""[\\/:*?"<>|]"""), "_").trim().take(120)
-
-    private fun Any.hostFieldString(className: String, fieldName: String): String =
-        hostField(className, fieldName)?.toString().orEmpty()
-
-    private fun Any.hostFieldLong(className: String, fieldName: String): Long {
-        val value = hostField(className, fieldName)
-        return (value as? Number)?.toLong() ?: value?.toString()?.toLong() ?: 0L
-    }
-
-    private fun Any.hostField(className: String, fieldName: String): Any? {
-        val actualName = HostSymbols.resolveFieldName(className, fieldName)
-        var type: Class<*>? = javaClass
-        while (type != null) {
-            val field = runCatching { type!!.getDeclaredField(actualName) }.getOrNull()
-            if (field != null) {
-                field.isAccessible = true
-                return field.get(this)
-            }
-            type = type.superclass
-        }
-        error("$className.$fieldName not found")
-    }
+        replace(Regex("""[\\/:*?"<>|\p{Cntrl}]"""), "_").trim().take(120)
 
     private fun downloadsDir(): String =
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
 
-    private fun localExportIcon(): Any {
-        runCatching {
-            return method(ANDROID_OS_KT_CLASS, ANDROID_OS_METHOD, 0).invoke(null)
-        }
-        val colored = staticObject(APP_ICONS_COLORED_CLASS, "INSTANCE")
-        return method(ANDROID_OS_KT_CLASS, ANDROID_OS_METHOD, 1).invoke(null, colored)
-    }
-
-    private fun method(className: String, methodName: String, parameterCount: Int): Method =
-        staticMethod(className, methodName, parameterCount)
-
-    private fun staticMethod(className: String, methodName: String, parameterCount: Int): Method {
-        val cacheKey = "$className#$methodName/$parameterCount"
-        return synchronized(methodCache) {
-            methodCache.getOrPut(cacheKey) {
-                val owner = Class.forName(
-                    HostSymbols.resolveMethodOwner(className, methodName),
-                    false,
-                    classLoader,
-                )
-                val resolvedName = HostSymbols.resolveMethodName(className, methodName)
-                val candidates = owner.methods.asSequence() + owner.declaredMethods.asSequence()
-                candidates.firstOrNull {
-                    (it.name == resolvedName || it.name == methodName) &&
-                        it.parameterTypes.size == parameterCount
-                }?.apply { isAccessible = true }
-                    ?: error("$className.$methodName/$parameterCount not found")
-            }
-        }
-    }
-
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
-        composeInterop.functionProxy(name, functionClassName, block)
-
-    private fun staticObject(className: String, fieldName: String): Any {
-        val clazz = cls(className)
-        val names = if (fieldName == "INSTANCE") arrayOf("INSTANCE", "Companion") else arrayOf(fieldName)
-        val field = names.firstNotNullOfOrNull { name ->
-            runCatching { clazz.getDeclaredField(name) }.getOrNull()
-        } ?: error("No field ${names.joinToString("/")} in $className")
-        field.isAccessible = true
-        return field.get(null)
-    }
-
-    private fun cls(className: String): Class<*> =
-        XposedHelpers.findClass(className, classLoader)
-
-    private fun targetUnit(): Any? = runCatching {
-        staticObject("kotlin.Unit", "INSTANCE")
-    }.getOrNull()
-
-    private fun Activity.toast(message: String) {
-        runOnUiThread {
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    private fun BackupContext.toast(message: String) {
+        owner.runOnModuleUiThread {
+            if (isExportCurrent(this)) Toast.makeText(owner, message, Toast.LENGTH_SHORT).show()
         }
     }
 
     private data class BackupContext(
         val book: Any,
+        val owner: Activity,
+        val storageIdentity: AccountHostRuntime.Identity,
+        val root: File,
+        val fileName: String,
+        var rendered: Boolean = false,
     )
+    private data class PendingExportPick(val context: BackupContext, val requestCode: Int)
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val MAIN_ACTIVITY_CLASS = HostClasses.Host.MAIN_ACTIVITY
-        const val BOOK_BACKUP_SCREEN_CLASS = HostClasses.Host.BOOK_BACKUP_SCREEN
-        const val BOOK_CLASS = HostClasses.Host.BOOK
-        const val BOOK_BACKUP_CONTENT_METHOD = "BookBackupContent"
-        const val LOCAL_STORAGE_CARD_CLASS = HostClasses.Host.LOCAL_STORAGE_CARD
-        const val LOCAL_STORAGE_CARD_METHOD = "LocalStorageCard"
-        const val AUTH_CARD_CLASS = HostClasses.Host.AUTH_CARD
-        const val DRIVE_AUTH_CARD_METHOD = "DriveAuthCard"
-        const val APP_ICONS_COLORED_CLASS = "app.zhendong.reamicro.arch.icons.AppIcons\$Colored"
-        const val ANDROID_OS_KT_CLASS = HostClasses.Host.ANDROID_OS_ICON
-        const val ANDROID_OS_METHOD = "getAndroidOs"
-        const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
-        const val REQUEST_PICK_EXPORT_DIR = 0x524D50
+        const val BACKUP_FRAME = "reamicro.localExportFrame"
+        const val REQUEST_PICK_EXPORT_DIR = 0x524D
         const val EPUB_MIME_TYPE = "application/epub+zip"
         const val EXPORT_TITLE = "导出到本地存储"
         const val DOWNLOADS_LABEL = "下载"
+    }
+}
+
+internal object LocalExportFiles {
+    fun bookRoot(filesDir: File, accountId: Long, bookId: String): File {
+        require(accountId >= 0L && bookId.isNotBlank() && bookId !in setOf(".", "..") &&
+            bookId.none { it < ' ' || it == '/' || it == '\\' }) { "图书存储标识无效" }
+        val target = File(filesDir.canonicalFile, "$accountId/books/$bookId").absoluteFile
+        val canonical = target.canonicalFile
+        require(canonical == target) { "图书目录已变更" }
+        return canonical
+    }
+
+    fun ensureNcxSpineToc(content: String): String {
+        if (runCatching { com.reamicro.fix.epub.editor.EpubNavigation.parse(content) }.isFailure) return content
+        val nodes = com.reamicro.fix.epub.editor.EpubLinkRewriter.nodes(content, html = false)
+        val packageNode = nodes.filter { it.name == "package" && it.parent == null }.singleOrNull() ?: return content
+        val manifest = packageNode.children.filter { it.name == "manifest" }.singleOrNull() ?: return content
+        val spine = packageNode.children.filter { it.name == "spine" }.singleOrNull() ?: return content
+        if (spine.attr("toc") != null) return content
+        val ncx = manifest.children.filter {
+            it.name == "item" && it.attr("media-type")?.value.equals("application/x-dtbncx+xml", ignoreCase = true)
+        }.singleOrNull() ?: return content
+        val id = ncx.attr("id")?.value?.takeIf { it.isNotBlank() } ?: return content
+        if (manifest.children.count { it.name == "item" && it.attr("id")?.value == id } != 1) return content
+        val token = content.substring(spine.start, spine.openEnd)
+        val name = token.drop(1).takeWhile { it.isLetterOrDigit() || it in "_:.-" }
+        val insertAt = spine.start + name.length + 1
+        val value = com.reamicro.fix.epub.editor.EpubLinkRewriter.xml(id)
+        return content.substring(0, insertAt) + " toc=\"$value\"" + content.substring(insertAt)
+    }
+
+    fun patchedOpfBytes(file: File, checkCurrent: () -> Unit = {}): ByteArray? {
+        checkCurrent()
+        val loaded = runCatching {
+            com.reamicro.fix.epub.editor.EpubTextFiles.load(file,
+                com.reamicro.fix.epub.editor.EpubTextFiles.availableLoadBudget(), checkCurrent)
+        }.getOrElse { checkCurrent(); return null }
+        val patched = ensureNcxSpineToc(loaded.text)
+        if (patched == loaded.text) return null
+        val format = loaded.snapshot.format
+        val encoded = format.charset.newEncoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            .encode(java.nio.CharBuffer.wrap(patched))
+        checkCurrent()
+        return ByteArray(format.bom.size + encoded.remaining()).also {
+            format.bom.copyInto(it)
+            encoded.get(it, format.bom.size, it.size - format.bom.size)
+        }
+    }
+
+    fun zipBookDirectory(root: File, output: OutputStream, checkCurrent: () -> Unit = {}) {
+        checkCurrent()
+        require(root.canonicalFile == root.absoluteFile && root.isDirectory) { "图书目录不存在或已变更" }
+        val leaveOpen = object : FilterOutputStream(output) {
+            override fun write(bytes: ByteArray, offset: Int, length: Int) { output.write(bytes, offset, length) }
+            override fun close() { flush() }
+        }
+        ZipOutputStream(leaveOpen.buffered()).use { zip ->
+            val mimetype = File(root, "mimetype")
+            if (Files.isRegularFile(mimetype.toPath(), LinkOption.NOFOLLOW_LINKS)) addStoredFile(zip, mimetype, checkCurrent)
+            root.walkTopDown()
+                .onEnter { checkCurrent(); !Files.isSymbolicLink(it.toPath()) && !it.name.startsWith(".reamicro-") }
+                .filter { it != mimetype && !it.name.startsWith(".reamicro-") &&
+                    Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) }
+                .forEach { file ->
+                    checkCurrent()
+                    require(file.canonicalFile.toPath().startsWith(root.toPath())) { "导出文件路径已变更" }
+                    val name = file.relativeTo(root).invariantSeparatorsPath
+                    val size = file.length()
+                    val modified = file.lastModified()
+                    val patched = if (name.endsWith(".opf", true)) patchedOpfBytes(file, checkCurrent) else null
+                    zip.putNextEntry(ZipEntry(name))
+                    if (patched != null) {
+                        var offset = 0
+                        while (offset < patched.size) {
+                            checkCurrent()
+                            val count = minOf(64 * 1024, patched.size - offset)
+                            zip.write(patched, offset, count); offset += count
+                        }
+                    } else Files.newInputStream(file.toPath(), LinkOption.NOFOLLOW_LINKS).buffered().use {
+                        copyChecked(it, zip, checkCurrent)
+                    }
+                    checkCurrent()
+                    check(file.length() == size && file.lastModified() == modified) { "导出期间图书文件已改变，请重试" }
+                    zip.closeEntry()
+                }
+            checkCurrent()
+        }
+    }
+
+    private fun addStoredFile(zip: ZipOutputStream, file: File, checkCurrent: () -> Unit) {
+        val size = file.length()
+        val modified = file.lastModified()
+        val crc = CRC32()
+        var counted = 0L
+        Files.newInputStream(file.toPath(), LinkOption.NOFOLLOW_LINKS).buffered().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                checkCurrent()
+                val count = input.read(buffer)
+                if (count < 0) break
+                crc.update(buffer, 0, count); counted += count
+            }
+        }
+        check(counted == size && file.length() == size && file.lastModified() == modified) { "导出期间 mimetype 已改变" }
+        zip.putNextEntry(ZipEntry("mimetype").apply {
+            method = ZipEntry.STORED; this.size = size; compressedSize = size; this.crc = crc.value
+        })
+        Files.newInputStream(file.toPath(), LinkOption.NOFOLLOW_LINKS).buffered().use {
+            copyChecked(it, zip, checkCurrent)
+        }
+        checkCurrent()
+        check(file.length() == size && file.lastModified() == modified) { "导出期间 mimetype 已改变" }
+        zip.closeEntry()
+    }
+
+    fun copyChecked(input: java.io.InputStream, output: OutputStream, checkCurrent: () -> Unit) {
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            checkCurrent()
+            val count = input.read(buffer)
+            if (count < 0) break
+            output.write(buffer, 0, count)
+        }
+        checkCurrent()
+    }
+
+    fun writeArchive(root: File, target: File, checkCurrent: () -> Unit) {
+        target.outputStream().use { output ->
+            zipBookDirectory(root, output, checkCurrent)
+            output.fd.sync()
+        }
+    }
+
+    fun exportToDirectory(root: File, directory: File, fileName: String,
+        commit: (() -> Unit) -> Unit = { it() }, checkCurrent: () -> Unit = {}): File {
+        checkCurrent()
+        require(fileName.isNotBlank() && File(fileName).name == fileName && fileName.none { it == '\\' || it < ' ' }) { "导出文件名无效" }
+        require(directory.isDirectory || directory.mkdirs()) { "无法创建导出目录" }
+        val stage = File.createTempFile(".reamicro-export-", ".epub", directory)
+        try {
+            writeArchive(root, stage, checkCurrent)
+            val expected = com.reamicro.fix.epub.editor.VerifiedFileIO.digest(stage)
+            var published: File? = null
+            commit {
+                check(published == null) { "导出文件已经提交" }
+                checkCurrent()
+                val stem = fileName.substringBeforeLast('.', fileName)
+                val extension = fileName.substringAfterLast('.', "").let { if (it.isBlank()) "" else ".$it" }
+                for (index in 0..9999) {
+                    val target = File(directory, if (index == 0) fileName else "$stem ($index)$extension")
+                    try {
+                        Files.move(stage.toPath(), target.toPath())
+                        published = target
+                        break
+                    } catch (_: java.nio.file.FileAlreadyExistsException) { }
+                }
+                check(published != null) { "无法生成唯一导出文件名" }
+            }
+            val result = checkNotNull(published) { "导出未提交，原目录文件已保留" }
+            com.reamicro.fix.epub.editor.VerifiedFileIO.requireMatches(result, expected)
+            return result
+        } finally { stage.delete() }
+    }
+
+    fun <T : Any> publishCreatedOutput(create: () -> T, write: (T) -> Unit, cleanup: (T) -> Unit,
+        commit: (() -> Unit) -> Unit, checkCurrent: () -> Unit): T {
+        var created: T? = null
+        try {
+            commit {
+                check(created == null) { "导出目标已经创建" }
+                checkCurrent()
+                created = create()
+            }
+            val result = checkNotNull(created) { "导出目标未创建" }
+            checkCurrent()
+            write(result)
+            checkCurrent()
+            return result
+        } catch (failure: Exception) {
+            created?.let {
+                try { cleanup(it) } catch (cleanupFailure: Exception) {
+                    failure.addSuppressed(cleanupFailure)
+                    throw IllegalStateException("导出未完成，未完成文件也无法清理，请检查目标目录", failure)
+                }
+            }
+            throw failure
+        }
     }
 }

@@ -1,14 +1,8 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.hostMethod
+import com.reamicro.fix.core.HostReaderLifecycleBindings
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 
 internal class ReaderSearchJumpBridge(private val reader: ReaderHook) {
     fun install() {
@@ -17,56 +11,43 @@ internal class ReaderSearchJumpBridge(private val reader: ReaderHook) {
         }
         reader.searchScrollBridge = ReaderSearchScrollBridge(reader).also { it.install() }
         reader.searchPageBridge = ReaderSearchPageBridge(reader).also { it.install() }
-        val loader = reader.classLoader
-        val vm = loader.hostClass("app.zhendong.reamicro.ui.reader.ReaderViewModel")
-        val book = loader.hostClass("app.zhendong.reamicro.data.db.entity.Book")
-        val capture = vm.hostMethod("captureReturnPosition", book)
-        // R8 在 2.3.3-b3 只保留父接口重载 onIntent(arch.UiIntent)，精确签名匹配会抛
-        // NoSuchMethodException 让整条 searchJumpBridge 装不上；与 ReaderHook 主链一致，
-        // 按「同名 + 单参 + 形参能接收 ReaderUiIntent」收集后逐个挂钩。
-        val readerUiIntentClass = loader.hostClass("app.zhendong.reamicro.ui.reader.ReaderUiIntent")
-        val onIntentMethods = vm.declaredMethods.filter { method ->
-            method.hostNameMatches("onIntent") &&
-                method.parameterTypes.size == 1 &&
-                method.parameterTypes[0].isAssignableFrom(readerUiIntentClass)
-        }
-        if (onIntentMethods.isEmpty()) {
-            error("ReaderViewModel onIntent(${readerUiIntentClass.name}) not found on ${vm.name}")
-        }
-        XposedBridge.hookMethod(capture, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val host = requireNotNull(HostReaderLifecycleBindings.current) { "Reader lifecycle contract unavailable" }
+        val captureHook = HookRuntime.hookMethod(host.method("capture"), object : HookCallback() {
+            override fun before(param: Call) {
                 if (param.thisObject !== reader.currentViewModelRef?.get() || reader.pendingSearchReturnCaptures <= 0) return
                 reader.pendingSearchReturnCaptures -= 1
                 param.result = null
             }
         })
-        val onIntentCallback = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val onIntentCallback = object : HookCallback() {
+            override fun before(param: Call) {
                 if (param.thisObject !== reader.currentViewModelRef?.get() || reader.dispatchingSearchJump) return
-                val intent = param.args?.firstOrNull()?.javaClass?.name
-                    ?.let(HostSymbols::logicalSimpleName) ?: return
+                val intent = param.args?.firstOrNull()?.let(host::intentName) ?: return
                 if (intent !in setOf("MarkJump", "BookmarkJump", "JumpChapter", "JumpProgress", "ReturnToOriginalPosition")) return
 
                 reader.pendingSearchReturnCaptures = 0
                 reader.clearStaleSearchNavigation()
             }
         }
-        onIntentMethods.forEach { XposedBridge.hookMethod(it, onIntentCallback) }
+        try {
+            HookRuntime.hookMethod(host.method("dispatch"), onIntentCallback)
+        } catch (error: Throwable) {
+            captureHook.unhook()
+            throw error
+        }
+        HookRuntime.deoptimize(host.method("dispatch"))
     }
 }
 
 internal fun ReaderHook.showSearchReaderContent(viewModel: Any): Boolean {
     if (!readerBottomMenuVisible) return true
     return runCatching {
-        val statusClass = classLoader.hostClass("app.zhendong.reamicro.ui.reader.UiStatus")
-        val readerStatus = classLoader.hostClass("app.zhendong.reamicro.ui.reader.UiStatus\$Reader")
-            .hostField("INSTANCE").get(null)
-        val intent = classLoader.hostClass("app.zhendong.reamicro.ui.reader.ReaderUiIntent\$UpdateUIStatus")
-            .getConstructor(statusClass).newInstance(readerStatus)
-        XposedHelpers.callMethod(viewModel, "onIntent", intent)
+        val host = requireNotNull(HostReaderLifecycleBindings.current)
+        val intent = host.constructor("UpdateUIStatus").newInstance(host.instance("status.reader"))
+        host.method("dispatch").invoke(viewModel, intent)
         true
     }.getOrElse {
-        XposedBridge.logError("ReaMicro search close menu failed type=${it.javaClass.simpleName}", it)
+        HookRuntime.logError("ReaMicro search close menu failed type=${it.javaClass.simpleName}", it)
         false
     }
 }
@@ -76,10 +57,10 @@ internal fun ReaderHook.clearHostSearchJump() {
     val previous = dispatchingSearchJump
     dispatchingSearchJump = true
     try {
-        val type = classLoader.hostClass("app.zhendong.reamicro.ui.reader.ReaderUiIntent\$ClearJump")
-        XposedHelpers.callMethod(vm, "onIntent", type.hostField("INSTANCE").get(null))
+        val host = requireNotNull(HostReaderLifecycleBindings.current)
+        host.method("dispatch").invoke(vm, host.instance("intent.ClearJump"))
     } catch (e: Exception) {
-        XposedBridge.log("ReaMicro search ClearJump failed: $e")
+        HookRuntime.log("ReaMicro search ClearJump failed: $e")
     } finally { dispatchingSearchJump = previous }
 }
 

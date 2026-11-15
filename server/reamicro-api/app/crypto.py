@@ -9,32 +9,51 @@ from app import runtime
 from app.config_store import load_config
 
 
-def secret_cipher_key() -> bytes:
-    material = str(load_config().get("secretKey", "")) or runtime.SECRET_KEY or runtime.ADMIN_PASSWORD
+def secret_key_material(config: dict[str, Any]) -> str:
+    material = str(config.get("secretKey", "")) or runtime.SECRET_KEY or runtime.ADMIN_PASSWORD
     if not material:
         raise ValueError("未配置 REAMICRO_SECRET_KEY 或管理密码")
-    return hashlib.sha256(material.encode("utf-8")).digest()
+    return material
 
 
-def secret_key_id() -> str:
-    material = str(load_config().get("secretKey", "")) or runtime.SECRET_KEY or runtime.ADMIN_PASSWORD
+def secret_key_id(material: str) -> str:
     return "key_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
 
 
 def encrypt_secret(value: Any) -> str:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    material = secret_key_material(load_config())
     nonce = secrets.token_bytes(12)
     body = json.dumps(value, ensure_ascii=False).encode("utf-8")
-    encrypted = AESGCM(secret_cipher_key()).encrypt(nonce, body, b"reamicro-task-v1")
-    return "RCSEC2:" + secret_key_id() + ":" + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+    encrypted = AESGCM(hashlib.sha256(material.encode("utf-8")).digest()).encrypt(nonce, body, b"reamicro-task-v1")
+    return "RCSEC2:" + secret_key_id(material) + ":" + base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
 
 
 def decrypt_secret(value: str) -> Any:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    encoded = value.split(":", 2)[-1] if value.startswith("RCSEC2:") else value
+    from cryptography.exceptions import InvalidTag
+    config = load_config()
+    materials = [secret_key_material(config)]
+    historical = config.get("secretKeyHistory", [])
+    if isinstance(historical, list):
+        materials.extend(item for item in historical if isinstance(item, str) and item)
+    key_id = ""
+    if value.startswith("RCSEC2:"):
+        _, key_id, encoded = value.split(":", 2)
+    else:
+        encoded = value
     raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
-    body = AESGCM(secret_cipher_key()).decrypt(raw[:12], raw[12:], b"reamicro-task-v1")
-    return json.loads(body.decode("utf-8"))
+    if len(raw) < 28:
+        raise ValueError("加密数据不完整")
+    for material in dict.fromkeys(materials):
+        if key_id and secret_key_id(material) != key_id:
+            continue
+        try:
+            body = AESGCM(hashlib.sha256(material.encode("utf-8")).digest()).decrypt(raw[:12], raw[12:], b"reamicro-task-v1")
+            return json.loads(body.decode("utf-8"))
+        except InvalidTag:
+            continue
+    raise ValueError("无法使用服务器密钥解密数据")
 
 
 def password_hash(password: str, salt: bytes | None = None) -> str:

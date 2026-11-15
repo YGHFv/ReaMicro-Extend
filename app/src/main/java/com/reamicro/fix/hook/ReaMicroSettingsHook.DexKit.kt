@@ -12,29 +12,17 @@ import com.reamicro.fix.core.HostRestart
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
-import java.util.concurrent.atomic.AtomicBoolean
-
-private val dexKitRescanning = AtomicBoolean(false)
 
 internal fun ReaMicroSettingsHook.openDexKitScanDialog() {
     val activity = activityProvider() ?: return
     showDexKitDialog(activity, HostAutoScanner.snapshot(), onRescan = {
-        if (DexKitUpdateScan.isBusy() || !dexKitRescanning.compareAndSet(false, true)) return@showDexKitDialog
-        Toast.makeText(activity, "正在扫描，结果将自动显示", Toast.LENGTH_SHORT).show()
-        com.reamicro.fix.reload.ModuleResources.thread({
-            try {
-                HostAutoScanner.scan(activity.applicationInfo.sourceDir, activity.applicationInfo.dataDir, force = true)
-            } finally {
-                dexKitRescanning.set(false)
-                activity.runOnUiThread {
-                    if (!activity.isFinishing && !activity.isDestroyed) openDexKitScanDialog()
-                }
-            }
-        }, "ReaMicro-DexKit").start()
+        if (DexKitUpdateScan.requestManualScan(activity)) {
+            Toast.makeText(activity, "正在扫描，结果将自动显示", Toast.LENGTH_SHORT).show()
+        }
     })
 }
 
-internal fun isManualDexKitScanning(): Boolean = dexKitRescanning.get()
+internal fun isManualDexKitScanning(): Boolean = DexKitUpdateScan.isManualScanning()
 
 internal fun ReaMicroSettingsHook.showDexKitUpdateDialog(
     activity: Activity,
@@ -55,7 +43,8 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     onRescan: (() -> Unit)? = null,
 ): Dialog {
     val colors = SettingsDialogColors(activity)
-    val dialog = Dialog(activity)
+    val dialog = settingsDialog(activity)
+    HostSettingsDialogs.useApplicationTheme(dialog)
     val card = settingsDialogCard(activity, colors)
     val title = settingsDialogTitle(activity, if (scanning) "DexKit 自动扫描" else "DexKit 扫描结果", colors)
     if (scanning) {
@@ -78,49 +67,45 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     } else {
         card.addView(title)
     }
-    val notice = if (!scanning && error == null && report?.cached == true) {
-        DexKitScanNotice("已读取与当前宿主及扫描规则匹配的记录。扫描缓存不等于功能验收结果。")
-    } else dexKitScanNotice(
-        scanning, error, HostSymbols.profileId, report != null, report?.profile != null,
-        report?.failures?.isNotEmpty() == true, report?.unchanged == true,
+    val scanError = error ?: report?.takeIf { !it.functionalityComplete }?.runtimeFailures?.firstOrNull()
+    val notice = dexKitScanNotice(
+        scanning, scanError, HostSymbols.profileId, report != null, report?.profile != null,
+        report?.runtimeFailures?.isNotEmpty() == true, report?.unchanged == true, report?.cached == true,
     )
     val lines = listOfNotNull(
-        reason,
-        if (scanning) "正在重新扫描宿主，请稍候…" else report?.summary() ?: "扫描未完成",
-        "宿主：${activity.packageManager.getPackageInfo(activity.packageName, 0).versionName}",
-        "模块：${moduleBuildVersionLine()}",
-        "定位成功不等于全部功能验收；签名变更仍需适配。",
-        notice.message,
+        reason?.let { it to "BodyMedium" },
+        (if (scanning) "正在重新扫描宿主，请稍候…" else report?.summary() ?: "扫描未完成") to "BodyLarge",
+        "宿主：${activity.packageManager.getPackageInfo(activity.packageName, 0).versionName}" to "BodyMedium",
+        "模块：${moduleBuildVersionLine()}" to "BodyMedium",
+        "定位成功不等于全部功能验收；签名变更仍需适配。" to "BodySmall",
+        notice.message to "BodyMedium",
     )
-    lines.forEach { line -> card.addView(settingsDialogStatus(activity, line, colors)) }
+    lines.forEach { (line, role) ->
+        card.addView(settingsDialogStatus(activity, line, colors).apply {
+            EmbeddedHostUi.text(this, role)
+            if (role == "BodyLarge") setTextColor(colors.title)
+        })
+    }
     if (!scanning) {
-        val actions = settingsDialogActions(activity)
+        val actions = mutableListOf<HostSettingsDialogs.Action>()
         if (notice.restartRequired) {
-            actions.addView(settingsDialogButton(activity, "重启阅微", colors).apply {
-                setOnClickListener {
-                    if (HostRestart.request(activity)) {
-                        dialog.dismiss()
-                        onClose?.invoke()
-                    }
-                }
-            }, settingsDialogButtonParams(activity))
-        } else {
-            if (onRescan != null) actions.addView(
-                settingsDialogButton(activity, "重新扫描", colors, SettingsDialogButtonRole.Neutral).apply {
-                    setOnClickListener {
-                        dialog.dismiss()
-                        onRescan()
-                    }
-                }, settingsDialogButtonParams(activity),
-            )
-            actions.addView(settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-                setOnClickListener {
+            actions += HostSettingsDialogs.Action("重启阅微") {
+                if (HostRestart.request(activity)) {
                     dialog.dismiss()
                     onClose?.invoke()
                 }
-            }, settingsDialogButtonParams(activity))
+            }
+        } else if (onRescan != null) {
+            actions += HostSettingsDialogs.Action("重新扫描") {
+                dialog.dismiss()
+                onRescan()
+            }
         }
-        card.addView(actions)
+        actions += HostSettingsDialogs.Action("关闭") {
+            dialog.dismiss()
+            onClose?.invoke()
+        }
+        HostSettingsDialogs.setActions(dialog, actions)
         dialog.setOnCancelListener { onClose?.invoke() }
     } else {
         dialog.setCancelable(false)

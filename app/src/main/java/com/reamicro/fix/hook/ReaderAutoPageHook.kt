@@ -2,544 +2,252 @@ package com.reamicro.fix.hook
 
 import android.app.Activity
 import android.content.Context
-import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
 import com.reamicro.fix.core.HookInstallReport
-import com.reamicro.fix.core.ComposeInterop
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.B2NativeUi
-import com.reamicro.fix.core.HostAndroidViews
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostClassOrNull
-import com.reamicro.fix.core.hostNameMatches
+import com.reamicro.fix.core.HostReaderFeatures
+import com.reamicro.fix.core.HostReaderExtrasBindings
+import com.reamicro.fix.core.HostReaderLifecycleBindings
+import com.reamicro.fix.core.HostReaderMenuBindings
+import com.reamicro.fix.core.HostReaderPositionBindings
+import com.reamicro.fix.reader.ReaderAutoPageSession
+import com.reamicro.fix.reader.ReaderAutoPageValues
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
-import java.lang.reflect.Method
-import java.util.Locale
-import kotlin.math.roundToInt
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToLong
 
 class ReaderAutoPageHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
 ) {
-
-    private val composeInterop = ComposeInterop(
-        classLoader = classLoader,
-        resolveClass = ::cls,
-        unitInstance = ::targetUnit,
-        logPrefix = LOG_PREFIX,
-    )
-
     private val mainHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
-    private val methodCache = HashMap<String, Method>()
-    private val readerSettingsBuildDepth = ThreadLocal.withInitial { 0 }
-    private val autoPageItemInjected = ThreadLocal.withInitial { false }
-    private val renderingAutoPageSection = ThreadLocal.withInitial { false }
-
-    private val readerSettingsComposer = ThreadLocal<Any?>()
-
-    private var currentIntentReceiverRef: WeakReference<Any>? = null
     private var currentViewModelRef: WeakReference<Any>? = null
     private var currentSettingsCloseRef: WeakReference<Any>? = null
-    private var runningState: Any? = null
-    private var timerHoursState: Any? = null
-    private var intervalSecondsState: Any? = null
-    private var autoPageRunnable: Runnable? = null
-    private var autoPageEndAtMs: Long = Long.MAX_VALUE
-    private var autoPageEnabled: Boolean = false
-    private var pausedForReaderExit: Boolean = false
-    private var pausedRemainingMs: Long = Long.MAX_VALUE
+    private var currentActivityRef: WeakReference<Activity>? = null
+    private var currentBookKey: String? = null
+    private var readerVisible = false
+    private var activityResumed = false
+    private var autoPageBookKey: String? = null
+    private val executionLock = Any()
+    private val executionRevision = AtomicLong()
+    private var autoPageExecutionRevision: Long? = null
+    private var autoPageViewModelRef: WeakReference<Any>? = null
+    private val autoPageSession = ReaderAutoPageSession(SystemClock::elapsedRealtime)
+    private var pendingStartToast = false
+    private var autoPageIdentity: AccountHostRuntime.Identity? = null
+    private var host: HostReaderExtrasBindings.Contract? = null
+    internal var nativeStateChanged: (() -> Unit)? = null
+    private var nativeUiState: Any? = null
+    private var nativeUiStateRevision = 0
 
     fun install() {
-        activeInstance = this
-        hookReaderViewModel()
-        hookTapGesturesBox()
-        hookReaderSettings()
-    }
-
-    private fun hookReaderViewModel() {
-        HookInstallReport.install("ReaderAutoPageHook", "hookReaderViewModel") {
-            val cls = cls(READER_VIEW_MODEL_CLASS)
-            XposedBridge.hookAllConstructors(cls, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    currentViewModelRef = WeakReference(param.thisObject)
-                    resumeAutoPageAfterReaderReturn()
-                }
-            })
-            hookViewModelCleared(cls) { viewModel ->
-                if (currentViewModelRef?.get() !== viewModel) return@hookViewModelCleared
-                currentViewModelRef = null
-                currentIntentReceiverRef = null
-                pauseAutoPageForReaderExit()
-            }
-            XposedBridge.log("$LOG_PREFIX Reader auto page ViewModel hook installed")
-        }
-    }
-
-    private fun hookTapGesturesBox() {
-        runCatching {
-            // B4 将手势容器内联到 Reader 层，旧 facade 不存在；找不到时保留 VM 兜底。
-            val gestureClass = classLoader.hostClassOrNull(TAP_GESTURES_BOX_CLASS) ?: return@runCatching
-            gestureClass.declaredMethods
-                .filter { it.hostNameMatches(TAP_GESTURES_BOX_METHOD) && it.parameterTypes.size == 4 }
-                .forEach { method ->
-                    method.isAccessible = true
-                    XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            param.args.getOrNull(0)?.let { currentIntentReceiverRef = WeakReference(it) }
-                            resumeAutoPageAfterReaderReturn()
+        HookInstallReport.install("ReaderAutoPageHook", "receiver") {
+            val symbols = requireNotNull(HostReaderFeatures.current) { "Reader native controls unavailable" }
+            val contract = requireNotNull(HostReaderExtrasBindings.autoPage) { "Reader auto-page contract unavailable" }
+            val lifecycle = requireNotNull(HostReaderLifecycleBindings.current) { "Reader visibility contract unavailable" }
+            val menu = requireNotNull(HostReaderMenuBindings.current) { "Reader menu visibility contract unavailable" }
+            val position = requireNotNull(HostReaderPositionBindings.current) { "Reader identity contract unavailable" }
+            val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+            try {
+                check(symbols["state"].returnType == contract.type("mutableState")) { "Reader UI state contract mismatch" }
+                check(position.field("state#status").type.isAssignableFrom(lifecycle.type("status.reader")) &&
+                    lifecycle.type("vm") == contract.type("vm") && position.type("vm") == contract.type("vm"))
+                nativeUiState = requireNotNull(symbols["state"].invoke(null, 0))
+                nativeUiStateRevision = 0
+                contract.constructors("vm.").forEach { constructor ->
+                    handles += HookRuntime.hookMethod(constructor, object : HookCallback() {
+                        override fun after(param: Call) {
+                            if (param.throwable != null) return
+                            val receiver = param.thisObject ?: return
+                            onMain {
+                                // Construction is not proof that the reading page is visible.
+                                if (currentViewModelRef?.get() == null) currentViewModelRef = WeakReference(receiver)
+                            }
                         }
                     })
                 }
-            XposedBridge.log("$LOG_PREFIX Reader auto page TapGesturesBox hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX Reader auto page TapGesturesBox hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookReaderSettings() {
-        if (HostSymbols.abiProfileId == "2.3.3-b4") {
-            hookB4ReaderSettings()
-            return
-        }
-        runCatching {
-            val settingsClass = cls(READER_SETTINGS_CLASS)
-
-            val screenMethod = settingsClass.declaredMethods.firstOrNull {
-                it.hostNameMatches(READER_SETTINGS_SCREEN_METHOD)
-            } ?: error(
-                "$READER_SETTINGS_CLASS.$READER_SETTINGS_SCREEN_METHOD not found; " +
-                    "methods=" + settingsClass.declaredMethods.joinToString { "${it.name}/${it.parameterTypes.size}" },
-            )
-            screenMethod.isAccessible = true
-
-            val composerClass = cls(COMPOSER_CLASS)
-            val composerIndex = screenMethod.parameterTypes.indexOfFirst { it == composerClass }
-            if (composerIndex < 0) error("Composer param not found in $READER_SETTINGS_SCREEN_METHOD")
-
-            XposedBridge.hookMethod(screenMethod, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-
-                    readerSettingsBuildDepth.set(1)
-                    autoPageItemInjected.set(false)
-                    captureSettingsCloseCallback(param.args.getOrNull(0))
-                    val autoPageVisible = canRunAutoPage()
-                    readerSettingsComposer.set(param.args.getOrNull(composerIndex).takeIf { autoPageVisible })
-                    log(
-                        "ReaderMoreSettingScreen before depth=${readerSettingsBuildDepth.get()} " +
-                            "autoPageVisible=$autoPageVisible",
-                    )
-                }
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    log("ReaderMoreSettingScreen after depth=${readerSettingsBuildDepth.get()} injected=${autoPageItemInjected.get()}")
-
-                    com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper()).post {
-                        readerSettingsBuildDepth.set(0)
-                        readerSettingsComposer.set(null)
+                handles += HookRuntime.hookMethod(contract.method("dispatch"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val receiver = param.thisObject ?: return
+                        val intent = param.args.firstOrNull()
+                        onMain {
+                            if (currentViewModelRef?.get() == null) currentViewModelRef = WeakReference(receiver)
+                            if (currentViewModelRef?.get() !== receiver) return@onMain
+                            if (intent != null && lifecycle.type("intent.UpdateUIStatus").isInstance(intent)) {
+                                val status = lifecycle.field("UpdateUIStatus.status").get(intent)
+                                // A Reader intent still waits for the corresponding native composition.
+                                if (!lifecycle.type("status.reader").isInstance(status)) readerVisible = false
+                                reconcileVisibility()
+                            } else if (isRunning() && !ownsAutoPage()) stopAutoPage(showToast = false)
+                        }
                     }
-                }
-            })
-
-            val lazyListScopeClass = cls(LAZY_LIST_SCOPE_CLASS)
-            val itemDefaultMethod = if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                lazyListScopeClass.declaredMethods.firstOrNull {
-                    it.name == "n" && it.parameterTypes.size == 3
-                }
-            } else {
-                lazyListScopeClass.declaredMethods.firstOrNull {
-                    it.hostNameMatches(LAZY_ITEM_DEFAULT_METHOD) && it.parameterTypes.size == 6
-                }
-            } ?: error("LazyListScope item method not found")
-            itemDefaultMethod.isAccessible = true
-
-            XposedBridge.hookMethod(itemDefaultMethod, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (renderingAutoPageSection.get()) return
-
-                    val composer = readerSettingsComposer.get() ?: return
-                    if (autoPageItemInjected.get()) return
-                    autoPageItemInjected.set(true)
-                    val lazyListScope = param.thisObject ?: return
-                    insertAutoPageItem(lazyListScope, composer)
-                }
-            })
-
-            XposedBridge.log("$LOG_PREFIX Reader auto page settings UI hook installed (LazyListScope.item)")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX Reader auto page settings UI hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookB4ReaderSettings() {
-        HookInstallReport.install("ReaderAutoPageHook", "b4ReaderSettings") {
-            val moreSettingsMethod = cls(READER_SETTINGS_CLASS).declaredMethods.firstOrNull {
-                it.hostNameMatches(READER_SETTINGS_SCREEN_METHOD) && it.parameterTypes.size == 3
-            } ?: error("$READER_SETTINGS_CLASS.$READER_SETTINGS_SCREEN_METHOD/3 not found")
-            require(cls(FUNCTION0_CLASS).isAssignableFrom(moreSettingsMethod.parameterTypes[0])) {
-                "B4 ReaderMoreSettingScreen first parameter must be Function0"
-            }
-            moreSettingsMethod.isAccessible = true
-            XposedBridge.hookMethod(moreSettingsMethod, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    captureSettingsCloseCallback(param.args.getOrNull(0))
-                    log("B4 ReaderMoreSettingScreen entered autoPageVisible=${canRunAutoPage()}")
-                }
-            })
-
-            // nf8 是更多设置的唯一 LazyList 回调，不能依赖外层组合结束后的 ThreadLocal。
-            val callback = cls("ReaMicroHost.ReaderMoreSettingsContent").getDeclaredMethod("invoke", Any::class.java)
-            XposedBridge.hookMethod(callback, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!canRunAutoPage()) return
-                    val scope = param.args[0] ?: return
-                    val content = B2NativeUi(classLoader).lambda(
-                        AUTO_PAGE_ITEM_KEY,
-                        functionProxy("B4AutoPageItem", FUNCTION3_CLASS) { args ->
-                            val composer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-                            ensureUiStates()
-                            runningState?.method0("getValue")
-                            val factory = functionProxy("B4AutoPageFactory", FUNCTION1_CLASS) { values ->
-                                val context = values?.firstOrNull() as? Context ?: error("自动阅读上下文不可用")
-                                b4AutoPageView(context)
+                })
+                handles += HookRuntime.hookMethod(contract.method("clear"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        val receiver = param.thisObject ?: return
+                        onMain {
+                            if (currentViewModelRef?.get() !== receiver) return@onMain
+                            stopAutoPage(showToast = false)
+                            clearReader()
+                        }
+                    }
+                })
+                handles += HookRuntime.hookMethod(menu.method("bottomBar"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        observeReaderComposition(param.args.getOrNull(0), param.args.getOrNull(1), param.args.getOrNull(2))
+                    }
+                })
+                handles += HookRuntime.hookMethod(menu.method("bottomContent"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val callback = param.thisObject ?: return
+                        if (!menu.bottomMatches(callback)) return
+                        observeReaderComposition(menu.field("bottom.receiver").get(callback),
+                            menu.field("bottom.book").get(callback), menu.field("bottom.status").get(callback))
+                    }
+                })
+                for (role in listOf("home", "bookshelf")) {
+                    handles += HookRuntime.hookMethod(lifecycle.method(role), object : HookCallback() {
+                        override fun before(param: Call) {
+                            onMain {
+                                readerVisible = false
+                                currentSettingsCloseRef = null
+                                reconcileVisibility()
                             }
-                            HostAndroidViews(classLoader).render(factory, B2NativeUi(classLoader).modifier(), composer)
-                            targetUnit()
-                        },
-                    )
-                    runCatching {
-                        B2NativeUi(classLoader).addItem(scope, AUTO_PAGE_ITEM_KEY, content)
-                    }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX B4 ReaderMoreSetting auto-page item failed: ${it.stackTraceToString()}")
-                    }
+                        }
+                    })
                 }
-            })
-            XposedBridge.deoptimize(callback)
-        }
-    }
-
-    private fun b4AutoPageView(context: Context): android.widget.LinearLayout {
-        val palette = requireNotNull(EmbeddedHostUi.snapshot(context))
-        val root = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            val inset = EmbeddedHostUi.dp(context, 16f).toInt()
-            setPadding(inset, inset, inset, inset)
-        }
-        fun text(value: String) = android.widget.TextView(context).apply {
-            text = value
-            textSize = 14f
-            setTextColor(palette.roles.getValue("OnBackground"))
-            EmbeddedHostUi.uiTypeface(context)?.let { typeface = it }
-        }
-        val title = text("自动阅读")
-        root.addView(title)
-        val timer = text("定时：" + formatHours(timerHours()) + " 小时（0 为不限时）")
-        root.addView(timer)
-        root.addView(android.widget.SeekBar(context).apply {
-            max = 50
-            progress = (timerHours() * 10).roundToInt()
-            contentDescription = "自动阅读定时"
-            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
-                    if (fromUser) setTimerHours(value / 10f)
-                    timer.text = "定时：" + formatHours(value / 10f) + " 小时（0 为不限时）"
+                for (member in listOf(menu.method("bottomBar"), menu.method("bottomContent"))) HookRuntime.deoptimize(member)
+                host = contract
+                check(ReaderPageControlsHook(symbols, activityProvider, this) {
+                    val settings = settingsProvider()
+                    settings.moduleEnabled && settings.readerPageAnimationEnabled
+                }.install()) { "Native reader controls unavailable" }
+                activeInstance = this
+                com.reamicro.fix.reload.ModuleResources.cleanup {
+                    nativeStateChanged = null
+                    nativeUiState = null
+                    stopAutoPage(showToast = false)
+                    mainHandler.removeCallbacksAndMessages(READER_VISIBILITY_TOKEN)
+                    clearReader()
+                    currentActivityRef = null
+                    activityResumed = false
+                    if (activeInstance === this) activeInstance = null
                 }
-                override fun onStartTrackingTouch(bar: android.widget.SeekBar?) = Unit
-                override fun onStopTrackingTouch(bar: android.widget.SeekBar?) = Unit
-            })
-        })
-        val interval = text("间隔：" + intervalSeconds() + " 秒")
-        root.addView(interval)
-        root.addView(android.widget.SeekBar(context).apply {
-            max = MAX_INTERVAL_SECONDS - MIN_INTERVAL_SECONDS
-            progress = intervalSeconds() - MIN_INTERVAL_SECONDS
-            contentDescription = "自动阅读间隔"
-            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: android.widget.SeekBar?, value: Int, fromUser: Boolean) {
-                    if (fromUser) setIntervalSeconds(value + MIN_INTERVAL_SECONDS)
-                    interval.text = "间隔：" + (value + MIN_INTERVAL_SECONDS) + " 秒"
-                }
-                override fun onStartTrackingTouch(bar: android.widget.SeekBar?) = Unit
-                override fun onStopTrackingTouch(bar: android.widget.SeekBar?) = Unit
-            })
-        })
-        root.addView(text(if (isRunning()) "停止自动阅读" else "开始自动阅读").apply {
-            setTextColor(palette.roles.getValue("Primary"))
-            minHeight = EmbeddedHostUi.dp(context, 48f).toInt()
-            gravity = android.view.Gravity.CENTER
-            setOnClickListener {
-                toggleAutoPage()
-                text = if (isRunning()) "停止自动阅读" else "开始自动阅读"
+            } catch (failure: Throwable) {
+                handles.asReversed().forEach { runCatching { it.unhook() } }
+                host = null
+                nativeUiState = null
+                throw failure
             }
-        })
-        return root
-    }
-
-    private fun insertAutoPageItem(lazyListScope: Any, composer: Any) {
-        renderingAutoPageSection.set(true)
-        runCatching {
-            val itemContent = functionProxy("AutoPageItem", FUNCTION3_CLASS) { args ->
-                val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-                renderAutoPageSection(innerComposer)
-                targetUnit()
-            }
-
-            if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                lazyListScope.javaClass.getDeclaredMethod(
-                    "n", Any::class.java, Any::class.java, cls(FUNCTION3_CLASS),
-                ).apply { isAccessible = true }.invoke(lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent)
-            } else {
-                method(LAZY_LIST_SCOPE_CLASS, LAZY_ITEM_DEFAULT_METHOD, 6).invoke(
-                    null, lazyListScope, AUTO_PAGE_ITEM_KEY, null, itemContent, 2, null
-                )
-            }
-        }.onFailure {
-            log("insertAutoPageItem failed: ${it.message}")
-        }
-        renderingAutoPageSection.set(false)
-
-        readerSettingsBuildDepth.set(0)
-        readerSettingsComposer.set(null)
-    }
-
-    private fun renderAutoPageSection(composer: Any) {
-        runCatching {
-            ensureUiStates()
-            log("render auto page section")
-            val rowContent = functionProxy("AutoPageRow", FUNCTION3_CLASS) { args ->
-                val rowScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-                val innerComposer = args.getOrNull(1) ?: return@functionProxy targetUnit()
-                renderTimerSlider(rowScope, innerComposer)
-                renderIntervalSlider(rowScope, innerComposer)
-                targetUnit()
-            }
-            method(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
-                null,
-                fillMaxWidth(sectionTitleModifier(top = 8, bottom = 0)),
-                spacedBy(20),
-                alignmentTop(),
-                rowContent,
-                composer,
-                0,
-                0,
-            )
-        }.onFailure {
-            log("render auto page section failed: ${it.stackTraceToString()}")
         }
     }
-
-    private fun renderTimerSlider(rowScope: Any, composer: Any) {
-        val value = displayedTimerHours()
-        val content = functionProxy("AutoPageTimerColumn", FUNCTION3_CLASS) { args ->
-            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-            renderCompactLabel("\u5b9a\u65f6", innerComposer)
-            renderSlider(
-                value = (value / MAX_TIMER_HOURS).coerceIn(0f, 1f),
-                label = formatHours(value),
-                minText = "0",
-                maxText = "5h",
-                steps = 49,
-                composer = innerComposer,
-            ) { normalized ->
-                val next = ((normalized.coerceIn(0f, 1f) * MAX_TIMER_HOURS) * 10f).roundToInt() / 10f
-                setTimerHours(next)
-            }
-            targetUnit()
-        }
-        renderColumn(weightModifier(rowScope), composer, content)
+    internal fun nativeAutoPageVisible(): Boolean = canRunAutoPage()
+    internal fun nativeModuleEnabled(): Boolean = settingsProvider().moduleEnabled
+    internal fun nativeTimerHours(): Float = timerHours()
+    internal fun nativeTimerMinutes(): Int = timerMinutes()
+    internal fun nativeIntervalSeconds(): Float = intervalSeconds()
+    internal fun nativeEnabled(): Boolean {
+        if (!canRunAutoPage()) return false
+        val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return false
+        return runCatching { prefs().getBoolean(enabledKey(identity), false) }.getOrDefault(false)
     }
-
-    private fun renderIntervalSlider(rowScope: Any, composer: Any) {
-        val value = intervalSeconds()
-        val content = functionProxy("AutoPageIntervalColumn", FUNCTION3_CLASS) { args ->
-            val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-            renderCompactLabel("\u95f4\u9694", innerComposer)
-            renderSlider(
-                value = ((value - MIN_INTERVAL_SECONDS).toFloat() / (MAX_INTERVAL_SECONDS - MIN_INTERVAL_SECONDS)).coerceIn(0f, 1f),
-                label = value.toString(),
-                minText = "5s",
-                maxText = "30s",
-                steps = MAX_INTERVAL_SECONDS - MIN_INTERVAL_SECONDS - 1,
-                composer = innerComposer,
-            ) { normalized ->
-                val next = MIN_INTERVAL_SECONDS + (normalized.coerceIn(0f, 1f) * (MAX_INTERVAL_SECONDS - MIN_INTERVAL_SECONDS)).roundToInt()
-                setIntervalSeconds(next)
-            }
-            targetUnit()
-        }
-        renderColumn(weightModifier(rowScope), composer, content)
-    }
-
-    private fun renderColumn(modifier: Any, composer: Any, content: Any) {
-        method(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-            null,
-            modifier,
-            arrangementTop(),
-            alignmentStart(),
-            content,
-            composer,
-            0,
-            0,
-        )
-    }
-
-    private fun renderCompactLabel(text: String, composer: Any) {
-        renderText(
-            text = text,
-            composer = composer,
-            modifier = sectionTitleModifier(top = 0, bottom = 6),
-            styleName = "getBodySmall",
-            color = onBackgroundVariant(composer),
-        )
-    }
-
-    private fun renderSlider(
-        value: Float,
-        label: String,
-        minText: String,
-        maxText: String,
-        steps: Int,
-        composer: Any,
-        onChange: (Float) -> Unit,
-    ) {
-        val onValueChange = functionProxy("AutoPageSliderChange", FUNCTION1_CLASS) { args ->
-            val raw = args?.getOrNull(0) as? Float ?: return@functionProxy targetUnit()
-            onChange(raw)
-            targetUnit()
-        }
-        val onFinished = functionProxy("AutoPageSliderFinished", FUNCTION0_CLASS) {
-            targetUnit()
-        }
-        method(TYPE_SETTING_SLIDER_CLASS, TYPE_SETTING_SLIDER_METHOD, 20).invoke(
-            null,
-            value,
-            onValueChange,
-            fillMaxWidth(modifierInstance()),
-            false,
-            null,
-            steps,
-            onFinished,
-            udp(34),
-            minText,
-            maxText,
-            label,
-            udp(16.5),
-            sliderColors(composer),
-            null,
-            false,
-            false,
-            composer,
-            1573248,
-            0,
-            57368,
-        )
-    }
-
-    private fun renderIcon(imageVector: Any, composer: Any, modifier: Any?, color: Long) {
-        iconMethod(imageVector).invoke(
-            null,
-            imageVector,
-            null,
-            modifier,
-            color,
-            composer,
-            48,
-            0,
-        )
-    }
-
-    private fun renderText(text: String, composer: Any, modifier: Any?, styleName: String, color: Long) {
-        method(TEXT_KT_CLASS, TEXT_METHOD, 22).invoke(
-            null,
-            text,
-            modifier,
-            color,
-            null,
-            0L,
-            null,
-            null,
-            null,
-            0L,
-            null,
-            null,
-            0L,
-            0,
-            false,
-            0,
-            0,
-            null,
-            typography(composer).method0(styleName),
-            composer,
-            0,
-            0,
-            TEXT_DEFAULT_MASK,
-        )
-    }
-
-    private fun ensureUiStates() {
-        val prefs = prefs()
-        if (timerHoursState == null) {
-            timerHoursState = mutableState(prefs.getFloat(KEY_TIMER_HOURS, DEFAULT_TIMER_HOURS))
-        }
-        if (intervalSecondsState == null) {
-            intervalSecondsState = mutableState(prefs.getInt(KEY_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS))
-        }
-        if (runningState == null) {
-            runningState = mutableState(false)
+    internal fun nativeSetEnabled(value: Boolean) {
+        if (!canRunAutoPage()) return
+        val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return
+        AccountHostRuntime.withCurrentStorage(identity, activityProvider()) {
+            prefs().edit().putBoolean(enabledKey(identity), value)
+                .putInt(KEY_INTERVAL_SECONDS, ReaderAutoPageValues.interval(intervalSeconds()))
+                .putInt(KEY_TIMER_MINUTES, timerMinutes()).remove(KEY_TIMER_HOURS).apply()
+            if (value) startAutoPage(timerHours(), intervalSeconds(), showToast = true, closeSettings = false)
+            else stopAutoPage(showToast = true)
         }
     }
-
-    private fun timerHours(): Float =
-        ((timerHoursState?.method0("getValue") as? Float) ?: prefs().getFloat(KEY_TIMER_HOURS, DEFAULT_TIMER_HOURS))
-            .coerceIn(0f, MAX_TIMER_HOURS)
-
-    private fun intervalSeconds(): Int =
-        ((intervalSecondsState?.method0("getValue") as? Int) ?: prefs().getInt(KEY_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS))
-            .coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
-
-    private fun isRunning(): Boolean =
-        autoPageEnabled
-
-    private fun displayedTimerHours(): Float {
-        if (!autoPageEnabled) return timerHours()
-        val remainingMs = when {
-            pausedForReaderExit && pausedRemainingMs != Long.MAX_VALUE -> pausedRemainingMs
-            autoPageEndAtMs != Long.MAX_VALUE -> (autoPageEndAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
-            else -> Long.MAX_VALUE
+    internal fun nativeRunning(): Boolean {
+        if (isRunning() && (!nativeEnabled() || !ownsAutoPage())) stopAutoPage(showToast = false)
+        return isRunning()
+    }
+    internal fun nativeSetTimer(value: Float) = setTimerHours(value)
+    internal fun nativeSetTimerMinutes(value: Float) = setTimerHours(ReaderAutoPageValues.minutes(value) / 60f)
+    internal fun nativeSetInterval(value: Float) = setIntervalSeconds(value)
+    internal fun nativeCaptureClose(callback: Any) {
+        currentSettingsCloseRef = WeakReference(callback)
+        readerVisible = false
+        reconcileVisibility()
+    }
+    internal fun nativePageMode(mode: Int) {
+        // ScrollPager ignores TapDirection; stop an existing timer when its mode is selected.
+        val owner = autoPageIdentity
+        if (mode == 3 && nativeRunning()) mainHandler.post {
+            if (owner === autoPageIdentity && isRunning()) stopAutoPage(showToast = false)
         }
-        if (remainingMs == Long.MAX_VALUE) return 0f
-        return ((remainingMs.toFloat() / (60f * 60f * 1000f)) * 10f).roundToInt() / 10f
+    }
+    internal fun nativeSetRunning(value: Boolean) {
+        if (value == nativeRunning()) return
+        if (value) startAutoPage(timerHours(), intervalSeconds(), showToast = true, closeSettings = false)
+        else stopAutoPage(showToast = true)
     }
 
+
+    private fun observeNativeState() {
+        val state = nativeUiState ?: return
+        host?.method("stateGet")?.invoke(state)
+    }
+
+    private fun notifyNativeStateChanged() {
+        val state = nativeUiState
+        val contract = host
+        if (state != null && contract != null) contract.method("stateSet").invoke(state, ++nativeUiStateRevision)
+        nativeStateChanged?.invoke()
+    }
+
+    private fun timerMinutes(): Int = if (prefs().contains(KEY_TIMER_MINUTES)) runCatching {
+        ReaderAutoPageValues.minutes(prefs().getInt(KEY_TIMER_MINUTES, 0).toFloat())
+    }.getOrDefault(0) else ReaderAutoPageValues.legacyHours(runCatching {
+        prefs().getFloat(KEY_TIMER_HOURS, DEFAULT_TIMER_HOURS)
+    }.recoverCatching { prefs().getInt(KEY_TIMER_HOURS, 0).toFloat() }.getOrDefault(DEFAULT_TIMER_HOURS))
+    private fun timerHours(): Float = timerMinutes() / 60f
+    private fun intervalSeconds(): Float = normalizeInterval(runCatching {
+        prefs().getFloat(KEY_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS)
+    }.recoverCatching {
+        // Existing accounts and imported backups store this same seconds key as an Int.
+        prefs().getInt(KEY_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS.toInt()).toFloat()
+    }.getOrDefault(DEFAULT_INTERVAL_SECONDS))
+    private fun enabledKey(identity: AccountHostRuntime.Identity) = "enabled_account_${identity.accountId}"
+    private fun normalizeTimerHours(value: Float): Float =
+        ReaderAutoPageValues.legacyHours(value) / 60f
+    private fun normalizeInterval(value: Float): Float =
+        ReaderAutoPageValues.interval(value).toFloat()
+    private fun isRunning() = autoPageSession.requested
     private fun setTimerHours(value: Float) {
-        val next = value.coerceIn(0f, MAX_TIMER_HOURS)
-        setState(timerHoursState, next)
-        prefs().edit().putFloat(KEY_TIMER_HOURS, next).apply()
+        if (!canRunAutoPage()) return
+        val next = normalizeTimerHours(value)
+        prefs().edit().putInt(KEY_TIMER_MINUTES, ReaderAutoPageValues.legacyHours(next)).remove(KEY_TIMER_HOURS).apply()
         if (isRunning()) startAutoPage(next, intervalSeconds(), showToast = false, closeSettings = false)
     }
 
-    private fun setIntervalSeconds(value: Int) {
-        val next = value.coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
-        setState(intervalSecondsState, next)
-        prefs().edit().putInt(KEY_INTERVAL_SECONDS, next).apply()
-        if (isRunning()) startAutoPage(timerHours(), next, showToast = false, closeSettings = false)
+    private fun setIntervalSeconds(value: Float) {
+        if (!canRunAutoPage()) return
+        val next = normalizeInterval(value)
+        prefs().edit().putInt(KEY_INTERVAL_SECONDS, ReaderAutoPageValues.interval(next)).apply()
+        if (isRunning()) {
+            mainHandler.removeCallbacksAndMessages(AUTO_PAGE_TOKEN)
+            if (autoPageSession.running) scheduleNextTurn(next)
+        }
     }
 
     private fun toggleAutoPage() {
-        if (isRunning()) {
+        if (nativeRunning()) {
             log("auto page stop by toggle")
-            stopAutoPage(updateUiState = true, showToast = true)
+            stopAutoPage(showToast = true)
         } else {
-            if (!canRunAutoPage()) {
+            if (!nativeEnabled()) {
                 activityProvider()?.let {
-                    Toast.makeText(it, "\u8bf7\u5148\u5728\u9605\u5fae\u8865\u5168\u8bbe\u7f6e\u4e2d\u542f\u7528\u81ea\u52a8\u9605\u8bfb", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(it, "\u8bf7\u5148\u5728\u66f4\u591a\u8bbe\u7f6e\u4e2d\u5f00\u542f\u81ea\u52a8\u9605\u8bfb", Toast.LENGTH_SHORT).show()
                 }
                 return
             }
@@ -550,63 +258,71 @@ class ReaderAutoPageHook(
 
     private fun startAutoPage(
         timerHours: Float,
-        intervalSeconds: Int,
+        intervalSeconds: Float,
         showToast: Boolean,
         closeSettings: Boolean,
     ) {
-        if (!canRunAutoPage()) {
-            stopAutoPage(updateUiState = true, showToast = false)
+        val revision = executionRevision.get()
+        if (!nativeEnabled()) {
+            stopAutoPage(showToast = false)
+            return
+        }
+        val identity = AccountHostRuntime.storageSnapshot(activityProvider())
+        if (identity == null) {
+            stopAutoPage(showToast = false)
+            return
+        }
+        val receiver = currentViewModelRef?.get()
+        val book = currentBookKey ?: receiver?.let(::nativeBookKey)
+        if (receiver == null || book == null) {
+            stopAutoPage(showToast = false)
             return
         }
         mainHandler.removeCallbacksAndMessages(AUTO_PAGE_TOKEN)
-        autoPageRunnable = null
-        autoPageEnabled = true
-        pausedForReaderExit = false
-        pausedRemainingMs = Long.MAX_VALUE
-        autoPageEndAtMs = if (timerHours > 0f) {
-            System.currentTimeMillis() + (timerHours * 60f * 60f * 1000f).toLong()
-        } else {
-            Long.MAX_VALUE
-        }
-        setState(runningState, true)
-        scheduleNextTurn(intervalSeconds.coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
+        autoPageIdentity = identity
+        autoPageViewModelRef = WeakReference(receiver)
+        autoPageBookKey = book
+        autoPageExecutionRevision = revision
+        pendingStartToast = showToast
+        autoPageSession.request(if (timerHours > 0f) {
+            (timerHours.toDouble() * 60.0 * 60.0 * 1000.0).roundToLong().coerceAtLeast(1L)
+        } else 0L)
+        notifyNativeStateChanged()
         if (closeSettings) closeReaderSettings()
-        if (showToast) {
-            activityProvider()?.let {
-                Toast.makeText(it, "\u5df2\u5f00\u59cb\u81ea\u52a8\u7ffb\u9875", Toast.LENGTH_SHORT).show()
-            }
-        }
+        queueVisibilityReconciliation()
     }
 
-    private fun scheduleNextTurn(intervalSeconds: Int) {
+    private fun scheduleNextTurn(intervalSeconds: Float) {
         val runnable = Runnable {
-            if (!isRunning() || pausedForReaderExit) return@Runnable
-            if (!canRunAutoPage()) {
-                log("auto page stopped because module setting is disabled")
-                stopAutoPage(updateUiState = true, showToast = false)
+            if (!isRunning()) return@Runnable
+            if (!nativeEnabled() || !ownsAutoPage()) {
+                log("auto page stopped because its account or module setting changed")
+                stopAutoPage(showToast = false)
                 return@Runnable
             }
-            if (System.currentTimeMillis() >= autoPageEndAtMs) {
+            reconcileVisibility()
+            if (!autoPageSession.running) return@Runnable
+            if (autoPageSession.expired()) {
                 log("auto page timer ended")
-                stopAutoPage(updateUiState = true, showToast = false)
+                stopAutoPage(showToast = false)
                 return@Runnable
             }
             log("auto page interval tick")
             triggerNextPage()
             if (isRunning()) scheduleNextTurn(intervalSeconds())
         }
-        autoPageRunnable = runnable
-        mainHandler.postAtTime(runnable, AUTO_PAGE_TOKEN, SystemClock.uptimeMillis() + intervalSeconds * 1000L)
+        mainHandler.postAtTime(runnable, AUTO_PAGE_TOKEN, SystemClock.uptimeMillis() + (intervalSeconds.toDouble() * 1000.0).roundToLong())
     }
 
-    private fun stopAutoPage(updateUiState: Boolean, showToast: Boolean = false) {
+    private fun stopAutoPage(showToast: Boolean = false) {
         mainHandler.removeCallbacksAndMessages(AUTO_PAGE_TOKEN)
-        autoPageRunnable = null
-        autoPageEndAtMs = Long.MAX_VALUE
-        autoPageEnabled = false
-        pausedForReaderExit = false
-        pausedRemainingMs = Long.MAX_VALUE
-        if (updateUiState) setState(runningState, false)
+        autoPageSession.stop()
+        autoPageIdentity = null
+        autoPageViewModelRef = null
+        autoPageBookKey = null
+        autoPageExecutionRevision = null
+        pendingStartToast = false
+        notifyNativeStateChanged()
         if (showToast) {
             activityProvider()?.let {
                 Toast.makeText(it, "\u5df2\u505c\u6b62\u81ea\u52a8\u7ffb\u9875", Toast.LENGTH_SHORT).show()
@@ -614,418 +330,192 @@ class ReaderAutoPageHook(
         }
     }
 
+
     private fun triggerNextPage() {
-        val intent = cls(TAP_DIRECTION_CLASS)
-            .getConstructor(Long::class.javaPrimitiveType)
-            .newInstance(System.currentTimeMillis())
-        if (!dispatchReaderIntent(intent, "page turn")) {
-            XposedBridge.log("$LOG_PREFIX auto page skipped: no reader intent receiver")
-            stopAutoPage(updateUiState = true)
+        if (!ownsAutoPage()) { stopAutoPage(); return }
+        val receiver = currentViewModelRef?.get()
+        val contract = host
+        val dispatched = synchronized(executionLock) {
+            if (receiver == null || contract == null || autoPageExecutionRevision != executionRevision.get() ||
+                !settingsProvider().moduleEnabled) false
+            else runCatching {
+                contract.method("send").invoke(receiver, contract.constructor("tap").newInstance(System.currentTimeMillis()))
+            }.onFailure { HookRuntime.logError("$LOG_PREFIX auto-page dispatch failed", it) }.isSuccess
+        }
+        if (!dispatched) {
+            stopAutoPage()
         }
     }
-
     private fun closeReaderSettings() {
-        val callback = currentSettingsCloseRef?.get()
-        if (callback == null) {
-            XposedBridge.log("$LOG_PREFIX auto page settings close skipped: navigation callback unavailable")
-            return
-        }
+        val callback = currentSettingsCloseRef?.get() ?: return
+        val contract = host ?: return
         runCatching {
-            val invoke = callback.javaClass.methods.firstOrNull {
-                it.hostNameMatches("invoke") && it.parameterTypes.isEmpty()
-            } ?: error("Function0.invoke not found on ${callback.javaClass.name}")
-            invoke.invoke(callback)
+            require(contract.type("close").isInstance(callback))
+            contract.method("close").invoke(callback)
             currentSettingsCloseRef = null
-            log("auto page settings closed via ReaderMoreSettingScreen navigation callback")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX auto page close settings failed: ${it.stackTraceToString()}")
+        }.onFailure { HookRuntime.logError("$LOG_PREFIX auto-page settings close failed", it) }
+    }
+
+    internal fun onHostActivityCreated(activity: Activity) {
+        if (currentActivityRef?.get() === activity) return
+        if (currentActivityRef?.get() != null) {
+            stopAutoPage(showToast = false)
+            clearReader()
+        }
+        currentActivityRef = WeakReference(activity)
+        activityResumed = false
+    }
+
+    internal fun onModuleEnabledChanged(enabled: Boolean) {
+        if (enabled) return
+        onMain {
+            stopAutoPage(showToast = false)
+            mainHandler.removeCallbacksAndMessages(READER_VISIBILITY_TOKEN)
         }
     }
 
-    private fun captureSettingsCloseCallback(callback: Any?) {
-        if (callback == null || !cls(FUNCTION0_CLASS).isInstance(callback)) return
-        currentSettingsCloseRef = WeakReference(callback)
+    internal fun invalidateExecution() {
+        synchronized(executionLock) { executionRevision.incrementAndGet() }
     }
 
-    private fun dispatchReaderIntent(intent: Any, action: String): Boolean {
-        val target = currentIntentReceiverRef?.get() ?: currentViewModelRef?.get() ?: return false
-        return runCatching {
-            val method = target.javaClass.methods.firstOrNull {
-                it.hostNameMatches("intent") && it.parameterTypes.size == 1 && it.parameterTypes[0].isAssignableFrom(intent.javaClass)
-            } ?: target.javaClass.methods.firstOrNull {
-                it.hostNameMatches("onIntent") && it.parameterTypes.size == 1 && it.parameterTypes[0].isAssignableFrom(intent.javaClass)
-            } ?: error("intent/onIntent not found on ${target.javaClass.name}")
-            method.invoke(target, intent)
-            log("auto page $action dispatched via ${target.javaClass.name}.${method.name}")
-            true
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX auto page $action failed: ${it.stackTraceToString()}")
-        }.getOrDefault(false)
+    internal fun onHostActivityResumed(activity: Activity) {
+        onHostActivityCreated(activity)
+        activityResumed = true
+        queueVisibilityReconciliation()
     }
 
-    private fun pauseAutoPageForReaderExit() {
-        if (!autoPageEnabled) return
-        pausedRemainingMs = if (autoPageEndAtMs == Long.MAX_VALUE) {
-            Long.MAX_VALUE
-        } else {
-            (autoPageEndAtMs - System.currentTimeMillis()).coerceAtLeast(0L)
+    internal fun onHostActivityPaused(activity: Activity) {
+        if (currentActivityRef?.get() !== activity) return
+        activityResumed = false
+        reconcileVisibility()
+    }
+
+    internal fun onHostActivityDestroyed(activity: Activity) {
+        if (currentActivityRef?.get() !== activity) return
+        stopAutoPage(showToast = false)
+        clearReader()
+        activityResumed = false
+        currentActivityRef = null
+        mainHandler.removeCallbacksAndMessages(READER_VISIBILITY_TOKEN)
+    }
+
+    private fun onMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) action()
+        else mainHandler.post { action() }
+    }
+
+    private fun observeReaderComposition(receiver: Any?, book: Any?, status: Any?) {
+        val lifecycle = HostReaderLifecycleBindings.current ?: return
+        val position = HostReaderPositionBindings.current ?: return
+        if (receiver == null || book == null || !lifecycle.type("vm").isInstance(receiver) ||
+            !position.type("book").isInstance(book)) return
+        onMain {
+            val key = bookKey(book)
+            // An outgoing animated menu must not revive a book that its ViewModel has replaced.
+            if (key != nativeBookKey(receiver)) return@onMain
+            if (isRunning() && (autoPageViewModelRef?.get() !== receiver || autoPageBookKey != key)) {
+                stopAutoPage(showToast = false)
+            }
+            if (currentViewModelRef?.get() !== receiver) currentSettingsCloseRef = null
+            currentViewModelRef = WeakReference(receiver)
+            currentBookKey = key
+            readerVisible = lifecycle.type("status.reader").isInstance(status) && nativeReaderContent(receiver)
+            if (readerVisible) currentSettingsCloseRef = null
+            else reconcileVisibility()
+            // Run after this native composition, so its settings disposal has completed first.
+            queueVisibilityReconciliation()
         }
-        pausedForReaderExit = true
-        mainHandler.removeCallbacksAndMessages(AUTO_PAGE_TOKEN)
-        autoPageRunnable = null
-        log("auto page paused for reader exit remaining=$pausedRemainingMs")
     }
 
-    private fun resumeAutoPageAfterReaderReturn() {
-        if (!autoPageEnabled || !pausedForReaderExit) return
-        if (!canRunAutoPage()) {
-            stopAutoPage(updateUiState = true, showToast = false)
+    private fun bookKey(book: Any): String {
+        val position = requireNotNull(HostReaderPositionBindings.current)
+        return "${position.field("book#id").getLong(book)}:${position.field("book#uuid").get(book)}"
+    }
+
+    private fun nativeBookKey(receiver: Any): String? = runCatching {
+        val position = requireNotNull(HostReaderPositionBindings.current)
+        val state = position.method("currentState").invoke(receiver) ?: return@runCatching null
+        position.field("state#book").get(state)?.let(::bookKey)
+    }.getOrNull()
+
+    private fun nativeReaderContent(receiver: Any): Boolean = runCatching {
+        val position = requireNotNull(HostReaderPositionBindings.current)
+        val state = position.method("currentState").invoke(receiver) ?: return@runCatching false
+        requireNotNull(HostReaderLifecycleBindings.current).type("status.reader")
+            .isInstance(position.field("state#status").get(state))
+    }.getOrDefault(false)
+
+    private fun queueVisibilityReconciliation() {
+        mainHandler.removeCallbacksAndMessages(READER_VISIBILITY_TOKEN)
+        mainHandler.postAtTime(Runnable { reconcileVisibility() }, READER_VISIBILITY_TOKEN, SystemClock.uptimeMillis())
+    }
+
+    private fun reconcileVisibility() {
+        if (!isRunning()) return
+        if (!nativeEnabled() || !ownsAutoPage()) {
+            stopAutoPage(showToast = false)
             return
         }
-        pausedForReaderExit = false
-        autoPageEndAtMs = if (pausedRemainingMs == Long.MAX_VALUE) {
-            Long.MAX_VALUE
-        } else {
-            System.currentTimeMillis() + pausedRemainingMs
-        }
-        pausedRemainingMs = Long.MAX_VALUE
-        setState(runningState, true)
-        scheduleNextTurn(intervalSeconds().coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
-        log("auto page resumed after reader return interval=${intervalSeconds()}")
-    }
-
-    private fun setState(state: Any?, value: Any) {
-        state?.javaClass?.methods?.firstOrNull { it.hostNameMatches("setValue") && it.parameterTypes.size == 1 }
-            ?.invoke(state, value)
-    }
-
-    private fun canRunAutoPage(): Boolean =
-        settingsProvider().canRunReaderAutoPage
-
-    private fun mutableState(value: Any): Any =
-        if (HostSymbols.abiProfileId == "2.3.3-b4") B2NativeUi(classLoader).mutableState(value)
-        else method(SNAPSHOT_STATE_KT_CLASS, MUTABLE_STATE_OF_DEFAULT_METHOD, 4).invoke(null, value, null, 2, null)
-
-    private fun circleShape(): Any =
-        method(FOUNDATION_SHAPE_KT_CLASS, CIRCLE_SHAPE_METHOD, 0).invoke(null)
-
-    private fun clipModifier(modifier: Any): Any =
-        method(CLIP_KT_CLASS, CLIP_METHOD, 2).invoke(null, modifier, circleShape())
-
-    private fun borderModifier(modifier: Any, color: Long): Any =
-        method(BORDER_KT_CLASS, BORDER_METHOD, 4).invoke(null, modifier, udp(1), color, circleShape())
-
-    private fun sectionTitleModifier(top: Int, bottom: Int): Any =
-        method(PADDING_KT_CLASS, PADDING_ABSOLUTE_DEFAULT_METHOD, 7).invoke(
-            null,
-            modifierInstance(),
-            0f,
-            udp(top),
-            0f,
-            udp(bottom),
-            5,
-            null,
-        )
-
-    private fun weightModifier(rowScope: Any): Any =
-        method(ROW_SCOPE_CLASS, WEIGHT_DEFAULT_METHOD, 6).invoke(null, rowScope, modifierInstance(), 1.0f, false, 2, null)
-
-    private fun sizeModifier(modifier: Any, value: Int): Any =
-        method(SIZE_KT_CLASS, SIZE_METHOD, 2).invoke(null, modifier, udp(value))
-
-    private fun fillMaxWidth(modifier: Any): Any =
-        method(SIZE_KT_CLASS, FILL_MAX_WIDTH_DEFAULT_METHOD, 4).invoke(null, modifier, 0f, 1, null)
-
-    private fun sliderColors(composer: Any): Any {
-        val defaults = staticObject(MATERIAL_SLIDER_DEFAULTS_CLASS, "INSTANCE")
-        return method(MATERIAL_SLIDER_DEFAULTS_CLASS, SLIDER_DEFAULT_COLORS_METHOD, 14).invoke(
-            defaults,
-            sliderBrushColor(backgroundBright(composer)),
-            sliderBrushColor(backgroundDim(composer)),
-            sliderBrushColor(borderVariant(composer)),
-            sliderBrushColor(backgroundDim(composer)),
-            sliderBrushColor(borderVariant(composer)),
-            null,
-            sliderBrushColor(transparentColor()),
-            sliderBrushColor(transparentColor()),
-            null,
-            null,
-            composer,
-            0,
-            6,
-            800,
-        )
-    }
-
-    private fun colorScheme(composer: Any): Any {
-        val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
-        val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
-        return method(MATERIAL_THEME_CLASS, "getColorScheme", 2).invoke(materialTheme, composer, stable)
-    }
-
-    private fun typography(composer: Any): Any {
-        val materialTheme = staticObject(MATERIAL_THEME_CLASS, "INSTANCE")
-        val stable = staticInt(MATERIAL_THEME_CLASS, "\$stable")
-        return method(MATERIAL_THEME_CLASS, "getTypography", 2).invoke(materialTheme, composer, stable)
-    }
-
-    private fun onBackgroundVariant(composer: Any): Long =
-        method(THEME_KT_CLASS, ON_BACKGROUND_VARIANT_METHOD, 1).invoke(null, colorScheme(composer)) as Long
-
-    private fun backgroundDim(composer: Any): Long =
-        method(THEME_KT_CLASS, BACKGROUND_DIM_METHOD, 1).invoke(null, colorScheme(composer)) as Long
-
-    private fun backgroundBright(composer: Any): Long =
-        method(THEME_KT_CLASS, BACKGROUND_BRIGHT_METHOD, 1).invoke(null, colorScheme(composer)) as Long
-
-    private fun borderVariant(composer: Any): Long =
-        method(THEME_KT_CLASS, BORDER_VARIANT_METHOD, 1).invoke(null, colorScheme(composer)) as Long
-
-    private fun transparentColor(): Long {
-        val color = staticObject(COLOR_CLASS, "INSTANCE")
-        return color.javaClass.methods.first {
-            it.parameterTypes.isEmpty() &&
-                it.name.normalizedMethodToken().contains(TRANSPARENT_COLOR_METHOD.normalizedMethodToken())
-        }.invoke(color) as Long
-    }
-
-    private fun sliderBrushColor(color: Long): Any =
-        cls(SLIDER_BRUSH_COLOR_CLASS).declaredConstructors.first {
-            it.parameterTypes.size == 3 && it.parameterTypes[0] == Long::class.javaPrimitiveType
-        }.apply {
-            isAccessible = true
-        }.newInstance(color, null, null)
-
-    private fun autoPageIcon(running: Boolean): Any {
-        val evaIcons = staticObject(EVA_ICONS_CLASS, "INSTANCE")
-        val fillGroup = method(EVA_FILL_KT_CLASS, EVA_FILL_METHOD, 1).invoke(null, evaIcons)
-        return if (running) {
-            method(EVA_PAUSE_CIRCLE_KT_CLASS, EVA_PAUSE_CIRCLE_METHOD, 1).invoke(null, fillGroup)
-        } else {
-            method(EVA_PLAY_CIRCLE_KT_CLASS, EVA_PLAY_CIRCLE_METHOD, 1).invoke(null, fillGroup)
-        }
-    }
-
-    private fun spacedBy(value: Int): Any =
-        staticObject(ARRANGEMENT_CLASS, "INSTANCE").javaClass.methods.first {
-            it.name == SPACED_BY_METHOD && it.parameterTypes.size == 1
-        }.invoke(staticObject(ARRANGEMENT_CLASS, "INSTANCE"), udp(value))
-
-    private fun arrangementTop(): Any =
-        staticObject(ARRANGEMENT_CLASS, "INSTANCE").method0("getTop") ?: error("Arrangement.Top not found")
-
-    private fun alignmentStart(): Any =
-        staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getStart") ?: error("Alignment.Start not found")
-
-    private fun alignmentCenter(): Any =
-        staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenter") ?: error("Alignment.Center not found")
-
-    private fun alignmentCenterVertically(): Any =
-        staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getCenterVertically") ?: error("Alignment.CenterVertically not found")
-
-    private fun alignmentTop(): Any =
-        staticObject(ALIGNMENT_CLASS, "INSTANCE").method0("getTop") ?: error("Alignment.Top not found")
-
-    private fun modifierInstance(): Any =
-        staticObject(MODIFIER_CLASS, "INSTANCE")
-
-    private fun prefs() =
-        (activityProvider() ?: error("Activity unavailable"))
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    private fun udp(value: Int): Float =
-        cls(UNIT_EXT_KT_CLASS).declaredMethods.first {
-            it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType))
-        }.invoke(null, value) as Float
-
-    private fun udp(value: Double): Float =
-        cls(UNIT_EXT_KT_CLASS).declaredMethods.first {
-            it.name == UDP_METHOD && it.parameterTypes.contentEquals(arrayOf(Double::class.javaPrimitiveType))
-        }.invoke(null, value) as Float
-
-    private fun staticObject(className: String, fieldName: String): Any {
-        val targetClass = cls(className)
-        readStaticField(targetClass, fieldName)?.let { return it }
-        readStaticField(targetClass, "Companion")?.let { return it }
-        runCatching {
-            val companionClass = cls("$className\$Companion")
-            readStaticField(companionClass, fieldName) ?: readStaticField(companionClass, "\$\$INSTANCE")
-        }.getOrNull()?.let { return it }
-
-        val fields = targetClass.declaredFields.joinToString { it.name }
-        error("$className.$fieldName not found; fields=[$fields]")
-    }
-
-    private fun staticInt(className: String, fieldName: String): Int =
-        readStaticField(cls(className), fieldName) as? Int
-            ?: error("$className.$fieldName not found")
-
-    private fun readStaticField(targetClass: Class<*>, fieldName: String): Any? =
-        targetClass.fields.firstOrNull { it.name == fieldName }?.get(null)
-            ?: targetClass.declaredFields.firstOrNull { it.name == fieldName }?.let {
-                it.isAccessible = true
-                it.get(null)
+        val activity = currentActivityRef?.get()
+        val visible = readerVisible && currentSettingsCloseRef?.get() == null &&
+            currentViewModelRef?.get()?.let(::nativeReaderContent) == true
+        val resumed = activityResumed && activity != null && activityProvider() === activity &&
+            !activity.isFinishing && !activity.isDestroyed
+        when (autoPageSession.visibility(visible, resumed)) {
+            ReaderAutoPageSession.Transition.STARTED, ReaderAutoPageSession.Transition.RESUMED -> {
+                scheduleNextTurn(intervalSeconds().coerceIn(MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS))
+                if (pendingStartToast) {
+                    pendingStartToast = false
+                    activity?.let {
+                        Toast.makeText(it, "\u5df2\u5f00\u59cb\u81ea\u52a8\u7ffb\u9875", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                log("auto page resumed on visible reader interval=${intervalSeconds()}")
             }
-
-    private fun Any.method0(name: String): Any? =
-        javaClass.methods.firstOrNull { it.name == name && it.parameterTypes.isEmpty() }?.invoke(this)
-
-    private fun Any.longMethod(name: String): Long =
-        method0(name) as Long
-
-    private fun functionProxy(name: String, functionClassName: String, block: (Array<Any?>?) -> Any?): Any =
-        composeInterop.functionProxy(name, functionClassName, block)
-
-    private fun targetUnit(): Any =
-        requireNotNull(cls(UNIT_CLASS).hostField("INSTANCE").get(null))
-
-    private fun log(message: String) {
-        XposedBridge.log("$LOG_PREFIX $message")
-    }
-
-    private fun cls(className: String): Class<*> =
-        classLoader.hostClass(className)
-
-    private fun method(className: String, methodName: String, parameterCount: Int): Method {
-        val cacheKey = "$className#$methodName/$parameterCount"
-        return synchronized(methodCache) {
-            methodCache.getOrPut(cacheKey) {
-                val normalizedName = methodName.normalizedMethodToken()
-                cls(className).declaredMethods.firstOrNull {
-                    it.name == methodName && it.parameterTypes.size == parameterCount
-                } ?: cls(className).declaredMethods.firstOrNull {
-                    it.parameterTypes.size == parameterCount &&
-                        it.name.normalizedMethodToken().contains(normalizedName)
-                }?.apply { isAccessible = true }
-                    ?: error("$className.$methodName/$parameterCount not found")
+            ReaderAutoPageSession.Transition.PAUSED -> {
+                mainHandler.removeCallbacksAndMessages(AUTO_PAGE_TOKEN)
+                log("auto page paused while reader hidden remaining=${autoPageSession.remainingMillis()}")
             }
+            ReaderAutoPageSession.Transition.FINISHED -> stopAutoPage(showToast = false)
+            ReaderAutoPageSession.Transition.NONE -> Unit
         }
     }
 
-    private fun iconMethod(imageVector: Any): Method =
-        cls(ICON_KT_CLASS).declaredMethods.firstOrNull {
-            it.parameterTypes.size == 7 && it.parameterTypes[0].isAssignableFrom(imageVector.javaClass)
-        }?.apply { isAccessible = true } ?: error("$ICON_KT_CLASS Icon(ImageVector)/7 not found")
+    private fun clearReader() {
+        readerVisible = false
+        currentViewModelRef = null
+        currentBookKey = null
+        currentSettingsCloseRef = null
+    }
+    private fun ownsAutoPage(): Boolean = autoPageExecutionRevision == executionRevision.get() && autoPageIdentity?.let {
+        AccountHostRuntime.isCurrentStorage(it, activityProvider()) &&
+            autoPageViewModelRef?.get()?.let { receiver ->
+                receiver === currentViewModelRef?.get() && autoPageBookKey == nativeBookKey(receiver)
+            } == true
+    } == true
 
-    private fun String.normalizedMethodToken(): String =
-        filter { it.isLetterOrDigit() }
-
-    private fun formatHours(value: Float): String =
-        String.format(Locale.US, "%.1f", value)
-
+    private fun canRunAutoPage(): Boolean = host != null && settingsProvider().canRunReaderAutoPage
+    private fun prefs() = requireNotNull(activityProvider()) { "Activity unavailable" }.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private fun log(message: String) = HookRuntime.log("$LOG_PREFIX $message")
+    private fun icon(running: Boolean): Any? = host?.method(if (running) "pause" else "play")?.invoke(null)
     companion object {
-        const val LOG_PREFIX = "ReaMicro LSP"
-
-        const val READER_VIEW_MODEL_CLASS = HostClasses.Host.READER_VIEW_MODEL
-
-        const val READER_SETTINGS_CLASS = HostClasses.Host.READER_SETTINGS
-        const val READER_SETTINGS_SCREEN_METHOD = "ReaderMoreSettingScreen"
-        const val SECTION_TITLE_METHOD = "SectionTitle"
-
-        const val LAZY_LIST_SCOPE_CLASS = HostClasses.Compose.LAZY_LIST_SCOPE
-        const val LAZY_ITEM_DEFAULT_METHOD = "item\$default"
-
-        const val AUTO_PAGE_ITEM_KEY = 0x7A70_0001
-        const val TAP_GESTURES_BOX_CLASS = HostClasses.Host.TAP_GESTURES_BOX
-        const val TAP_GESTURES_BOX_METHOD = "TapGesturesBox"
-        const val TAP_DIRECTION_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent\$TapDirection"
-        const val UPDATE_UI_STATUS_CLASS = "app.zhendong.reamicro.ui.reader.ReaderUiIntent\$UpdateUIStatus"
-        const val UI_STATUS_CLASS = HostClasses.Host.UI_STATUS
-        const val UI_STATUS_READER_CLASS = "app.zhendong.reamicro.ui.reader.UiStatus\$Reader"
-
-        const val TEXT_KT_CLASS = HostClasses.Compose.TEXT_KT
-        const val TEXT_METHOD = "Text-Nvy7gAk"
-        const val ROW_KT_CLASS = HostClasses.Compose.ROW_KT
-        const val ROW_METHOD = "Row"
-        const val ROW_SCOPE_CLASS = HostClasses.Compose.ROW_SCOPE
-        const val WEIGHT_DEFAULT_METHOD = "weight\$default"
-        const val COLUMN_KT_CLASS = HostClasses.Compose.COLUMN_KT
-        const val COLUMN_METHOD = "Column"
-        const val BOX_KT_CLASS = HostClasses.Compose.BOX_KT
-        const val BOX_METHOD = "Box"
-        const val MODIFIER_CLASS = HostClasses.Compose.MODIFIER
-        const val SIZE_KT_CLASS = HostClasses.Compose.SIZE_KT
-        const val SIZE_METHOD = "size-3ABfNKs"
-        const val FILL_MAX_WIDTH_DEFAULT_METHOD = "fillMaxWidth\$default"
-        const val HEIGHT_METHOD = "height-3ABfNKs"
-        const val PADDING_KT_CLASS = HostClasses.Compose.PADDING_KT
-        const val PADDING_ABSOLUTE_DEFAULT_METHOD = "padding-qDBjuR0\$default"
-        const val CLICKABLE_KT_CLASS = HostClasses.Compose.CLICKABLE_KT
-        const val CLICKABLE_DEFAULT_METHOD = "clickable-O2vRcR0\$default"
-        const val BACKGROUND_KT_CLASS = HostClasses.Compose.BACKGROUND_KT
-        const val BACKGROUND_DEFAULT_METHOD = "background-bw27NRU\$default"
-        const val BORDER_KT_CLASS = HostClasses.Compose.BORDER_KT
-        const val BORDER_METHOD = "border-xT4_qwU"
-        const val CLIP_KT_CLASS = HostClasses.Compose.CLIP_KT
-        const val CLIP_METHOD = "clip"
-        const val SHAPE_KT_CLASS = HostClasses.Host.SHAPE_KT
-        const val ROUNDED_SHAPE_METHOD = "getRoundedSmallShape"
-        const val FOUNDATION_SHAPE_KT_CLASS = HostClasses.Compose.FOUNDATION_SHAPE_KT
-        const val CIRCLE_SHAPE_METHOD = "getCircleShape"
-        const val MATERIAL_THEME_CLASS = HostClasses.Compose.MATERIAL_THEME
-        const val ICON_KT_CLASS = HostClasses.Compose.ICON_KT
-        const val ARRANGEMENT_CLASS = HostClasses.Compose.ARRANGEMENT
-        const val SPACED_BY_METHOD = "spacedBy-0680j_4"
-        const val ALIGNMENT_CLASS = HostClasses.Compose.ALIGNMENT
-        const val THEME_KT_CLASS = HostClasses.Host.THEME_KT
-        const val ON_BACKGROUND_VARIANT_METHOD = "getOnBackgroundVariant"
-        const val BACKGROUND_DIM_METHOD = "getBackgroundDim"
-        const val BACKGROUND_BRIGHT_METHOD = "getBackgroundBright"
-        const val BORDER_VARIANT_METHOD = "getBorderVariant"
-        const val COLOR_CLASS = HostClasses.Compose.COLOR
-        const val UNIT_EXT_KT_CLASS = HostClasses.Host.UNIT_EXT_KT
-        const val UDP_METHOD = "getUdp"
-        const val COMPOSER_CLASS = HostClasses.Compose.COMPOSER
-        const val SNAPSHOT_STATE_KT_CLASS = HostClasses.Compose.SNAPSHOT_STATE_KT
-        const val MUTABLE_STATE_OF_DEFAULT_METHOD = "mutableStateOf\$default"
-        const val TYPE_SETTING_SLIDER_CLASS = HostClasses.Host.TYPE_SETTING_SLIDER
-        const val TYPE_SETTING_SLIDER_METHOD = "TypeSettingSlider-S6oqaS4"
-        const val SLIDER_BRUSH_COLOR_CLASS = HostClasses.Host.SLIDER_BRUSH_COLOR
-        const val MATERIAL_SLIDER_DEFAULTS_CLASS = HostClasses.Host.MATERIAL_SLIDER_DEFAULTS
-        const val SLIDER_DEFAULT_COLORS_METHOD = "defaultColors"
-        const val FUNCTION0_CLASS = HostClasses.Kotlin.FUNCTION0
-        const val FUNCTION1_CLASS = HostClasses.Kotlin.FUNCTION1
-        const val FUNCTION3_CLASS = HostClasses.Kotlin.FUNCTION3
-        const val UNIT_CLASS = HostClasses.Kotlin.KOTLIN_UNIT
-        const val EVA_ICONS_CLASS = "compose.icons.EvaIcons"
-        const val EVA_FILL_KT_CLASS = "compose.icons.evaicons.__FillKt"
-        const val EVA_FILL_METHOD = "getFill"
-        const val EVA_PLAY_CIRCLE_KT_CLASS = "compose.icons.evaicons.fill.PlayCircleKt"
-        const val EVA_PLAY_CIRCLE_METHOD = "getPlayCircle"
-        const val EVA_PAUSE_CIRCLE_KT_CLASS = "compose.icons.evaicons.fill.PauseCircleKt"
-        const val EVA_PAUSE_CIRCLE_METHOD = "getPauseCircle"
-        const val TRANSPARENT_COLOR_METHOD = "getTransparent-0d7_KjU"
-        const val TEXT_DEFAULT_MASK = 131066
-
-        const val PREFS_NAME = "reamicro_reader_auto_page"
-        const val KEY_TIMER_HOURS = "timer_hours"
-        const val KEY_INTERVAL_SECONDS = "interval_seconds"
-        const val DEFAULT_TIMER_HOURS = 0f
-        const val DEFAULT_INTERVAL_SECONDS = 10
-        const val MAX_TIMER_HOURS = 5f
-        const val MIN_INTERVAL_SECONDS = 5
-        const val MAX_INTERVAL_SECONDS = 30
-        const val NATIVE_TYPE_GROUP_TOP_PADDING = 14
-        const val AUTO_PAGE_SECTION_TOP_PADDING = 22
-        const val NATIVE_SECTION_TITLE_BOTTOM_PADDING = 6
-        const val AUTO_PAGE_BUTTON_TOP_PADDING = 22
-        const val AUTO_PAGE_BUTTON_SIZE = 34
-        val AUTO_PAGE_TOKEN = Any()
-        val DISPLAY_TITLE_CANDIDATES = setOf("\u663e\u793a", "\u93c4\u5267\u305a")
-
+        private const val LOG_PREFIX = "ReaMicro LSP"
+        private const val PREFS_NAME = "reamicro_reader_auto_page"
+        private const val KEY_TIMER_HOURS = "timer_hours"
+        private const val KEY_TIMER_MINUTES = "timer_minutes"
+        private const val KEY_INTERVAL_SECONDS = "interval_seconds"
+        private const val DEFAULT_TIMER_HOURS = 0f
+        private const val DEFAULT_INTERVAL_SECONDS = 10f
+        internal const val MAX_TIMER_HOURS = 3f
+        internal const val MIN_INTERVAL_SECONDS = 5f
+        internal const val MAX_INTERVAL_SECONDS = 60f
+        private val AUTO_PAGE_TOKEN = Any()
+        private val READER_VISIBILITY_TOKEN = Any()
         @Volatile private var activeInstance: ReaderAutoPageHook? = null
-
-        fun isAutoPageEnabled(): Boolean =
-            activeInstance?.canRunAutoPage() ?: false
-
-        fun isAutoPageRunning(): Boolean =
-            activeInstance?.isRunning() ?: false
-
-        fun toggleAutoPage() {
-            activeInstance?.toggleAutoPage()
-        }
-
-        fun autoPageIcon(running: Boolean): Any? =
-            activeInstance?.runCatching { autoPageIcon(running) }?.getOrNull()
+        fun observeAutoPageState() { activeInstance?.observeNativeState() }
+        fun isAutoPageEnabled(): Boolean = activeInstance?.nativeEnabled() ?: false
+        fun isAutoPageRunning(): Boolean = activeInstance?.nativeRunning() ?: false
+        fun toggleAutoPage() { activeInstance?.toggleAutoPage() }
+        fun autoPageIcon(running: Boolean): Any? = activeInstance?.runCatching { icon(running) }?.getOrNull()
     }
 }

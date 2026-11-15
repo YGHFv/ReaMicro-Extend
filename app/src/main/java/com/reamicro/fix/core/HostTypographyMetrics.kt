@@ -1,8 +1,6 @@
 package com.reamicro.fix.core
 
-import com.reamicro.fix.xposed.XposedHelpers
-
-/** B4 的 TextStyle getter 已内联到 span/paragraph 字段，数值与像素转换仍用宿主实现。 */
+/** Reads the host's actual text style fields and preserves its native font scaling. */
 internal class HostTypographyMetrics(
     private val loader: ClassLoader, val typography: Any, private val density: Any,
 ) {
@@ -13,41 +11,34 @@ internal class HostTypographyMetrics(
     )
 
     constructor(loader: ClassLoader, composer: Any) : this(
-        loader, B2NativeUi(loader).theme(composer, "getTypography"),
-        requireNotNull(XposedHelpers.callMethod(
-            composer, "consume",
-            loader.hostClass("androidx.compose.ui.platform.CompositionLocalsKt").hostField("LocalDensity").get(null),
-        )),
+        loader, requireNotNull(HostTypographyBindings.current).typography(composer),
+        requireNotNull(HostTypographyBindings.current).density(composer),
     )
 
-    private val reflect = HostReflect(loader)
-    private val densityType = loader.hostClass("androidx.compose.ui.unit.Density")
-    private val toPx = densityType.hostMethod("toPx--R2X_6o", Long::class.javaPrimitiveType)
+    private val symbols = requireNotNull(HostTypographyBindings.current) { "Typography contract unavailable" }
+    private val densityType = symbols.type("density")
+    private val toPx = symbols.method("toPx")
     val densityKey: Pair<Float, Float> =
-        (densityType.hostMethod("getDensity").invoke(density) as Number).toFloat() to
-            (densityType.hostMethod("getFontScale").invoke(density) as Number).toFloat()
-    private val unitValue = loader.hostStaticMethod(
-        "androidx.compose.ui.unit.TextUnit", "getValue-impl", Long::class.javaPrimitiveType,
-    )
-    private val unitType = loader.hostStaticMethod(
-        "androidx.compose.ui.unit.TextUnit", "getType-UIouoOA", Long::class.javaPrimitiveType,
-    )
+        (symbols.method("density").invoke(density) as Number).toFloat() to
+            (symbols.method("fontScale").invoke(density) as Number).toFloat()
+    private val unitValue = symbols.method("unitValue")
+    private val unitType = symbols.method("unitType")
 
     init {
-        check(HostSymbols.abiProfileId == "2.3.3-b4") { "Unverified typography host" }
         check(densityType.isInstance(density))
+        check(symbols.type("typography").isInstance(typography))
     }
 
     fun style(role: String): Style {
-        val style = requireNotNull(reflect.accessor(typography, "get$role"))
-        val span = requireNotNull(reflect.accessor(style, "getSpanStyle"))
-        val paragraph = requireNotNull(reflect.accessor(style, "getParagraphStyle"))
-        val size = (reflect.accessor(span, "getFontSize") as Number).toLong()
-        val line = (reflect.accessor(paragraph, "getLineHeight") as Number).toLong()
-        val spacing = (reflect.accessor(span, "getLetterSpacing") as Number).toLong()
-        val weight = reflect.accessor(span, "getFontWeight")
+        val style = requireNotNull(symbols.field("typography.${role.replaceFirstChar(Char::lowercaseChar)}").get(typography))
+        val span = requireNotNull(symbols.field("span").get(style))
+        val paragraph = requireNotNull(symbols.field("paragraph").get(style))
+        val size = symbols.field("fontSize").getLong(span)
+        val line = symbols.field("lineHeight").getLong(paragraph)
+        val spacing = symbols.field("letterSpacing").getLong(span)
+        val weight = symbols.field("fontWeight").get(span)
         return Style(unit(size), unit(line), unit(spacing),
-            (weight?.let { reflect.accessor(it, "getWeight") } as? Number)?.toInt(),
+            weight?.let { symbols.field("weight").getInt(it) },
             pixels(size), pixels(line))
     }
 

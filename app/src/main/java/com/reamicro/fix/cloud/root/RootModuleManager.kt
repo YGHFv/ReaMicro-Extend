@@ -27,7 +27,9 @@ internal data class RootModuleManager(val kind: Kind, val executable: String) {
     }
 
     fun cancelStaging(): String =
-        "test ! -L '$UPDATE_DIRECTORY' && rm -rf '$UPDATE_DIRECTORY' && test ! -e '$UPDATE_DIRECTORY'"
+        "test ! -L '$MODULE_DIRECTORY' && test ! -L '$UPDATE_DIRECTORY' && " +
+            "rm -rf '$UPDATE_DIRECTORY' && test ! -e '$UPDATE_DIRECTORY' && " +
+            "rm -f '$MODULE_DIRECTORY/update'"
 
     companion object {
         const val MODULE_ID = "reamicro_automation"
@@ -68,9 +70,10 @@ internal data class RootModuleManager(val kind: Kind, val executable: String) {
             manager=
             binary=
             case "${'$'}version" in
-                *KernelSU*|*kernelsu*|*KSU*) manager=ksu; binary=${'$'}ksu ;;
-                *APatch*|*APATCH*|*apatch*) manager=apatch; binary=${'$'}apatch ;;
+                # MAGISKSU also contains KSU; match explicit providers first.
                 *MAGISK*|*Magisk*|*magisk*) manager=magisk; binary=${'$'}magisk ;;
+                *APatch*|*APATCH*|*apatch*) manager=apatch; binary=${'$'}apatch ;;
+                *KernelSU*|*kernelsu*|*KSU*) manager=ksu; binary=${'$'}ksu ;;
             esac
             if [ -z "${'$'}manager" ]; then
                 count=0

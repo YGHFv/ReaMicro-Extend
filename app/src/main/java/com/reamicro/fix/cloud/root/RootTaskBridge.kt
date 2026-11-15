@@ -12,7 +12,9 @@ import com.reamicro.fix.notification.CloudTaskNotifications
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 internal object RootTaskBridge {
 
@@ -40,7 +42,10 @@ internal object RootTaskBridge {
     private var syncQueued = false
     private var syncDirty = false
     private val syncCallbacks = mutableListOf<() -> Unit>()
-    private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { runnable -> Thread(runnable, "ReaMicroRootBridge").apply { isDaemon = true } }
+    private val worker = com.reamicro.fix.reload.ModuleResources.pool(
+        1, 1, 30, TimeUnit.SECONDS, LinkedBlockingQueue<Runnable>(1),
+        { runnable -> Thread(runnable, "ReaMicroRootBridge").apply { isDaemon = true } },
+    ).apply { allowCoreThreadTimeOut(true) }
 
     fun isEnabled(context: Context): Boolean = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("enabled", false)
 
@@ -67,6 +72,7 @@ internal object RootTaskBridge {
 
     @Synchronized
     fun enable(context: Context): String = LocalTaskRunner.withTaskControl {
+        check(com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) { "补全计划已关闭" }
         require(android.os.Process.myUid() / 100000 == 0) { context.moduleString(R.string.error_ksu_primary_user) }
         try {
             val access = inspect(context)
@@ -207,6 +213,7 @@ internal object RootTaskBridge {
 
     @Synchronized
     fun synchronize(context: Context, force: Boolean = false, requested: LocalTaskKey? = null) {
+        if (!com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) return
         if (!isEnabled(context)) return
         prepareTransport(context)
         try {
@@ -240,6 +247,7 @@ internal object RootTaskBridge {
 
     @Synchronized
     fun reschedule(context: Context): Int {
+        if (!com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) return 0
         prepareTransport(context)
         val snapshot = command(context, "reschedule")
         applySnapshot(context, snapshot)
@@ -259,6 +267,10 @@ internal object RootTaskBridge {
     }
 
     fun requestSync(context: Context, onComplete: (() -> Unit)? = null) {
+        if (!com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) {
+            onComplete?.invoke()
+            return
+        }
         val appContext = context.applicationContext
         if (appContext.packageName != CloudTaskNotifications.MODULE_PACKAGE_NAME || !isEnabled(appContext)) {
             onComplete?.invoke()
@@ -270,29 +282,46 @@ internal object RootTaskBridge {
             if (syncQueued) return
             syncQueued = true
         }
-        worker.execute {
-            while (true) {
-
-                val callbacks = synchronized(syncLock) {
-                    syncDirty = false
-                    syncCallbacks.toList().also { syncCallbacks.clear() }
-                }
-                try {
-                    prepareTransport(appContext)
-                    applySnapshot(appContext, command(appContext, "snapshot", timeoutSeconds = 10))
-                    synchronize(appContext)
-                } catch (error: Throwable) {
-                    ModuleAndroidLog.error(LOG_TAG, "Root 状态同步失败：${error.message}")
-                }
-                callbacks.forEach { callback ->
-                    runCatching(callback).onFailure {
-                        ModuleAndroidLog.error(LOG_TAG, "Root 同步回调失败：${it.message}")
+        try {
+            worker.execute {
+                while (true) {
+                    val callbacks = synchronized(syncLock) {
+                        syncDirty = false
+                        syncCallbacks.toList().also { syncCallbacks.clear() }
                     }
+                    try {
+                        // Configure merges only newer settings and returns the current executor
+                        // snapshot. A preliminary snapshot would start ART a second time and
+                        // rewrite the same application preferences on every synchronization.
+                        synchronize(appContext)
+                    } catch (error: Throwable) {
+                        ModuleAndroidLog.error(LOG_TAG, "Root 状态同步失败：${error.message}")
+                    } finally {
+                        completeSyncCallbacks(callbacks)
+                    }
+                    val again = synchronized(syncLock) {
+                        if (syncDirty) true else { syncQueued = false; false }
+                    }
+                    if (!again) break
                 }
-                val again = synchronized(syncLock) {
-                    if (syncDirty) true else { syncQueued = false; false }
-                }
-                if (!again) break
+            }
+        } catch (error: RejectedExecutionException) {
+            // A rejected submission never owns the queue. Finish goAsync callbacks and
+            // allow the next generation/request to schedule its own synchronization.
+            val callbacks = synchronized(syncLock) {
+                syncQueued = false
+                syncDirty = false
+                syncCallbacks.toList().also { syncCallbacks.clear() }
+            }
+            completeSyncCallbacks(callbacks)
+            ModuleAndroidLog.error(LOG_TAG, "Root 同步未入队：${error.message}")
+        }
+    }
+
+    private fun completeSyncCallbacks(callbacks: List<() -> Unit>) {
+        callbacks.forEach { callback ->
+            runCatching(callback).onFailure {
+                ModuleAndroidLog.error(LOG_TAG, "Root 同步回调失败：${it.message}")
             }
         }
     }

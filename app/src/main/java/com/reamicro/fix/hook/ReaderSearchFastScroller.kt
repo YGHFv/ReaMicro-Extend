@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable internal fun BoxScope.ReaderSearchFastScroller(
-    state: LazyListState, palette: StructureHome130Style.Palette, scale: Float,
+    state: LazyListState, palette: HostEmbeddedStyle.Palette, scale: Float,
 ) {
     val count by remember(state) { derivedStateOf { state.layoutInfo.totalItemsCount } }
     if (count <= 20) return

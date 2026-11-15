@@ -8,7 +8,11 @@ import android.os.Binder
 import android.os.Bundle
 
 class HotReloadProvider : ContentProvider() {
-    override fun onCreate() = true
+    override fun onCreate(): Boolean {
+        // Providers can receive calls before Application.onCreate has returned.
+        HotReloadService.initialize(requireNotNull(context))
+        return true
+    }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
         val context = requireNotNull(context)

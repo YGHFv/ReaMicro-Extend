@@ -1,76 +1,28 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.HostTypographyMetrics
-
 import android.content.Context
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 
 internal object BookImageDialogStyle {
-    private data class UnitValue(val value: Float, val em: Boolean) {
-        fun local(): TextUnit = if (em) value.em else value.sp
-    }
-    private data class Type(val size: UnitValue?, val line: UnitValue?, val spacing: UnitValue?, val weight: Int)
-    @Volatile private var types: Map<String, Type> = emptyMap()
-    private val roles = listOf("TitleSmall", "BodyLarge", "BodyMedium", "BodySmall", "LabelLarge", "LabelMedium")
-
-    fun capture(loader: ClassLoader, composer: Any?) {
-        if (composer == null) return
-        runCatching {
-            if (HostSymbols.abiProfileId == "2.3.3-b4") {
-                val metrics = HostTypographyMetrics(loader, composer)
-                fun unit(value: HostTypographyMetrics.UnitValue?) = value?.let { UnitValue(it.value, it.em) }
-                types = roles.associateWith { role ->
-                    val style = metrics.style(role)
-                    Type(unit(style.fontSize), unit(style.lineHeight), unit(style.letterSpacing), style.fontWeight ?: 400)
-                }
-                return
-            }
-            val composerClass = loader.loadClass("androidx.compose.runtime.Composer")
-            if (!composerClass.isInstance(composer)) return
-            val material = loader.loadClass("androidx.compose.material3.MaterialTheme")
-            val typography = material.getMethod("getTypography", composerClass, Int::class.javaPrimitiveType)
-                .invoke(material.hostField("INSTANCE").get(null), composer, 6)
-            val unitClass = loader.loadClass("androidx.compose.ui.unit.TextUnit")
-            val value = unitClass.getDeclaredMethod("getValue-impl", Long::class.javaPrimitiveType)
-            val isEm = unitClass.getDeclaredMethod("isEm-impl", Long::class.javaPrimitiveType)
-            val isSp = unitClass.getDeclaredMethod("isSp-impl", Long::class.javaPrimitiveType)
-            fun unit(style: Any, name: String): UnitValue? {
-                val packed = style.javaClass.methods.single { it.name.startsWith("$name-") && it.parameterCount == 0 }
-                    .invoke(style) as Long
-                if (isSp.invoke(null, packed) != true && isEm.invoke(null, packed) != true) return null
-                val number = (value.invoke(null, packed) as Number).toFloat()
-                return number.takeIf { it.isFinite() }?.let { UnitValue(it, isEm.invoke(null, packed) == true) }
-            }
-            val next = roles.associateWith { role ->
-                val style = requireNotNull(typography.javaClass.getMethod("get$role").invoke(typography))
-                val weight = style.javaClass.getMethod("getFontWeight").invoke(style)
-                Type(unit(style, "getFontSize"), unit(style, "getLineHeight"), unit(style, "getLetterSpacing"),
-                    (weight?.javaClass?.getMethod("getWeight")?.invoke(weight) as? Number)?.toInt() ?: 400)
-            }
-            types = next
-        }
-    }
-
+    fun capture(loader: ClassLoader, composer: Any?) = EmbeddedHostUi.captureTypography(loader, composer)
     fun typography(context: Context, scale: Float): Typography {
         val family = EmbeddedHostUi.uiFontFamily(context)
         fun style(role: String, size: Int, bold: Boolean, spacing: Float): TextStyle {
-            val native = types[role]
-            return TextStyle(fontFamily = family,
-                fontSize = native?.size?.local() ?: (size * scale).sp,
-                lineHeight = native?.line?.local() ?: 1.5.em,
-                letterSpacing = native?.spacing?.local() ?: (spacing * scale).sp,
-                fontWeight = FontWeight(native?.weight ?: if (bold) 700 else 400),
-                platformStyle = PlatformTextStyle(includeFontPadding = false))
+            return EmbeddedHostUi.textStyle(role, TextStyle(fontFamily = family,
+                fontSize = (size * scale).sp,
+                lineHeight = 1.5.em,
+                letterSpacing = (spacing * scale).sp,
+                fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
+                platformStyle = PlatformTextStyle(includeFontPadding = false)))
         }
         return Typography(
+            titleLarge = style("TitleLarge", 19, true, 2f),
+            titleMedium = style("TitleMedium", 17, true, 1.5f),
             titleSmall = style("TitleSmall", 15, true, 1f),
             bodyLarge = style("BodyLarge", 14, false, 1f),
             bodyMedium = style("BodyMedium", 12, false, 1f),

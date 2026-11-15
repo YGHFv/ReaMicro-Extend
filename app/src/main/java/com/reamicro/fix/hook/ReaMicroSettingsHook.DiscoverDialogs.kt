@@ -1,7 +1,8 @@
 package com.reamicro.fix.hook
 
+import com.reamicro.fix.reload.runOnModuleUiThread
+
 import android.app.Activity
-import android.app.Dialog
 import android.content.Context
 import android.graphics.Color
 import android.text.Editable
@@ -17,7 +18,7 @@ import com.reamicro.fix.discover.DiscoverBook
 import com.reamicro.fix.online.download.OnlineBookDownloadMode
 import com.reamicro.fix.hook.webdav.OnlineBookSearchResult
 import com.reamicro.fix.hook.webdav.OnlineDownloadTarget
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.discover.DiscoverSource
 import com.reamicro.fix.discover.DiscoverState
 
@@ -28,11 +29,11 @@ internal fun ReaMicroSettingsHook.openDiscoverSourceDialog(
     val sources = DiscoverState.sources
     if (sources.isEmpty()) return
     val currentSourceId = DiscoverState.selection.sourceId
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val context: Context = activity
             val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = discoverDialogCard(context, colors)
             card.addView(settingsDialogTitle(context, DISCOVER_SOURCE_DIALOG_TITLE, colors))
 
@@ -90,20 +91,24 @@ internal fun ReaMicroSettingsHook.openDiscoverKindDialog(activity: Activity) {
     val entry = DiscoverState.sources.firstOrNull { it.source.id == selection.sourceId } ?: return
     val kinds = DiscoverState.kindsFor(entry)
     if (kinds.isEmpty()) return
-    activity.runOnUiThread {
+    if (kinds.any { it.control != null }) {
+        openEnhancedDiscoverControls(entry)
+        return
+    }
+    activity.runOnModuleUiThread {
         runCatching {
             val context: Context = activity
             val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = discoverDialogCard(context, colors)
             card.addView(settingsDialogTitle(context, DISCOVER_KIND_DIALOG_TITLE, colors))
 
             kinds.forEach { kind ->
                 card.addView(discoverDialogAction(context, kind.title, colors) {
                     dialog.dismiss()
-                    DiscoverState.select(entry.source.id, kind.title, activity.applicationContext)
+                    DiscoverState.select(entry.source.id, kind.title, activity.applicationContext, kind.key)
                 }.apply {
-                    isSelected = kind.title == selection.kindTitle
+                    isSelected = kind.key == selection.kindKey
                     if (isSelected) background = settingsRoundedRect(colors.primarySoft, settingsDp(context, 8))
                 })
             }
@@ -181,11 +186,11 @@ private const val DISCOVER_SOURCE_BADGE_MAX = 10
 
 internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
     if (DiscoverState.sources.isEmpty()) return
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val context: Context = activity
             val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = discoverDialogCard(context, colors)
 
             val titleView = settingsDialogTitle(context, DISCOVER_CONFIG_DIALOG_TITLE, colors)
@@ -288,7 +293,7 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
 
             showSettingsDialog(dialog, settingsDialogScroll(context, card), activity, 0.92f, dismissOnThemeChange = true)
         }.onFailure {
-            XposedBridge.log("$DISCOVER_LOG_PREFIX config dialog failed: ${it.stackTraceToString()}")
+            HookRuntime.log("$DISCOVER_LOG_PREFIX config dialog failed: ${it.stackTraceToString()}")
         }
     }
 }
@@ -366,11 +371,11 @@ private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
     currentTitle: String,
     onPick: (String) -> Unit,
 ) {
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         runCatching {
             val context: Context = activity
             val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
             val card = discoverDialogCard(context, colors)
             card.addView(settingsDialogTitle(context, group.name, colors))
             val listHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -429,18 +434,29 @@ private const val DISCOVER_CONFIG_SOURCE_SUFFIX = " ▾"
 private const val DISCOVER_CONFIG_OPTION_FALLBACK = "全部"
 
 internal fun ReaMicroSettingsHook.openDiscoverBookDialog(activity: Activity, source: DiscoverSource, book: DiscoverBook) {
-    activity.runOnUiThread {
-        if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+    activity.runOnModuleUiThread {
+        if (activity.isFinishing || activity.isDestroyed) return@runOnModuleUiThread
         runCatching {
             val colors = SettingsDialogColors(activity, discoverDialogPalette(activity))
-            val dialog = Dialog(activity)
+            val dialog = settingsDialog(activity)
+            HostSettingsDialogs.setTitleStyle(dialog, "titleMedium")
             val card = discoverDialogCard(activity, colors)
             card.addView(settingsDialogTitle(activity, book.name, colors))
-            card.addView(settingsDialogHint(activity, listOf(book.author, source.name).filter { it.isNotBlank() }.joinToString(" · "), colors))
+            card.addView(settingsDialogHint(activity, listOf(book.author, source.name).filter { it.isNotBlank() }.joinToString(" · "), colors)
+                .apply {
+                    EmbeddedHostUi.text(this, "BodyMedium")
+                    (layoutParams as LinearLayout.LayoutParams).bottomMargin = settingsDp(activity, 4)
+                })
             val tags = discoverTagLine(book, source)
-            if (tags.isNotBlank()) card.addView(settingsDialogHint(activity, tags, colors))
+            if (tags.isNotBlank()) card.addView(settingsDialogHint(activity, tags, colors)
+                .apply {
+                    EmbeddedHostUi.text(this, "BodySmall")
+                    (layoutParams as LinearLayout.LayoutParams).bottomMargin = settingsDp(activity, 4)
+                })
             if (book.intro.isNotBlank()) {
                 val introView = settingsDialogHint(activity, book.intro.trim(), colors).apply {
+                    EmbeddedHostUi.text(this, "BodyMedium")
+                    setTextColor(colors.title)
                     setTextIsSelectable(true)
                 }
                 val introScroll = object : ScrollView(activity) {
@@ -457,10 +473,15 @@ internal fun ReaMicroSettingsHook.openDiscoverBookDialog(activity: Activity, sou
                     ))
                 }
                 card.addView(introScroll, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
-                ).apply { bottomMargin = settingsDp(activity, 10) })
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { topMargin = settingsDp(activity, 8) })
             }
             fun startDownload(mode: OnlineBookDownloadMode) {
+                if (!com.reamicro.fix.online.OnlineSourceStore.isCurrent(source.source)) {
+                    showToast("在线源已更新或删除，请重新选择书籍")
+                    dialog.dismiss()
+                    return
+                }
                 val hook = WebDavDriveHook.activeInstance
                 if (hook == null) {
                     showToast("在线书源模块未就绪")
@@ -469,21 +490,20 @@ internal fun ReaMicroSettingsHook.openDiscoverBookDialog(activity: Activity, sou
                 dialog.dismiss()
                 runCatching { hook.startOnlineCompletionDownload(discoverDownloadTarget(source, book), mode) }
                     .onFailure {
-                        XposedBridge.log("$DISCOVER_LOG_PREFIX start download failed: ${it.message}")
+                        HookRuntime.log("$DISCOVER_LOG_PREFIX start download failed: ${it.message}")
                         showToast("无法启动下载，请重试")
                     }
             }
-            val close = discoverTextButton(activity, "关闭", colors) { dialog.dismiss() }
-            val onDemand = discoverTextButton(activity, "逐章加载", colors) {
-                startDownload(OnlineBookDownloadMode.ON_DEMAND)
-            }
-            val full = discoverTextButton(activity, "整本下载", colors) {
-                startDownload(OnlineBookDownloadMode.FULL)
-            }
-            card.addView(settingsDialogButtonRow(activity, listOf(close, onDemand, full)))
+            // The host keeps its action row outside the scrollable form, with its own spacing.
+            (card.getChildAt(card.childCount - 1).layoutParams as? LinearLayout.LayoutParams)?.bottomMargin = 0
+            HostSettingsDialogs.setActions(dialog, listOf(
+                HostSettingsDialogs.Action("关闭") { dialog.dismiss() },
+                HostSettingsDialogs.Action("逐章加载") { startDownload(OnlineBookDownloadMode.ON_DEMAND) },
+                HostSettingsDialogs.Action("整本下载") { startDownload(OnlineBookDownloadMode.FULL) },
+            ))
             showSettingsDialog(dialog, card, activity, dismissOnThemeChange = true)
         }.onFailure {
-            XposedBridge.log("$DISCOVER_LOG_PREFIX book dialog failed: ${it.message}")
+            HookRuntime.log("$DISCOVER_LOG_PREFIX book dialog failed: ${it.message}")
             showToast("无法打开书籍面板，请重试")
         }
     }
@@ -535,6 +555,7 @@ private fun discoverDownloadTarget(source: DiscoverSource, book: DiscoverBook): 
             wordCount = book.wordCount,
             updateTime = book.updateTime,
             platformName = "",
+            parsingState = book.parsingState,
         ),
     )
 

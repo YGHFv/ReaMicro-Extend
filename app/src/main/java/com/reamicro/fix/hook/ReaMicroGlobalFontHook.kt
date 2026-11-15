@@ -3,53 +3,92 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.app.Dialog
 import android.graphics.Typeface
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import com.reamicro.fix.core.HostClasses
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostNameMatches
-import com.reamicro.fix.core.hostNameStartsWith
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostClassOrNull
-import com.reamicro.fix.core.typeMatches
 import com.reamicro.fix.settings.XposedModuleSettings
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
 import java.io.File
-import java.lang.reflect.Method
+import java.util.WeakHashMap
 
 class ReaMicroGlobalFontHook(
     private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settings: XposedModuleSettings,
 ) {
-    private val methodCache = HashMap<String, Method>()
+    private val host get() = requireNotNull(com.reamicro.fix.core.HostGlobalFontBindings.current)
     private val fontFamilyCache = HashMap<String, Any>()
     private val androidTypefaceCache = HashMap<String, Typeface>()
     private val composeFontFamilyCache = HashMap<String, FontFamily>()
     private val failedFontFamilyLogKeys = HashSet<String>()
-    private val readerTextDepth = ThreadLocal.withInitial { 0 }
-    private val fontPreviewDepth = ThreadLocal.withInitial { 0 }
+    private val readerTextDepth = ThreadLocal<Int>()
+    private val fontPreviewDepth = ThreadLocal<Int>()
     private val appliedLogKeys = HashSet<String>()
+    private val pendingDialogLayouts = WeakHashMap<View, View.OnLayoutChangeListener>()
     @Volatile private var cachedGlobalFont: CachedGlobalFont? = null
 
     fun install() {
-        EmbeddedHostUi.bindUiFontResolver(::globalAndroidTypeface)
-        EmbeddedHostUi.bindUiFontFamilyResolver(::globalComposeFontFamily)
-        EmbeddedHostUi.bindMaterialFontFamilyResolver { host, nativeFamily ->
-            val selection = if (settings.snapshot().canUseFontSettings) settings.fontSettings().globalFamily else ""
-            if (selection.isBlank()) nativeFamily else globalComposeFontFamily(host)
+        val symbols = host
+        val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
+        try {
+            fun scope(method: java.lang.reflect.Method, depth: ThreadLocal<Int>) {
+                handles += HookRuntime.hookMethod(method, object : HookCallback() {
+                    override fun before(param: Call) { depth.set((depth.get() ?: 0) + 1) }
+                    override fun after(param: Call) {
+                        val remaining = (depth.get() ?: 1) - 1
+                        if (remaining <= 0) depth.remove() else depth.set(remaining)
+                    }
+                })
+                HookRuntime.deoptimize(method)
+            }
+            symbols.methods("reader.").distinct().forEach { scope(it, readerTextDepth) }
+            scope(symbols.method("preview"), fontPreviewDepth)
+            for (method in symbols.methods("text.")) {
+                handles += HookRuntime.hookMethod(method, object : HookCallback() {
+                    override fun before(param: Call) {
+                        if (readerDepth() > 0) return
+                        val args = param.args
+                        val family = symbols.number("family")
+                        val style = args[symbols.number("style")]
+                        val explicit = style?.let { symbols.field("style.span").get(it) }
+                            ?.let { symbols.field("span.family").get(it) }
+                        if (fontPreviewDepth() > 0 && (args[family] != null || explicit != null)) return
+                        val resolved = resolveGlobalUiFontCached() ?: return
+                        args[family] = resolved.family
+                        val mask = symbols.number("mask")
+                        args[mask] = (args[mask] as Int) and symbols.number("familyBit").inv()
+                        logApplied("text", resolved.selection)
+                    }
+                })
+                HookRuntime.deoptimize(method)
+            }
+            handles += HookRuntime.hookMethod(Dialog::class.java.getDeclaredMethod("show"), object : HookCallback() {
+                override fun after(param: Call) { (param.thisObject as? Dialog)?.let(::applyGlobalFontToDialog) }
+            })
+            EmbeddedHostUi.bindUiFontResolver(::globalAndroidTypeface)
+            EmbeddedHostUi.bindUiFontFamilyResolver(::globalComposeFontFamily)
+            EmbeddedHostUi.bindMaterialFontFamilyResolver { context, nativeFamily ->
+                val selection = if (settings.snapshot().canUseFontSettings) settings.fontSettings().globalFamily else ""
+                if (selection.isBlank()) nativeFamily else globalComposeFontFamily(context)
+            }
+            com.reamicro.fix.reload.ModuleResources.cleanup {
+                readerTextDepth.remove(); fontPreviewDepth.remove(); invalidateGlobalFontCache()
+                synchronized(failedFontFamilyLogKeys) { failedFontFamilyLogKeys.clear() }
+                synchronized(appliedLogKeys) { appliedLogKeys.clear() }
+                val pending = synchronized(pendingDialogLayouts) {
+                    pendingDialogLayouts.map { it.key to it.value }.also { pendingDialogLayouts.clear() }
+                }
+                pending.forEach { (view, listener) -> view.removeOnLayoutChangeListener(listener) }
+            }
+        } catch (error: Throwable) {
+            handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
+            throw error
         }
-        hookReaderTextScopes()
-        hookReaderFontPreviewScopes()
-        hookThemeSerifFont()
-        hookMaterialTextFallback()
-        hookAndroidDialogTextFallback()
     }
 
     fun invalidateGlobalFontCache() {
@@ -61,147 +100,29 @@ class ReaMicroGlobalFontHook(
         synchronized(composeFontFamilyCache) { composeFontFamilyCache.clear() }
     }
 
-    private fun hookThemeSerifFont() {
-        // B2 已将主题 family getter 内联；UI 字体由原生 Text 输入桥负责。
-        if (!HostSymbols.isIdentity) return
-        runCatching {
-            val textStyleClass = cls(HOST_TEXT_STYLE_KT_CLASS)
-            val methods = textStyleClass.declaredMethods.filter {
-                it.name == "rememberSerifFontFamily" &&
-                    it.returnType.name == FONT_FAMILY_CLASS
-            }
-            if (methods.isEmpty()) error("rememberSerifFontFamily not found")
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        EmbeddedHostUi.captureTypography(classLoader, param.args?.firstOrNull())
-                        val resolved = resolveGlobalUiFontCached() ?: return
-                        param.result = resolved.family
-                        logApplied("theme", resolved.selection)
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX global UI font theme hook installed: ${methods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX global UI font theme hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookReaderTextScopes() {
-        runCatching {
-            val methods = cls(READER_SCREEN_KT_CLASS).declaredMethods.filter { method ->
-                listOf("ReaderScreen", "ReaderToolBox", "InitEpubWindow", "BottomSheet")
-                    .any(method::hostNameStartsWith)
-            }
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        readerTextDepth.set(readerDepth() + 1)
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        readerTextDepth.set((readerDepth() - 1).coerceAtLeast(0))
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX global UI font reader text scope hook installed: ${methods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX global UI font reader text scope hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookReaderFontPreviewScopes() {
-        runCatching {
-            val previewClass = classLoader.hostClassOrNull(READER_FAMILY_USER_KT_CLASS)
-                ?: run {
-                    // B4 删除了独立的 ReaderFamilyUser 页面；主字体 hook 仍保持有效。
-                    XposedBridge.log("$LOG_PREFIX global UI font preview scope hook skipped: ReaderFamilyUser absent")
-                    return
-                }
-            val methods = previewClass.declaredMethods.filter { method ->
-                method.hostNameStartsWith("FamilyRow")
-            }
-            if (methods.isEmpty()) {
-                XposedBridge.log("$LOG_PREFIX global UI font preview scope hook skipped: FamilyRow absent")
-                return
-            }
-            methods.forEach { method ->
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        fontPreviewDepth.set(fontPreviewDepth() + 1)
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        fontPreviewDepth.set((fontPreviewDepth() - 1).coerceAtLeast(0))
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX global UI font preview scope hook installed: ${methods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX global UI font preview scope hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookMaterialTextFallback() {
-        runCatching {
-            val textKtClass = cls(MATERIAL_TEXT_KT_CLASS)
-            val methods = textKtClass.declaredMethods.filter { method ->
-                method.hostNameStartsWith("Text") &&
-                    method.parameterTypes.any { typeMatches(it, FONT_FAMILY_CLASS) } &&
-                    method.parameterTypes.lastOrNull() == Int::class.javaPrimitiveType
-            }
-            if (methods.isEmpty()) error("Material Text methods with FontFamily not found")
-            methods.forEach { method ->
-                val fontFamilyIndex = method.parameterTypes.indexOfFirst { typeMatches(it, FONT_FAMILY_CLASS) }
-                if (fontFamilyIndex < 0) return@forEach
-                val textStyleIndex = method.parameterTypes.indexOfFirst { typeMatches(it, TEXT_STYLE_CLASS) }
-                method.isAccessible = true
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val args = param.args ?: return
-                        if (fontFamilyIndex >= args.size) return
-                        if (isReaderTextScope()) return
-                        if (
-                            isFontPreviewScope() &&
-                            (args[fontFamilyIndex] != null || styleHasExplicitFontFamily(args, textStyleIndex))
-                        ) return
-                        val resolved = resolveGlobalUiFontCached() ?: return
-                        args[fontFamilyIndex] = resolved.family
-                        clearDefaultMask(args, fontFamilyIndex,
-                            com.reamicro.fix.core.HostTextDefaults.fontFamilyBit(HostSymbols.profileId, fontFamilyIndex))
-                        logApplied("text", resolved.selection)
-                    }
-                })
-            }
-            XposedBridge.log("$LOG_PREFIX global UI font Material Text hook installed: ${methods.size}")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX global UI font Material Text hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookAndroidDialogTextFallback() {
-        runCatching {
-            XposedHelpers.findAndHookMethod(Dialog::class.java, "show", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val dialog = param.thisObject as? Dialog ?: return
-                    applyGlobalFontToDialog(dialog)
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX global UI font Android Dialog hook installed")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX global UI font Android Dialog hook failed: ${it.stackTraceToString()}")
-        }
-    }
-
     private fun applyGlobalFontToDialog(dialog: Dialog) {
         val decor = dialog.window?.decorView ?: return
         val resolved = resolveGlobalAndroidTypefaceCached() ?: return
         applyGlobalFontToViewTree(decor, resolved.typeface, resolved.selection == "host")
-        decor.post { applyGlobalFontToViewTree(decor, resolved.typeface, resolved.selection == "host") }
-        decor.postDelayed({ applyGlobalFontToViewTree(decor, resolved.typeface, resolved.selection == "host") }, 120L)
+        val listener = object : View.OnLayoutChangeListener {
+            override fun onLayoutChange(
+                view: View, left: Int, top: Int, right: Int, bottom: Int,
+                oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int,
+            ) {
+                val lease = com.reamicro.fix.reload.ModuleResources.lease() ?: return
+                lease.use {
+                    view.removeOnLayoutChangeListener(this)
+                    synchronized(pendingDialogLayouts) {
+                        if (pendingDialogLayouts[view] === this) pendingDialogLayouts.remove(view)
+                    }
+                    val current = resolveGlobalAndroidTypefaceCached() ?: return
+                    applyGlobalFontToViewTree(view, current.typeface, current.selection == "host")
+                }
+            }
+        }
+        synchronized(pendingDialogLayouts) { pendingDialogLayouts.put(decor, listener) }
+            ?.let(decor::removeOnLayoutChangeListener)
+        decor.addOnLayoutChangeListener(listener)
         logApplied("dialog", resolved.selection)
     }
 
@@ -224,32 +145,6 @@ class ReaMicroGlobalFontHook(
         else Typeface.create(baseTypeface, style)
     }
 
-    private fun clearDefaultMask(args: Array<Any?>, parameterIndex: Int, bit: Int) {
-        if (parameterIndex !in 0..30) return
-        val maskIndex = args.lastIndex
-        val mask = (args.getOrNull(maskIndex) as? Number)?.toInt() ?: return
-        args[maskIndex] = mask and bit.inv()
-    }
-
-    private fun isReaderTextScope(): Boolean =
-        readerDepth() > 0
-
-    private fun isFontPreviewScope(): Boolean =
-        fontPreviewDepth() > 0
-
-    private fun styleHasExplicitFontFamily(args: Array<Any?>, textStyleIndex: Int): Boolean {
-        if (textStyleIndex !in args.indices) return false
-        val textStyle = args[textStyleIndex] ?: return false
-        return runCatching {
-            if (HostSymbols.isIdentity) {
-                XposedHelpers.callMethod(textStyle, "getFontFamily") != null
-            } else {
-                val span = XposedHelpers.callMethod(textStyle, "getSpanStyle")
-                span != null && XposedHelpers.callMethod(span, "getFontFamily") != null
-            }
-        }.getOrDefault(false)
-    }
-
     private fun readerDepth(): Int =
         readerTextDepth.get() ?: 0
 
@@ -257,11 +152,20 @@ class ReaMicroGlobalFontHook(
         fontPreviewDepth.get() ?: 0
 
     private fun resolveGlobalUiFontCached(): ResolvedGlobalFont? {
-        val now = System.currentTimeMillis()
-        val selection = settings.fontSettings().globalFamily
-        cachedGlobalFont?.takeIf { now - it.atMs < GLOBAL_FONT_CACHE_WINDOW_MS && it.selection == selection }?.let { return it.font }
+        val now = SystemClock.uptimeMillis()
+        val selection = if (settings.snapshot().canUseFontSettings) settings.fontSettings().globalFamily else ""
+        if (selection.isBlank()) return null
+        val activity = activityProvider()
+        val identity = runCatching { AccountHostRuntime.storageSnapshot(activity) }.getOrNull()
+        val accountKey = "${identity?.accountId}|${identity?.generation}"
+        cachedGlobalFont?.takeIf { now - it.atMs < GLOBAL_FONT_CACHE_WINDOW_MS &&
+            it.selection == selection && it.accountKey == accountKey }?.let {
+            if (identity == null || runCatching { AccountHostRuntime.isCurrentStorage(identity, activity) }.getOrDefault(false)) return it.font
+        }
         val resolved = resolveGlobalUiFont()
-        cachedGlobalFont = CachedGlobalFont(now, resolved, selection)
+        if (!settings.snapshot().canUseFontSettings || identity != null &&
+            !runCatching { AccountHostRuntime.isCurrentStorage(identity, activity) }.getOrDefault(false)) return null
+        cachedGlobalFont = CachedGlobalFont(now, resolved, selection, accountKey)
         return resolved
     }
 
@@ -292,11 +196,11 @@ class ReaMicroGlobalFontHook(
         synchronized(composeFontFamilyCache) {
             composeFontFamilyCache[key]?.let { return it }
         }
-        val family = if (file == null) StructureHome130Style.fonts(host).serif else {
+        val family = if (file == null) HostEmbeddedStyle.fonts(host).serif else {
             runCatching {
                 FontFamily(Font(file, weight = FontWeight.Normal), Font(file, weight = FontWeight.Bold))
             }.onFailure { logResolveFontFamilyFailure(selection, it) }
-                .getOrElse { StructureHome130Style.fonts(host).serif }
+                .getOrElse { HostEmbeddedStyle.fonts(host).serif }
         }
         synchronized(composeFontFamilyCache) { composeFontFamilyCache[key] = family }
         return family
@@ -360,66 +264,21 @@ class ReaMicroGlobalFontHook(
     private fun resolveDefaultFontFamily(): Any? =
         com.reamicro.fix.core.HostFontFamilies.system(classLoader)
 
-    private fun fontWeight(methodName: String): Any {
-        val clazz = cls(FONT_WEIGHT_CLASS)
-        companionFontWeight(clazz, methodName)?.let { return it }
-        val (fieldName, weight) = when (methodName) {
-            "getBold" -> "Bold" to 700
-            else -> "Normal" to 400
-        }
-        staticFontWeight(clazz, fieldName)?.let { return it }
-        return clazz.getDeclaredConstructor(Int::class.javaPrimitiveType)
-            .apply { isAccessible = true }
-            .newInstance(weight)
+    private fun resolveFontFile(selection: String): File? {
+        val activity = activityProvider() ?: return null
+        val identity = runCatching { AccountHostRuntime.storageSnapshot(activity) }.getOrNull() ?: return null
+        val file = runCatching { com.reamicro.fix.epub.editor.AccountFontFiles.resolve(
+            activity.filesDir, identity.accountId, selection,
+        ) }.getOrNull() ?: return null
+        return file.takeIf { runCatching { AccountHostRuntime.isCurrentStorage(identity, activity) }.getOrDefault(false) }
     }
-
-    private fun companionFontWeight(clazz: Class<*>, methodName: String): Any? {
-        for (fieldName in listOf("INSTANCE", "Companion")) {
-            val companion = runCatching {
-                clazz.getDeclaredField(fieldName).apply { isAccessible = true }.get(null)
-            }.recoverCatching {
-                clazz.getField(fieldName).apply { isAccessible = true }.get(null)
-            }.getOrNull() ?: continue
-            val method = companion.javaClass.methods.firstOrNull {
-                it.name == methodName && it.parameterTypes.isEmpty()
-            } ?: continue
-            return method.invoke(companion)
-        }
-        return null
-    }
-
-    private fun staticFontWeight(clazz: Class<*>, fieldName: String): Any? =
-        runCatching {
-            clazz.getDeclaredField(fieldName).apply { isAccessible = true }.get(null)
-        }.recoverCatching {
-            clazz.getField(fieldName).apply { isAccessible = true }.get(null)
-        }.getOrNull()
-
-    private fun resolveFontFile(selection: String): File? =
-        com.reamicro.fix.epub.editor.FontSelectionResolution.file(selection,
-            activityProvider()?.filesDir?.let(::fontDirectories).orEmpty())
-    private fun fontDirectories(filesDir: File): List<File> {
-        val dirs = filesDir.listFiles()
-            ?.filter { it.isDirectory && it.name.toLongOrNull() != null }
-            ?.map { File(it, "fonts") }
-            ?.toMutableList()
-            ?: mutableListOf()
-        val defaultDir = File(File(filesDir, "0"), "fonts")
-        if (dirs.none { it.absolutePath == defaultDir.absolutePath }) {
-            dirs.add(defaultDir)
-        }
-        return dirs.filter { it.exists() && it.isDirectory }.distinctBy { it.absolutePath }
-    }
-
-    private fun isFontFileName(name: String): Boolean =
-        name.endsWith(".ttf", ignoreCase = true) || name.endsWith(".otf", ignoreCase = true)
 
     private fun logResolveFontFamilyFailure(selection: String, error: Throwable) {
         val key = "$selection|${error.javaClass.name}|${error.message}"
         synchronized(failedFontFamilyLogKeys) {
             if (!failedFontFamilyLogKeys.add(key)) return
         }
-        XposedBridge.log(
+        HookRuntime.log(
             "$LOG_PREFIX global UI font resolve failed: " +
                 "${displayFontName(selection)}: ${error.javaClass.simpleName}: ${error.message}",
         )
@@ -430,7 +289,7 @@ class ReaMicroGlobalFontHook(
         synchronized(appliedLogKeys) {
             if (!appliedLogKeys.add(key)) return
         }
-        XposedBridge.log("$LOG_PREFIX global UI font applied ($source): ${displayFontName(selection)}")
+        HookRuntime.log("$LOG_PREFIX global UI font applied ($source): ${displayFontName(selection)}")
     }
 
     private fun displayFontName(value: String): String =
@@ -438,56 +297,6 @@ class ReaMicroGlobalFontHook(
             FAMILY_SYSTEM -> "系统字体"
             FAMILY_SOURCE_HAN_SERIF -> "思源宋体"
             else -> File(value).name.substringBeforeLast('.', File(value).name)
-        }
-
-    private fun callMethod(target: Any?, name: String): Any? {
-        if (target == null) return null
-        return target.javaClass.methods.firstOrNull {
-            it.hostNameMatches(name) && it.parameterTypes.isEmpty()
-        }?.invoke(target)
-    }
-
-    private fun staticMethod(className: String, name: String): Method? =
-        cls(className).methods.firstOrNull {
-            it.hostNameMatches(name) && it.parameterTypes.isEmpty()
-        }?.apply { isAccessible = true }
-
-    private fun fieldObjectOrNull(className: String, fieldName: String): Any? =
-        runCatching {
-            cls(className).run {
-                runCatching { getDeclaredField(fieldName) }
-                    .recoverCatching { getField(fieldName) }
-                    .getOrThrow()
-                    .apply { isAccessible = true }
-                    .get(null)
-            }
-        }.getOrNull()
-
-    private fun cls(className: String): Class<*> =
-        classLoader.hostClass(className)
-
-    private fun method(className: String, methodName: String, parameterCount: Int): Method {
-        val cacheKey = "$className#$methodName/$parameterCount"
-        return synchronized(methodCache) {
-            methodCache.getOrPut(cacheKey) {
-                cls(className).declaredMethods.firstOrNull {
-                    it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
-                }?.apply { isAccessible = true }
-                    ?: cls(className).methods.firstOrNull {
-                        it.hostNameMatches(methodName) && it.parameterTypes.size == parameterCount
-                    }?.apply { isAccessible = true }
-                    ?: error("$className.$methodName/$parameterCount not found")
-            }
-        }
-    }
-
-    private fun staticObject(className: String, fieldName: String): Any =
-        cls(className).run {
-            runCatching { getDeclaredField(fieldName) }
-                .recoverCatching { getField(fieldName) }
-                .getOrThrow()
-                .apply { isAccessible = true }
-                .get(null)
         }
 
     private data class ResolvedGlobalFont(
@@ -504,19 +313,11 @@ class ReaMicroGlobalFontHook(
         val atMs: Long,
         val font: ResolvedGlobalFont?,
         val selection: String,
+        val accountKey: String,
     )
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val HOST_TEXT_STYLE_KT_CLASS = HostClasses.Host.HOST_TEXT_STYLE_KT
-        const val READER_SCREEN_KT_CLASS = HostClasses.Host.READER_SCREEN_KT
-        const val READER_FAMILY_USER_KT_CLASS = HostClasses.Host.READER_FAMILY_USER
-        const val MATERIAL_TEXT_KT_CLASS = HostClasses.Compose.TEXT_KT
-        const val TEXT_STYLE_CLASS = HostClasses.Compose.TEXT_STYLE
-        const val FONT_PROVIDER_CLASS = HostClasses.Epub.FONT_PROVIDER
-        const val FONT_FAMILY_CLASS = HostClasses.Compose.FONT_FAMILY
-        const val FONT_FAMILY_KT_CLASS = HostClasses.Compose.FONT_FAMILY_KT
-        const val FONT_WEIGHT_CLASS = HostClasses.Compose.FONT_WEIGHT
         const val FAMILY_SYSTEM = "system"
         const val FAMILY_SOURCE_HAN_SERIF = "serif"
         const val GLOBAL_FONT_CACHE_WINDOW_MS = 300L

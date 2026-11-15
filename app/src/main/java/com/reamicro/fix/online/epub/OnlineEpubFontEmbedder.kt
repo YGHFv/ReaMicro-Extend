@@ -29,21 +29,10 @@ internal object OnlineEpubFontEmbedder {
             else -> "font/ttf"
         }
 
-    fun mergeManifest(original: String, faces: Collection<OnlineEpubFontFace>): String {
-        if (!original.contains("</manifest>", ignoreCase = true)) return original
-        val existing = Regex("""(?is)<item\b[^>]*\bhref\s*=\s*["']Fonts/([^"']+)["'][^>]*/?>""")
-            .findAll(original)
-            .map { it.groupValues[1] }
-            .toSet()
-        val additions = faces
-            .distinctBy { it.family }
-            .filter { manifestHref(it).removePrefix("Fonts/") !in existing }
-            .joinToString("\n") { face ->
-                """    <item id="${face.family}" href="${manifestHref(face)}" media-type="${mediaType(face)}"/>"""
-            }
-        if (additions.isBlank()) return original
-        return original.replaceFirst(Regex("""(?i)</manifest>"""), "$additions\n  </manifest>")
-    }
+    fun mergeManifest(original: String, faces: Collection<OnlineEpubFontFace>): String =
+        OnlineEpubManifest.merge(original, faces.distinctBy { it.family }.map { face ->
+            OnlineEpubManifest.Item(face.family, manifestHref(face), mediaType(face))
+        })
 
     private fun contentHash(file: File): String {
         val digest = MessageDigest.getInstance("SHA-1")

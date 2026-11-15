@@ -2,12 +2,25 @@ package com.reamicro.fix.cloud.api
 
 import com.reamicro.fix.association.network.HttpClient
 import com.reamicro.fix.association.network.HttpResponseException
+import com.reamicro.fix.reload.TaskCancellation
 import org.json.JSONObject
 import java.io.File
 import java.net.SocketTimeoutException
 
-class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
-    fun probe(): ApiServerProbeResult = probe(settingsStore.get())
+class ApiServerClient(
+    private val settingsStore: ApiServerSettingsStore,
+    private val requestSettings: ApiServerSettings? = null,
+) {
+    private fun settings(): ApiServerSettings = requestSettings ?: settingsStore.get()
+    /** A multi-request operation must keep the same server and account until it finishes. */
+    fun snapshot(): ApiServerClient = ApiServerClient(settingsStore, settings())
+    internal fun checkCurrentRequest() {
+        TaskCancellation.checkCurrent()
+        if (settings().requestIdentity() != settingsStore.get().requestIdentity()) {
+            throw java.util.concurrent.CancellationException("API 服务器或账号已切换，操作已停止")
+        }
+    }
+    fun probe(): ApiServerProbeResult = probe(settings())
 
     fun probe(settings: ApiServerSettings): ApiServerProbeResult {
         if (!settings.enabled) return ApiServerProbeResult(false, "API 服务器未启用")
@@ -25,7 +38,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
                 ?: return ApiServerProbeResult(false, "服务器需要认证，请填写服务器支持的登录信息", discovered)
             val resolvedSettings = settings.copy(authMode = resolvedMode)
             if (resolvedMode == ApiAuthMode.PUBLIC) {
-                settingsStore.cacheMeta(discovered)
+                settingsStore.cacheMeta(discovered, settings)
                 return ApiServerProbeResult(true, "连接成功：公开访问", discovered, resolvedMode)
             }
             val body = HttpClient.get(
@@ -35,10 +48,11 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
                 readTimeoutMs = settings.timeoutSeconds * 1_000,
                 followRedirects = false,
             )
-            parseMeta(JSONObject(body)).also(settingsStore::cacheMeta).let {
+            parseMeta(JSONObject(body)).also { settingsStore.cacheMeta(it, settings) }.let {
                 ApiServerProbeResult(true, "连接成功", it, resolvedMode)
             }
         }.getOrElse { error ->
+            TaskCancellation.rethrowIfCancelled(error)
             val current = runCatching { discovery(settings) }.getOrNull()
             val mode = current?.let { selectApiAuthMode(it, settings) }
             val message = if (mode == ApiAuthMode.HOST_ACCOUNT_ALLOWLIST && settings.hostAccountId.isNotBlank()) {
@@ -48,7 +62,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
         }
     }
 
-    fun discovery(settings: ApiServerSettings = settingsStore.get()): ApiServerMeta {
+    fun discovery(settings: ApiServerSettings = settings()): ApiServerMeta {
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         val body = HttpClient.get(
             "$baseUrl/v1/discovery",
@@ -61,12 +75,12 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun health(): Boolean = runCatching {
-        val settings = settingsStore.get()
+        val settings = settings()
         if (!settings.enabled) return false
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-        HttpClient.get("$baseUrl/v1/health", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000)
+        HttpClient.get("$baseUrl/v1/health", authHeaders(settings), settings.timeoutSeconds * 1_000, settings.timeoutSeconds * 1_000, false)
         true
-    }.getOrDefault(false)
+    }.onFailure(TaskCancellation::rethrowIfCancelled).getOrDefault(false)
 
     private fun authHeaders(settings: ApiServerSettings): Map<String, String> = buildMap {
         put("Accept", "application/json")
@@ -107,7 +121,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun packages(kind: ApiPackageKind): List<ApiContentPackage> {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         val body = HttpClient.get(
             "$baseUrl/v1/packages?kind=${java.net.URLEncoder.encode(kind.wireValue, "UTF-8")}",
@@ -125,20 +139,9 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun download(contentPackage: ApiContentPackage): ByteArray {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-        val target = when {
-            contentPackage.downloadUrl.startsWith("/") -> baseUrl + contentPackage.downloadUrl
-            contentPackage.downloadUrl.startsWith("https://") || contentPackage.downloadUrl.startsWith("http://") -> {
-                val base = java.net.URI(baseUrl)
-                val download = java.net.URI(contentPackage.downloadUrl)
-                require(base.scheme == download.scheme && base.host == download.host && base.port == download.port) {
-                    "内容包下载地址与 API 服务器不同源"
-                }
-                contentPackage.downloadUrl
-            }
-            else -> error("内容包下载地址无效")
-        }
+        val target = apiDownloadUrl(baseUrl, contentPackage.downloadUrl)
         return HttpClient.getBytes(
             target,
             authHeaders(settings),
@@ -149,7 +152,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun uploadPolicy(): ApiUploadPolicy {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         val body = try {
             HttpClient.get(
@@ -195,7 +198,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun latestModuleRelease(): ApiModuleRelease? {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
 
         val channel = java.net.URLEncoder.encode(settings.updateChannel.wireValue, "UTF-8")
@@ -222,9 +225,9 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun downloadModuleRelease(release: ApiModuleRelease): ByteArray {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
-        val target = if (release.apkUrl.startsWith("/")) baseUrl + release.apkUrl else release.apkUrl
+        val target = apiDownloadUrl(baseUrl, release.apkUrl)
         val bytes = HttpClient.getBytes(
             target,
             authHeaders(settings),
@@ -242,15 +245,21 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
 
     fun downloadModuleReleaseToCache(context: android.content.Context, release: ApiModuleRelease): File {
         val root = File(context.cacheDir, ModuleApkContentProvider.MODULE_APK_DIR).apply { mkdirs() }
-        val target = File(root, "ReaMicro-Extend-${release.versionName}.apk")
-        val temp = File(root, ".${target.name}.tmp")
-        temp.writeBytes(downloadModuleRelease(release))
-        require(temp.renameTo(target)) { "模块 APK 缓存写入失败" }
-        return target
+        val target = ApiPackagePaths.child(root, "ReaMicro-Extend-${ApiPackagePaths.component(release.versionName)}.apk")
+        val bytes = downloadModuleRelease(release)
+        val temp = File.createTempFile(".module-download-", ".tmp", root)
+        return try {
+            temp.outputStream().use { it.write(bytes); it.fd.sync() }
+            checkCurrentRequest()
+            require(temp.renameTo(target)) { "模块 APK 缓存写入失败" }
+            target
+        } finally {
+            temp.delete()
+        }
     }
 
     fun uploadModuleBackup(bytes: ByteArray): String {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         return HttpClient.postBytes(
             "$baseUrl/v1/backups/module",
@@ -263,7 +272,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun downloadModuleBackup(): ByteArray {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         return HttpClient.getBytes(
             "$baseUrl/v1/backups/module/latest",
@@ -275,7 +284,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun uploadCredentialsBackup(bytes: ByteArray): String {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         return HttpClient.postBytes(
             "$baseUrl/v1/backups/credentials",
@@ -288,7 +297,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     fun downloadCredentialsBackup(): ByteArray {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         return HttpClient.getBytes(
             "$baseUrl/v1/backups/credentials/latest",
@@ -320,7 +329,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     fun saveReaMicroCredential(body: JSONObject): JSONObject = taskRequest("POST", "/v1/credentials/reamicro", body)
 
     fun deleteReaMicroCredential(id: String): JSONObject {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         return JSONObject(HttpClient.delete(
             "$baseUrl/v1/credentials/reamicro/${java.net.URLEncoder.encode(id, "UTF-8")}",
@@ -331,7 +340,7 @@ class ApiServerClient(private val settingsStore: ApiServerSettingsStore) {
     }
 
     private fun taskRequest(method: String, path: String, body: JSONObject?): JSONObject {
-        val settings = settingsStore.get()
+        val settings = settings()
         val baseUrl = normalizeApiBaseUrl(settings.baseUrl, settings.allowHttp)
         val response = try {
             if (method == "GET") {

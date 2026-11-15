@@ -1,11 +1,9 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
+import com.reamicro.fix.reload.runOnModuleUiThread
 
-import com.reamicro.fix.core.hostNameMatches
 
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.HostSymbols
+
 import android.app.Activity
 import android.app.Dialog
 import android.os.Build
@@ -26,9 +24,8 @@ import com.reamicro.fix.ai.AiApiConfig
 import com.reamicro.fix.ai.AiDictionaryPreset
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiApiTestResult
-import com.reamicro.fix.core.B2NativeUi
-import com.reamicro.fix.xposed.XposedBridge
-import java.lang.reflect.Method
+import com.reamicro.fix.core.HostNativeUi
+import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.reader.*
 
 internal fun ReaderHook.canEditReaderSelection(): Boolean =
@@ -49,80 +46,19 @@ internal fun ReaderHook.selectionMenuMaxItemsPerRow(actionCount: Int): Int? {
 }
 
 internal fun ReaderHook.renderWrappedSelectionMenu(
-    actions: List<Any>, tint: Long, composer: Any, maxPerRow: Int, bubbleArrowOnTop: Boolean? = null,
-) {
-    if (HostSymbols.abiProfileId == "2.3.3-b4") {
-        renderB4WrappedSelectionMenu(actions, tint, composer, maxPerRow, bubbleArrowOnTop)
-        return
-    }
-    if (settingsProvider().canUseCompactReaderSelectionMenu) {
-        renderCompactWrappedSelectionMenu(actions, tint, composer, maxPerRow)
-        return
-    }
-    val rows = actions.chunked(maxPerRow.coerceAtLeast(1))
-    val cellWidth = selectionMenuCellWidthDp(actions)
-    val content = functionProxy("ReaderSelectionGridColumn", KOTLIN_FUNCTION3_CLASS) { args ->
-        val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-        rows.forEach { rowActions ->
-            val rowContent = functionProxy("ReaderSelectionGridRow", KOTLIN_FUNCTION3_CLASS) { rowArgs ->
-                val rowComposer = rowArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
-                rowActions.forEach { action ->
-                    val itemContent = functionProxy("ReaderSelectionGridItem", KOTLIN_FUNCTION3_CLASS) { itemArgs ->
-                        val itemComposer = itemArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
-                        renderNativeSelectionMenuItem(action, tint, itemComposer)
-                        targetUnit()
-                    }
-                    composeMethod(BOX_KT_CLASS, BOX_METHOD, 7).invoke(
-                        null,
-                        selectionMenuCellModifier(cellWidth),
-                        selectionMenuAlignmentCenter(),
-                        false,
-                        itemContent,
-                        rowComposer,
-                        0,
-                        0,
-                    )
-                }
-                targetUnit()
-            }
-            composeMethod(ROW_KT_CLASS, ROW_METHOD, 7).invoke(
-                null,
-                modifierInstance(),
-                arrangementSpacedBy(2),
-                selectionMenuAlignmentCenterVertically(),
-                rowContent,
-                innerComposer,
-                0,
-                0,
-            )
-        }
-        targetUnit()
-    }
-    composeMethod(COLUMN_KT_CLASS, COLUMN_METHOD, 7).invoke(
-        null,
-        selectionMenuPaddingModifier(),
-        arrangementSpacedBy(2),
-        selectionMenuAlignmentStart(),
-        content,
-        composer,
-        0,
-        0,
-    )
-}
-
-/** B4 用显式行列固定每行数量，避免 FlowRow 在边缘气泡二次限宽后偶发重新换行。 */
-private fun ReaderHook.renderB4WrappedSelectionMenu(
     actions: List<Any>,
     tint: Long,
     composer: Any,
     maxPerRow: Int,
     bubbleArrowOnTop: Boolean?,
 ) {
-    val nativeUi = B2NativeUi(classLoader)
-    val rows = actions.chunked(maxPerRow.coerceAtLeast(1))
+    val nativeUi = HostNativeUi(classLoader)
     val cellWidth = selectionMenuCellWidthDp(actions)
-    val contentWidth = (maxPerRow.coerceAtLeast(1) * cellWidth + 16)
-        .coerceAtMost(320)
+    // Native items keep at least 56dp in ordinary mode; reduce columns before sizing
+    // the bubble so compact actions and long labels cannot overflow its 320dp limit.
+    val columns = minOf(maxPerRow.coerceAtLeast(1), (304 / cellWidth).coerceAtLeast(1))
+    val rows = actions.chunked(columns)
+    val contentWidth = columns * cellWidth + 16
     val contentModifier = nativeUi.padding(
         // 总宽已经包含两侧 8dp，先限宽再内缩，避免 padding 把右侧再撑大 16dp。
         nativeUi.width(nativeUi.modifier(), nativeUi.dp(contentWidth)),
@@ -131,7 +67,7 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
         8f, 6f + if (bubbleArrowOnTop == false) 10f else 0f,
     )
     val content = nativeUi.lambda(
-        actions.fold(0x524d4234) { key, action -> key * 31 + callString(action, "getTitle").hashCode() },
+        actions.fold(0x524d4234) { key, action -> key * 31 + selectionSymbols().title(action).hashCode() },
         functionProxy("ReaderSelectionB4Column", "kotlin.jvm.functions.Function3") { args ->
             val columnComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
             rows.forEachIndexed { rowIndex, rowActions ->
@@ -139,10 +75,8 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
                     0x524d5200 + rowIndex,
                     functionProxy("ReaderSelectionB4Row$rowIndex", KOTLIN_FUNCTION3_CLASS) { rowArgs ->
                         val rowComposer = rowArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
-                        rowActions.forEachIndexed { columnIndex, action ->
-                            renderB4SelectionMenuItem(
-                                nativeUi, action, tint, cellWidth, rowIndex * maxPerRow + columnIndex, rowComposer,
-                            )
+                        rowActions.forEach { action ->
+                            renderSelectionGridItem(nativeUi, action, tint, cellWidth, rowComposer)
                         }
                         targetUnit()
                     },
@@ -150,7 +84,7 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
                 nativeUi.row(
                     nativeUi.width(
                         nativeUi.modifier(),
-                        nativeUi.dp(maxPerRow.coerceAtLeast(1) * cellWidth),
+                        nativeUi.dp(columns * cellWidth),
                     ),
                     rowContent,
                     columnComposer,
@@ -170,207 +104,33 @@ private fun ReaderHook.renderB4WrappedSelectionMenu(
     )
 }
 
-private fun ReaderHook.renderB4SelectionMenuItem(
-    nativeUi: B2NativeUi,
+private fun ReaderHook.renderSelectionGridItem(
+    nativeUi: HostNativeUi,
     action: Any,
     tint: Long,
     cellWidth: Int,
-    index: Int,
     composer: Any,
 ) {
-    val title = callString(action, "getTitle")
-    val icon = callNoArg(action, "getIcon") ?: return
-    val callback = selectionMenuActionCallback(action) ?: return
-    val itemModifier = nativeUi.clickable(
-        nativeUi.width(nativeUi.modifier(), nativeUi.dp(cellWidth)),
-        callback,
-    )
-    val itemContent = nativeUi.lambda(
-        0x524d4900 + index,
-        functionProxy("ReaderSelectionB4Item${index}_${title.hashCode()}", KOTLIN_FUNCTION3_CLASS) { itemArgs ->
-            val itemComposer = itemArgs?.getOrNull(1) ?: return@functionProxy targetUnit()
-            val iconModifier = nativeUi.width(
-                nativeUi.height(nativeUi.modifier(), nativeUi.dp(20)),
-                nativeUi.dp(20),
-            )
-            composeMethod("androidx.compose.material3.IconKt", "Icon-ww6aTOc", 7).invoke(
-                null,
-                icon,
-                title,
-                iconModifier,
-                tint,
-                itemComposer,
-                0,
-                0,
-            )
-            val typography = nativeUi.theme(itemComposer, "getTypography")
-            val style = runCatching { callNoArg(typography, "getLabelSmall") }.getOrNull()
-                ?: runCatching { callNoArg(typography, "getLabelMedium") }.getOrNull()
-            nativeUi.text(arrayOf(
-                title,
-                null,
-                tint,
-                null,
-                0L,
-                null,
-                null,
-                null,
-                0L,
-                null,
-                null,
-                0L,
-                0,
-                false,
-                1,
-                1,
-                null,
-                style,
-                itemComposer,
-                0,
-                0,
-                131066,
-            ))
-            targetUnit()
-        },
-    )
-    nativeUi.column(
-        itemModifier,
-        nativeUi.spacedBy(2f),
-        nativeUi.centerHorizontally(),
-        itemContent,
-        composer,
-    )
-}
-
-private fun ReaderHook.renderCompactWrappedSelectionMenu(
-    actions: List<Any>,
-    tint: Long,
-    composer: Any,
-    maxPerRow: Int,
-) {
-    val content = functionProxy("ReaderSelectionFlowRow", KOTLIN_FUNCTION3_CLASS) { args ->
-        val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
-        actions.forEach { action ->
-            renderNativeSelectionMenuItem(action, tint, innerComposer)
-        }
-        targetUnit()
-    }
-    composeMethod(FLOW_LAYOUT_KT_CLASS, FLOW_ROW_METHOD, 10).invoke(
-        null,
-        selectionMenuPaddingModifier(),
-        arrangementSpacedBy(2),
-        arrangementSpacedBy(2),
-        null,
-        maxPerRow,
-        Int.MAX_VALUE,
-        content,
-        composer,
-        0,
-        8,
-    )
+    val symbols = selectionSymbols()
+    val title = symbols.title(action)
+    val icon = symbols.icon(action)
+    val callback = symbols.callback(action)
+    // Reuse the host item, including its typography, compact icon sizing and tap feedback.
+    symbols.method("item").invoke(null, title, icon, tint, callback,
+        nativeUi.width(nativeUi.modifier(), nativeUi.dp(cellWidth)), composer, 0)
 }
 
 private fun ReaderHook.selectionMenuCellWidthDp(actions: List<Any>): Int {
     val maxTitleWidth = actions.maxOfOrNull { action ->
-        callString(action, "getTitle").sumOf { character ->
+        selectionSymbols().title(action).sumOf { character ->
             if (character.code <= 0x7f) 8 else 14
         }
     } ?: 0
-    // 普通 B4 菜单收紧横向留白，长标题仍按内容扩宽，紧凑模式和旧版保持原样。
-    if (HostSymbols.abiProfileId == "2.3.3-b4" && !settingsProvider().canUseCompactReaderSelectionMenu) {
-        return (maxTitleWidth + 18).coerceIn(44, 100)
+    if (!settingsProvider().canUseCompactReaderSelectionMenu) {
+        return (maxTitleWidth + 18).coerceIn(56, 100)
     }
-    return (maxTitleWidth + 42).coerceIn(72, 112)
+    return (maxTitleWidth + 42).coerceIn(56, 112)
 }
-
-private fun ReaderHook.selectionMenuCellModifier(widthDp: Int): Any =
-    composeMethod(SIZE_KT_CLASS, WIDTH_METHOD, 2).invoke(
-        null,
-        modifierInstance(),
-        udp(widthDp),
-    )
-
-private fun ReaderHook.selectionMenuAlignmentStart(): Any =
-    callNoArg(staticObject(ALIGNMENT_CLASS, "INSTANCE"), "getStart")
-        ?: error("Alignment.Start not found")
-
-private fun ReaderHook.selectionMenuAlignmentCenter(): Any =
-    callNoArg(staticObject(ALIGNMENT_CLASS, "INSTANCE"), "getCenter")
-        ?: error("Alignment.Center not found")
-
-private fun ReaderHook.selectionMenuAlignmentCenterVertically(): Any =
-    callNoArg(staticObject(ALIGNMENT_CLASS, "INSTANCE"), "getCenterVertically")
-        ?: error("Alignment.CenterVertically not found")
-
-internal fun ReaderHook.renderNativeSelectionMenuItem(action: Any, tint: Long, composer: Any) {
-    val method = nativeSelectionMenuItemMethod()
-    val title = callString(action, "getTitle")
-    val icon = callNoArg(action, "getIcon") ?: return
-    val callback = selectionMenuActionCallback(action) ?: return
-    if (method.parameterTypes.size == 7) {
-        method.invoke(
-            null,
-            title,
-            icon,
-            tint,
-            callback,
-            modifierInstance(),
-            composer,
-            0,
-        )
-    } else {
-        method.invoke(
-            null,
-            title,
-            icon,
-            tint,
-            callback,
-            composer,
-            0,
-        )
-    }
-}
-
-internal fun ReaderHook.nativeSelectionMenuItemMethod(): Method =
-    synchronized(composeMethodCache) {
-        composeMethodCache.getOrPut("org.epub.ui.BodyKt#SelectionMenuItem/6-or-7") {
-            val methods = classLoader.hostClass("org.epub.ui.BodyKt").declaredMethods
-            (methods.firstOrNull { method ->
-                method.name.contains("SelectionMenuItem") &&
-                    method.parameterTypes.size == 6 &&
-                    method.parameterTypes[0] == String::class.java &&
-                    method.parameterTypes[2] == Long::class.javaPrimitiveType
-            } ?: methods.firstOrNull { method ->
-                // B4 的 SelectionMenuItem 增加了 Modifier 参数，不能再只按旧 6 参签名查找。
-                method.parameterTypes.size == 7 &&
-                    method.parameterTypes[0] == String::class.java &&
-                    method.parameterTypes[2] == Long::class.javaPrimitiveType &&
-                    HostSymbols.logicalClass(method.parameterTypes[5].name) ==
-                    "androidx.compose.runtime.Composer"
-            })?.apply { isAccessible = true }
-                ?: error("SelectionMenuItem method not found")
-        }
-    }
-
-internal fun ReaderHook.selectionMenuTint(composer: Any): Long? =
-    runCatching {
-        callNoArg(hostColorScheme(composer), "getOnBackground") as? Long
-    }.getOrNull()
-
-internal fun ReaderHook.composeColorFromArgb(color: Int): Long? =
-    runCatching {
-        composeMethod(COLOR_KT_CLASS, "Color", 1).invoke(null, color) as? Long
-    }.getOrNull()
-
-internal fun ReaderHook.selectionMenuPaddingModifier(): Any =
-    composeMethod(PADDING_KT_CLASS, PADDING_METHOD, 5).invoke(
-        null,
-        modifierInstance(),
-        udp(8),
-        udp(6),
-        udp(8),
-        udp(6),
-    )
 
 internal fun ReaderHook.compactSelectionMenuActions(actions: List<Any>): List<Any> {
     val compact = actions.map { action -> compactSelectionMenuAction(action) ?: action }
@@ -382,29 +142,18 @@ internal fun ReaderHook.compactSelectionMenuActions(actions: List<Any>): List<An
 }
 
 internal fun ReaderHook.compactSelectionMenuAction(action: Any): Any? {
-    val title = callString(action, "getTitle")
+    val title = selectionSymbols().title(action)
     if (title.isBlank()) return null
-    val icon = callNoArg(action, "getIcon") ?: return null
+    val icon = selectionSymbols().icon(action) ?: return null
     val callback = selectionMenuActionCallback(action) ?: return null
     return createSelectionMenuAction("", icon, callback, "compact native selection action")
 }
 
-internal fun ReaderHook.selectionMenuActionCallback(action: Any): Any? {
-    val function0Class = runCatching { classLoader.hostClass(KOTLIN_FUNCTION0_CLASS) }.getOrNull() ?: return null
-    val preferredNames = listOf("getOnClick", "getOnTap", "getAction", "getCallback", "component3")
-    preferredNames.forEach { name ->
-        callNoArg(action, name)?.takeIf { function0Class.isInstance(it) }?.let { return it }
-    }
-    return (action.javaClass.methods.asSequence() + action.javaClass.declaredMethods.asSequence())
-        .filter { method ->
-            method.parameterTypes.isEmpty() && function0Class.isAssignableFrom(method.returnType)
-        }
-        .firstNotNullOfOrNull { method ->
-            runCatching {
-                method.isAccessible = true
-                method.invoke(action)
-            }.getOrNull()?.takeIf { function0Class.isInstance(it) }
-        }
+internal fun ReaderHook.selectionMenuActionCallback(action: Any): Any? =
+    selectionSymbols().callback(action)
+
+private fun selectionSymbols() = requireNotNull(com.reamicro.fix.core.HostSelectionBindings.current) {
+    "Selection contract unavailable"
 }
 
 internal fun ReaderHook.createNativeDictionaryAction(icon: Any): Any? =
@@ -419,36 +168,10 @@ internal fun ReaderHook.createNativeDictionaryAction(icon: Any): Any? =
 
 internal fun ReaderHook.createSelectionMenuAction(title: String, icon: Any, callback: Any, logLabel: String): Any? =
     runCatching {
-        val actionClass = classLoader.hostClass("org.epub.ui.SelectionMenuAction")
-        val constructor = actionClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 3 }
-            ?: return@runCatching null
-        constructor.isAccessible = true
-        constructor.newInstance(
-            title,
-            icon,
-            callback,
-        )
+        selectionSymbols().action(title, icon, callback)
     }.onFailure {
-        XposedBridge.log("$LOG_PREFIX $logLabel failed: ${it.stackTraceToString()}")
+        HookRuntime.log("$LOG_PREFIX $logLabel failed: ${it.stackTraceToString()}")
     }.getOrNull()
-
-internal fun ReaderHook.dictionaryImageVector(): Any? {
-    val outlined = runCatching {
-        classLoader.hostClass(ICONS_OUTLINED_CLASS).hostField("INSTANCE").get(null)
-    }.getOrNull() ?: return null
-    return listOf(
-        DICTIONARY_ICON_TRANSLATE_CLASS to "getTranslate",
-        DICTIONARY_ICON_MENU_BOOK_CLASS to "getMenuBook",
-        DICTIONARY_ICON_AUTO_STORIES_CLASS to "getAutoStories",
-        DICTIONARY_ICON_BOOK_CLASS to "getBook",
-    ).firstNotNullOfOrNull { (className, methodName) ->
-        runCatching {
-            classLoader.hostClass(className).declaredMethods.firstOrNull {
-                it.hostNameMatches(methodName) && it.parameterTypes.size == 1
-            }?.apply { isAccessible = true }?.invoke(null, outlined)
-        }.getOrNull()
-    }
-}
 
 internal fun ReaderHook.openNativeSelectionEditor() = openAnchoredSelectionEditor()
 
@@ -467,7 +190,7 @@ internal fun ReaderHook.openNativeSelectionDictionary() {
     }
     val settings = AiApiStore.dictionarySettings(activity.applicationContext)
     val initialPreset = AiApiStore.dictionaryPreset(activity.applicationContext, settings.presetId)
-    activity.runOnUiThread {
+    activity.runOnModuleUiThread {
         val handle = showDictionaryDialog(activity, quote, config, initialPreset) { dialogHandle, selectedPreset ->
             val latestSettings = AiApiStore.dictionarySettings(activity.applicationContext)
             if (!latestSettings.singleUsePreset) {
@@ -493,9 +216,9 @@ internal fun ReaderHook.requestDictionaryPreset(
     handle.body.setTextColor(handle.colors.primaryText)
     com.reamicro.fix.reload.ModuleResources.thread({
         val result = runCatching { AiApiStore.dictionary(activity.applicationContext, config, quote, preset) }
-            .onFailure { XposedBridge.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
+            .onFailure { HookRuntime.log("$LOG_PREFIX dictionary request failed: ${it.stackTraceToString()}") }
             .getOrElse { error -> AiApiTestResult(false, error.message ?: error.javaClass.simpleName) }
-        activity.runOnUiThread {
+        activity.runOnModuleUiThread {
             if (!activity.isFinishing &&
                 (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !activity.isDestroyed) &&
                 requestId == handle.requestId
@@ -508,22 +231,17 @@ internal fun ReaderHook.requestDictionaryPreset(
 
 internal fun ReaderHook.currentNativeSelectionPayload(): NativeSelectionPayload {
     val controller = currentSelectionControllerRef?.get()
-    val payload = callNoArg(controller, "selectedPayload")
-    val quote = callString(payload, "getQuote").ifBlank { callString(controller, "selectedText") }
-    return NativeSelectionPayload(
-        controller = controller,
-        quote = quote.trim(),
-        startCfi = callString(payload, "getStartCfi"),
-        endCfi = callString(payload, "getEndCfi"),
-    )
+    val symbols = selectionSymbols()
+    val payload = controller?.takeIf { symbols.type("controller").isInstance(it) }?.let { symbols.method("payload").invoke(it) }
+    fun text(property: String): String = payload?.let { symbols.field("payload.$property").get(it) as? String }.orEmpty()
+    val quote = text("quote").ifBlank { controller?.let { symbols.method("text").invoke(it) as? String }.orEmpty() }
+    return NativeSelectionPayload(controller = controller, quote = quote.trim(), startCfi = text("startCfi"), endCfi = text("endCfi"))
 }
 
 internal fun ReaderHook.contentDomPlainText(contentDom: Any?): String =
     runCatching {
-        val annotated = callNoArg(contentDom, "getContent") ?: return@runCatching ""
-        callNoArg(annotated, "getText")?.toString()
-            ?: (annotated as? CharSequence)?.toString()
-            ?: annotated.toString()
+        contentDom ?: return@runCatching ""
+        requireNotNull(com.reamicro.fix.core.HostReaderRecordBindings.current).text(contentDom)
     }.getOrDefault("")
 
 internal fun ReaderHook.selectionOffsetInDocument(text: String, quote: String): Int {
@@ -544,8 +262,9 @@ internal fun ReaderHook.selectionOffsetInDocument(text: String, quote: String): 
 }
 
 internal fun ReaderHook.showSelectionEditDialog(
-    activity: Activity, text: String, onSave: (String, ReaderSelectionEditDialog) -> Unit,
-): ReaderSelectionEditDialog = ReaderThoughtSelectionEditor(activity, text, onSave).also { it.show() }.handle
+    activity: Activity, text: String, fonts: ReaderSelectionEditorFonts,
+    onSave: (String, ReaderSelectionEditDialog) -> Unit,
+): ReaderSelectionEditDialog = ReaderThoughtSelectionEditor(activity, text, fonts, onSave).also { it.show() }.handle
 
 internal fun ReaderHook.showDictionaryDialog(
     activity: Activity,

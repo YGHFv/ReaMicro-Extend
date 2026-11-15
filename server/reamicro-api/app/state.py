@@ -41,6 +41,19 @@ def save_credentials(credentials: dict[str, dict[str, Any]]) -> None:
     runtime.get_state_store().save_namespace("credentials", credentials)
 
 
+def remove_credential_documents(values, credential_id: str, owner: str | None = None) -> int | None:
+    credential = values["credentials"].get(credential_id)
+    if credential is None or (owner is not None and credential.get("owner") != owner):
+        return None
+    values["credentials"].pop(credential_id)
+    affected = 0
+    for task in values["tasks"].values():
+        if task.get("owner") == credential.get("owner") and task_credential_id(task) == credential_id:
+            task.update(enabled=False, status="paused", nextRunAt=0, lastMessage="关联的阅微凭据已删除")
+            affected += 1
+    return affected
+
+
 def owner_host_account_id(owner: str) -> str:
     marker = ":host:"
     if marker in owner:
@@ -116,7 +129,9 @@ def canonicalize_owner_identities() -> dict[str, int]:
         if bounded_config_int(item.get("lastSeenAt", 0), 0, 0) >= bounded_config_int(existing.get("lastSeenAt", 0), 0, 0):
             merged[canonical] = item
     if stats["presence"] or set(merged) != set(presence):
-        save_presence(merged)
+        presence.clear()
+        presence.update(merged)
+        save_presence(presence)
 
     stats["backups"] = migrate_legacy_backup_dirs()
     if any(stats.values()):
@@ -163,26 +178,26 @@ def migrate_legacy_backup_dirs() -> int:
 
 
 def merge_duplicate_tasks() -> int:
-
-    tasks = load_tasks()
-    groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = {}
-    for key, task in tasks.items():
-        if not isinstance(task, dict):
-            continue
-        task_type = str(task.get("taskType", ""))
-        credential_id = task_credential_id(task)
-        if task_type and credential_id and task_type != "http":
-            groups.setdefault((str(task.get("owner", "")), task_type, credential_id), []).append((key, task))
-    removed = 0
-    for items in groups.values():
-        if len(items) < 2:
-            continue
-        items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), bounded_config_int(pair[1].get("createdAt", 0), 0, 0), pair[0]), reverse=True)
-        for duplicate_id, _ in items[1:]:
-            tasks.pop(duplicate_id, None)
-            removed += 1
+    def merge(tasks):
+        groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = {}
+        for key, task in tasks.items():
+            identity = task_unique_key(task)
+            if identity is not None:
+                groups.setdefault(identity, []).append((key, task))
+        removed = 0
+        for items in groups.values():
+            items.sort(key=lambda pair: (
+                pair[1].get("status") == "running",
+                bounded_config_int(pair[1].get("updatedAt", 0), 0, 0),
+                bounded_config_int(pair[1].get("createdAt", 0), 0, 0), pair[0],
+            ), reverse=True)
+            for duplicate_id, duplicate in items[1:]:
+                if duplicate.get("status") != "running":
+                    tasks.pop(duplicate_id)
+                    removed += 1
+        return removed
+    removed = runtime.get_state_store().mutate_namespace("tasks", merge)
     if removed:
-        save_tasks(tasks)
         audit_event("tasks_merged", metadata={"removedCount": removed, "source": "dedupe"})
     return removed
 
@@ -208,52 +223,41 @@ def find_duplicate_task(tasks: dict[str, dict[str, Any]], task: dict[str, Any], 
 
 
 def merge_duplicate_credentials() -> int:
-
-    credentials = load_credentials()
-    groups: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
-    for key, item in credentials.items():
-        if not isinstance(item, dict) or item.get("type", "reamicro") != "reamicro":
-            continue
-        owner = str(item.get("owner", ""))
-        account_id = str(item.get("accountId", ""))
-        if owner and account_id:
-            groups.setdefault((owner, account_id), []).append((key, item))
-    removed: dict[str, str] = {}
-    for (owner, _), items in groups.items():
-        if len(items) < 2:
-            continue
-        items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), pair[0]), reverse=True)
-        keep_id = items[0][0]
-        for duplicate_id, _ in items[1:]:
-            credentials.pop(duplicate_id, None)
-            removed[duplicate_id] = keep_id
-    if not removed:
-        return 0
-    save_credentials(credentials)
-    tasks = load_tasks()
-    rebound = False
-    for task in tasks.values():
-        task_owner_value = str(task.get("owner", ""))
-        old_id = str(task.get("credentialId", ""))
-        if old_id in removed:
-            task["credentialId"] = removed[old_id]
-            rebound = True
-        if task.get("requestEncrypted"):
-            try:
-                request_value = decrypt_secret(str(task["requestEncrypted"]))
-            except Exception:
-                request_value = None
-            if isinstance(request_value, dict) and str(request_value.get("credentialId", "")) in removed:
-                request_value["credentialId"] = removed[str(request_value["credentialId"])]
-                task["requestEncrypted"] = encrypt_secret(request_value)
-                rebound = True
-        if task_owner_value and task.get("credentialId") in removed:
-            task["credentialId"] = removed[str(task["credentialId"])]
-            rebound = True
-    if rebound:
-        save_tasks(tasks)
-    audit_event("credentials_merged", metadata={"removedCount": len(removed), "source": "admin_read"})
-    return len(removed)
+    def merge(values):
+        credentials = values["credentials"]
+        groups: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+        for key, item in credentials.items():
+            owner, account_id = str(item.get("owner", "")), str(item.get("accountId", ""))
+            if item.get("type", "reamicro") == "reamicro" and owner and account_id:
+                groups.setdefault((owner, account_id), []).append((key, item))
+        removed: dict[str, str] = {}
+        for items in groups.values():
+            items.sort(key=lambda pair: (bounded_config_int(pair[1].get("updatedAt", 0), 0, 0), pair[0]), reverse=True)
+            for duplicate_id, _ in items[1:]:
+                credentials.pop(duplicate_id)
+                removed[duplicate_id] = items[0][0]
+        for task in values["tasks"].values():
+            old_id = str(task.get("credentialId", ""))
+            if old_id in removed:
+                task["credentialId"] = removed[old_id]
+            if task.get("requestEncrypted"):
+                try:
+                    request_value = decrypt_secret(str(task["requestEncrypted"]))
+                except Exception:
+                    if old_id in removed:
+                        task.update(enabled=False, status="paused", nextRunAt=0,
+                                    lastMessage="任务配置无法解密，请重新配置后恢复")
+                    continue
+                if isinstance(request_value, dict) and str(request_value.get("credentialId", "")) in removed:
+                    new_id = removed[str(request_value["credentialId"])]
+                    request_value["credentialId"] = new_id
+                    task["credentialId"] = new_id
+                    task["requestEncrypted"] = encrypt_secret(request_value)
+        return len(removed)
+    count = runtime.get_state_store().mutate_namespaces(("credentials", "tasks"), merge)
+    if count:
+        audit_event("credentials_merged", metadata={"removedCount": count, "source": "admin_read"})
+    return count
 
 
 def enqueue_task_notification(task: dict[str, Any], result: str, message: str, finished_at: int) -> str:

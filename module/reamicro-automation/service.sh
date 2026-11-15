@@ -1,6 +1,7 @@
 #!/system/bin/sh
 MODDIR=${0%/*}
 STATE=/data/adb/reamicro-automation
+[ ! -L "$STATE" ] && [ ! -L "$MODDIR" ] || exit 1
 [ -e "$MODDIR/disable" ] || [ -e "$MODDIR/remove" ] && exit 0
 
 [ -f "$STATE/state.json" ] || exit 0
@@ -8,6 +9,7 @@ umask 077
 chmod 700 "$STATE" || exit 1
 . "$MODDIR/common.sh"
 . "$MODDIR/lifecycle.sh"
+reamicro_safe_mode && exit 1
 BUSYBOX=$(find_busybox) || {
   echo "ReaMicro: compatible BusyBox unavailable" >&2
   exit 1
@@ -21,6 +23,7 @@ shift
 exec 9>"$STATE/lifecycle.lock"
 reamicro_lock_lifecycle || exit 1
 [ -e "$MODDIR/disable" ] || [ -e "$MODDIR/remove" ] && exit 0
+reamicro_safe_mode && exit 1
 
 if [ "$1" = start ]; then rm -f "$STATE/stop" || exit 1; fi
 [ -e "$STATE/stop" ] && exit 0

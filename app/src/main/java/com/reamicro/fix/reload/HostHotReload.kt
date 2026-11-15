@@ -9,21 +9,27 @@ import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
-import com.reamicro.fix.xposed.XposedBridge
+import com.reamicro.fix.xposed.HookRuntime
 
 object HostHotReload {
     private val main = ModuleResources.handler(Looper.getMainLooper())
     private val uri = Uri.parse("content://${HotReloadContract.AUTHORITY}")
     private var pending = false
+    private var requestSerial = 0L
 
     fun request(activity: Activity) {
         if (activity.isDestroyed || activity.isFinishing || pending) return
+        val callbackLease = ModuleResources.lease() ?: return
         pending = true
+        val serial = ++requestSerial
         val context = activity.applicationContext
         val started = SystemClock.elapsedRealtime()
         val wake = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent?) {
-                if (!pending) return
+                // An ordered broadcast stores its result receiver outside this ClassLoader.
+                // Keep retirement blocked until Android has delivered that final callback.
+                callbackLease.close()
+                if (!pending || requestSerial != serial) return
                 if (resultCode == Activity.RESULT_OK) submit(activity)
                 else {
                     pending = false
@@ -38,12 +44,13 @@ object HostHotReload {
                 null, wake, main, Activity.RESULT_CANCELED, null, null,
             )
             main.postDelayed({
-                if (pending && SystemClock.elapsedRealtime() - started >= 10_000) {
+                if (pending && requestSerial == serial && SystemClock.elapsedRealtime() - started >= 10_000) {
                     pending = false
                     toast(context, "热重载桥接未响应，未执行热重载")
                 }
             }, 10_000)
         }.onFailure {
+            callbackLease.close()
             pending = false
             toast(context, "无法唤醒热重载桥接，阅微未被重启")
         }
@@ -57,7 +64,7 @@ object HostHotReload {
                 Bundle().apply { putBoolean(HotReloadContract.IN_PLACE, true) })
             requireNotNull(response?.getString(HotReloadContract.ID))
         }.onFailure {
-            XposedBridge.logError("ReaMicro API102 request failed", it)
+            HookRuntime.logError("ReaMicro API102 request failed", it)
             toast(activity, "无法提交热重载，未退出阅微")
         }.also { pending = false }
     }

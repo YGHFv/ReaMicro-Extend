@@ -1,86 +1,77 @@
 package com.reamicro.fix.hook
 
-import com.reamicro.fix.core.hostField
-import com.reamicro.fix.core.HostSymbols
-import com.reamicro.fix.core.hostClass
-import com.reamicro.fix.core.hostAbiMethod
-import com.reamicro.fix.core.hostStaticMethod
-
-import com.reamicro.fix.core.hostMethod
-import com.reamicro.fix.core.hostNameMatches
-
 import android.app.Activity
 import android.app.Dialog
-import android.content.Context
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
 import android.os.Looper
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.TextView
-import com.reamicro.fix.core.HostClasses
+import com.reamicro.fix.core.HostCoroutines
+import com.reamicro.fix.core.HostReaderPositionBindings
+import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.reload.runOnModuleUiThread
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
-import com.reamicro.fix.xposed.XC_MethodHook
-import com.reamicro.fix.xposed.XposedBridge
-import com.reamicro.fix.xposed.XposedHelpers
-import com.reamicro.fix.xposed.callbacks.XCallback
+import com.reamicro.fix.xposed.HookCallback
+import com.reamicro.fix.xposed.HookRuntime
+import io.github.libxposed.api.XposedInterface
 import java.io.File
 import java.lang.ref.WeakReference
-import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
-import java.lang.reflect.Proxy
 import java.util.UUID
+import java.util.Collections
+import java.util.IdentityHashMap
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
-import com.reamicro.fix.core.typeMatches
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.nio.file.Files
+import com.reamicro.fix.online.download.OnlineCompletionDirectoryPublication
+import com.reamicro.fix.online.download.copyOnlineCompletionFileAtomically
+import com.reamicro.fix.online.download.publishOnlineCompletionDirectory
 
-object OnlineCompletionImportSignal {
-    private data class Mark(
-        val uuid: String,
-        val title: String,
-        val uri: String,
-        val createdAtMs: Long,
-    )
-
+internal object OnlineCompletionImportSignal {
+    private data class Mark(val createdAtMs: Long)
     private val marks = ConcurrentHashMap<String, Mark>()
 
-    fun remember(uuid: String, title: String, uri: String) {
-        cleanup()
-        val mark = Mark(
-            uuid = uuid.trim(),
-            title = title.normalizedSignalTitle(),
-            uri = uri.trim(),
-            createdAtMs = System.currentTimeMillis(),
-        )
-        listOf(mark.uuid, mark.uri, mark.title)
-            .filter { it.isNotBlank() }
-            .forEach { marks[it] = mark }
+    private fun keys(uuid: String, title: String, uri: String, identity: AccountHostRuntime.Identity): List<String> {
+        val prefix = "${identity.accountId}:${identity.generation}|"
+        return buildList {
+            uuid.trim().takeIf(String::isNotBlank)?.let { add("${prefix}uuid:$it") }
+            uri.trim().takeIf(String::isNotBlank)?.let { add("${prefix}uri:$it") }
+            if (isEmpty()) title.trim().replace(Regex("\\s+"), " ").takeIf(String::isNotBlank)
+                ?.let { add("${prefix}title:$it") }
+        }
     }
 
-    fun forget(uuid: String, title: String, uri: String) {
-        listOf(uuid.trim(), uri.trim(), title.normalizedSignalTitle())
-            .filter { it.isNotBlank() }
-            .forEach { marks.remove(it) }
+    fun remember(uuid: String, title: String, uri: String, identity: AccountHostRuntime.Identity) {
+        cleanup()
+        check(AccountHostRuntime.isCurrentStorage(identity)) { "账号已切换，请重新导入" }
+        val mark = Mark(System.currentTimeMillis())
+        keys(uuid, title, uri, identity).forEach { marks[it] = mark }
+    }
+
+    fun forget(uuid: String, title: String, uri: String, identity: AccountHostRuntime.Identity) {
+        keys(uuid, title, uri, identity).forEach(marks::remove)
     }
 
     fun matches(uuid: String, title: String, uri: String): Boolean {
         cleanup()
-        return listOf(uuid.trim(), uri.trim(), title.normalizedSignalTitle())
-            .any { it.isNotBlank() && marks.containsKey(it) }
+        val identity = AccountHostRuntime.storageSnapshot() ?: return false
+        return keys(uuid, title, uri, identity).any(marks::containsKey)
     }
 
     private fun cleanup() {
         val now = System.currentTimeMillis()
-        marks.entries.removeAll { (_, mark) -> now - mark.createdAtMs > MARK_TTL_MS }
+        marks.entries.removeAll { (_, mark) -> now - mark.createdAtMs > 30 * 60_000L }
     }
+}
 
-    private fun String.normalizedSignalTitle(): String =
-        trim().replace(Regex("\\s+"), " ")
-
-    private const val MARK_TTL_MS = 30 * 60_000L
+/** Both hosts normalize identifiers on every OPF read; a prefixed UUID loses its identity. */
+internal fun newEpubImportStagingUuid(booksDirectory: File, targetUuid: String): String {
+    repeat(8) {
+        val uuid = UUID.randomUUID().toString()
+        if (uuid != targetUuid && !File(booksDirectory, uuid).exists()) return uuid
+    }
+    error("无法分配独立导入目录，请重试")
 }
 
 class ReaderImportOverwriteHook(
@@ -88,1211 +79,981 @@ class ReaderImportOverwriteHook(
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
 ) {
+    private lateinit var host: com.reamicro.fix.core.HostReaderExtrasBindings.Contract
     private var repositoryRef: WeakReference<Any>? = null
-    private val pendingPreImportDecisions = ConcurrentHashMap<String, PreImportDecision>()
+    private val pendingPreImportDecisions = ModuleImportDecisionMemory<PreImportDecision>(PRE_IMPORT_DECISION_TTL_MS)
+    private val activeImport = ThreadLocal<ImportRun?>()
+    private val activeRequestEpoch = ThreadLocal<Long?>()
+    private val cancellationEpoch = AtomicLong()
+    private val importRuns = Collections.synchronizedMap(IdentityHashMap<Any, ImportRun>())
+    private val runningImports = Collections.synchronizedSet(Collections.newSetFromMap(IdentityHashMap<ImportRun, Boolean>()))
+    private val stagedEpubDirectories = ConcurrentHashMap<String, EpubStage>()
+    private lateinit var nativeStaging: NativeImportStaging
 
-    private val cancelledImportCopies = ConcurrentHashMap<String, Long>()
+    /** Called synchronously with the settings gate; reenabling cannot revive an older request. */
+    fun onModuleEnabledChanged(enabled: Boolean) {
+        if (enabled) return
+        cancellationEpoch.incrementAndGet()
+        if (::nativeStaging.isInitialized) nativeStaging.cancel()
+        val running = synchronized(runningImports) { runningImports.toList() }
+        running.forEach { run ->
+            run.nativeJob?.let { job ->
+                runCatching { HostCoroutines.cancelJob(classLoader, job, CancellationException("导入模块已关闭")) }
+                    .onFailure { HookRuntime.logError("$LOG_PREFIX native import cancellation stopped", it) }
+            }
+        }
+    }
 
     fun install(): Boolean {
+        val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
         return runCatching {
-
-            ModuleImportPrecheck.attach(this)
-            val bookshelfClass = XposedHelpers.findClass(BOOKSHELF_REPOSITORY_CLASS, classLoader)
-            XposedBridge.hookAllConstructors(bookshelfClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    repositoryRef = WeakReference(param.thisObject)
-                    ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
-                }
-            })
-            val importMethods = (bookshelfClass.methods.asSequence() + bookshelfClass.declaredMethods.asSequence())
-                .filter { it.hostNameMatches(BOOKSHELF_IMPORT_BOOK_METHOD) && it.parameterTypes.size >= 6 &&
-                    typeMatches(it.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS) }
-                .distinct()
-                .toList()
-            if (importMethods.isEmpty()) error("BookshelfRepository.importBook hook target not found")
-            hookWorkerManagerRepositoryCapture()
-
-            XposedBridge.hookAllMethodsIncludingInherited(bookshelfClass, BOOKSHELF_IMPORT_BOOK_METHOD, object : XC_MethodHook(XCallback.PRIORITY_LOWEST) {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val snapshot = settingsProvider()
-                    if (!snapshot.canRunReaderOverwriteCheck) return
-
-                    logImportBookCall(param)
-                    repositoryRef = WeakReference(param.thisObject)
-                    ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
-                    val importSource = param.args?.getOrNull(0)
-
-                    val opf = param.args?.getOrNull(2)
-                    val uriOverride = param.args?.getOrNull(3)?.toString().orEmpty().trim()
-                    val title = resolveImportTitle(opf, importSource) ?: "未命名"
-                    val uuid = resolveImportUuid(opf).orEmpty()
-
-                    val cancelledBefore = isRecentlyCancelled(uuid, title, uriOverride, importSource)
-                    if (opf == null) {
-
-                        XposedBridge.log("$LOG_PREFIX importBook without opf passed through: uri=$uriOverride")
-                        return
+            host = requireNotNull(com.reamicro.fix.core.HostReaderExtrasBindings.importOverwrite) { "Import overwrite contract unavailable" }
+            requireNotNull(com.reamicro.fix.core.HostRuntimeBindings.files) { "Native file contract unavailable" }
+            ReaMicroBookMetadataSync.requireAvailable()
+            host.constructors("repository.").forEach { constructor ->
+                handles += HookRuntime.hookMethod(constructor, object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable != null) return
+                        repositoryRef = WeakReference(param.thisObject)
+                        ReaMicroBookMetadataSync.rememberBookshelfRepository(param.thisObject)
                     }
-                    if (uuid.isBlank() && uriOverride.isBlank() && title.isBlank()) return
-                    if (cancelledBefore) {
-                        applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
-                            param.args[2] = newOpf
-                            copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)
-                                ?.let { newBookDir -> param.args[1] = newBookDir }
-                        }
-                        return
-                    }
-                    val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, uriOverride)
+                })
+            }
+            hookWorkerManagerRepositoryCapture(handles)
 
-                    consumePreImportDecision(uuid, title)?.let { preDecision ->
-                        applyPreImportDecision(param, opf, uuid, preDecision)
-                        return
-                    }
-
-                    val conflict = findImportConflict(param.thisObject, uuid, uriOverride, title) ?: return
-                    XposedBridge.log(
-                        "$LOG_PREFIX overwrite check intercepted: title=$title, uuid=$uuid, uri=$uriOverride, conflict=$conflict",
-                    )
-
-                    val decision = if (signaledOnlineImport || isOnlineCompletionImport(uuid, uriOverride, conflict)) {
-                        XposedBridge.log(
-                            "$LOG_PREFIX online completion overwrite forced silently: title=$title, " +
-                                "uuid=$uuid uri=$uriOverride signaled=$signaledOnlineImport oldBook=${conflict.oldUuid}",
-                        )
-                        OverwriteDecision.OVERWRITE
-                    } else {
-                        showOverwriteConfirm(conflict.oldTitle, title)
-                    }
-                    when (decision) {
-                        OverwriteDecision.OVERWRITE -> {
-                            val oldUuid = conflict.oldUuid
-                            if (!oldUuid.isNullOrBlank() && oldUuid != uuid) {
-                                val newOpf = opf.withUuid(oldUuid)
-                                param.args[2] = newOpf
-                                prepareBookDirForOverwriteUuid(param.args?.getOrNull(1), oldUuid, newOpf)?.let { oldBookDir ->
-                                    param.args[1] = oldBookDir
-                                }
-                            }
-                            conflict.oldUri?.takeIf { it.isNotBlank() }?.let { oldUri ->
-                                param.args[3] = oldUri
-                            }
-                            ReaMicroBookMetadataSync.syncBookMetadataAsync(
-                                repository = param.thisObject,
-                                book = conflict.oldBook,
-                                patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2), param.args?.getOrNull(1))
-                                    .preserveAssociationOf(conflict.oldBook)
-                                    .withSize(importBookSize(param.args)),
-                                delayMs = POST_IMPORT_METADATA_SYNC_DELAY_MS,
-                            )
-                            XposedBridge.log(
-                                "$LOG_PREFIX overwrite import forced: uuid=$uuid -> ${conflict.oldUuid}, " +
-                                    "uri=${param.args?.getOrNull(3)}, bookDir=${param.args?.getOrNull(1)}",
-                            )
-                        }
-                        OverwriteDecision.INDEPENDENT -> {
-
-                            val newUuid = UUID.randomUUID().toString()
-                            val newOpf = opf.withUuid(newUuid)
-
-                            if (resolveImportUuid(newOpf).orEmpty() == newUuid) {
-                                param.args[2] = newOpf
-                                copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)?.let { newBookDir ->
-                                    param.args[1] = newBookDir
-                                }
-                                XposedBridge.log("$LOG_PREFIX independent import generated uuid and book dir: $uuid -> $newUuid")
-                            } else {
-                                XposedBridge.log(
-                                    "$LOG_PREFIX independent import could NOT rewrite uuid; host may still overwrite: uuid=$uuid",
-                                )
-                            }
-                            if (uriOverride.isNotBlank()) {
-                                param.args[3] = "$uriOverride#reamicro-independent-${System.currentTimeMillis()}"
-                            }
-                        }
-                        OverwriteDecision.CANCEL -> {
-
-                            rememberCancelledImport(uuid, title, uriOverride, importSource)
-                            applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
-                                param.args[2] = newOpf
-                                copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)
-                                    ?.let { newBookDir -> param.args[1] = newBookDir }
-                            }
-                        }
-                        OverwriteDecision.PASSTHROUGH -> {
-                            XposedBridge.log("$LOG_PREFIX overwrite import passed through to host default: title=$title, uuid=$uuid")
-                            return
-                        }
-                    }
-                    XposedBridge.log("$LOG_PREFIX overwrite import decision applied: title=$title, uuid=$uuid")
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-
-                    runCatching { scheduleCancelledCopyCleanup(param) }.onFailure {
-                        XposedBridge.log("$LOG_PREFIX cancelled copy cleanup failed: ${it.message}")
-                    }
-                }
-            })
-            if (!hookEpubFileManagerImport()) error("EpubFileManager.import hook target not found")
-            XposedBridge.log("$LOG_PREFIX reader overwrite check hook installed")
-            true
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook reader overwrite check: ${it.stackTraceToString()}")
-        }.getOrDefault(false)
-    }
-
-    private fun hookWorkerManagerRepositoryCapture() {
-        runCatching {
-            val workerClass = XposedHelpers.findClass(WORKER_MANAGER_CLASS, classLoader)
-            XposedBridge.hookAllConstructors(workerClass, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    param.thisObject.fieldValue("bookshelf")?.let { repository ->
+            // An import already rewritten by this generation must still cancel/restore while the master gate is off.
+            HookRuntime.withManagementHooks {
+                nativeStaging = NativeImportStaging(host, object : NativeImportStaging.Owner {
+                    override fun enabled() = settingsProvider().canRunReaderOverwriteCheck
+                    override fun identity() = storageIdentity()
+                    override fun epoch() = cancellationEpoch.get()
+                    override fun check(identity: AccountHostRuntime.Identity, epoch: Long) = checkStorageIdentity(identity, epoch)
+                    override fun booksRoot(identity: AccountHostRuntime.Identity) = nativeBooksRoot(identity)
+                    override fun rememberRepository(repository: Any) {
                         repositoryRef = WeakReference(repository)
                         ReaMicroBookMetadataSync.rememberBookshelfRepository(repository)
-                        XposedBridge.log("$LOG_PREFIX captured bookshelf repository from worker manager")
                     }
-                }
-            })
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook worker manager repository capture: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun hookEpubFileManagerImport(): Boolean {
-        return runCatching {
-            val managerClass = XposedHelpers.findClass(com.reamicro.fix.core.HostSymbols.resolveMethodOwner(
-                EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD), classLoader)
-
-            val importMethod = (managerClass.methods.asSequence() + managerClass.declaredMethods.asSequence())
-                .filter { candidate ->
-                    (candidate.name == com.reamicro.fix.core.HostSymbols.resolveMethodName(EPUB_FILE_MANAGER_CLASS, EPUB_IMPORT_METHOD) ||
-                        candidate.hostNameMatches(EPUB_IMPORT_METHOD)) &&
-                        candidate.parameterTypes.size >= 2 &&
-                        typeMatches(candidate.parameterTypes[0], OKIO_PATH_CLASS) &&
-                        typeMatches(candidate.parameterTypes[1], OKIO_PATH_CLASS)
-                }
-                .minByOrNull { it.parameterTypes.size }
-                ?.apply { isAccessible = true }
-                ?: return@runCatching false
-            XposedBridge.hookMethod(importMethod, object : XC_MethodHook(XCallback.PRIORITY_HIGHEST) {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val snapshot = settingsProvider()
-                    if (!snapshot.canRunReaderOverwriteCheck) return
-                    val repository = repositoryRef?.get() ?: return
-                    val unzipDir = param.args?.getOrNull(0) ?: return
-                    val opf = obtainOpf(unzipDir) ?: return
-                    val title = resolveImportTitle(opf, null) ?: return
-                    val uuid = resolveImportUuid(opf).orEmpty()
-                    val signaledOnlineImport = OnlineCompletionImportSignal.matches(uuid, title, "")
-
-                    if (isRecentlyCancelled(uuid, title, "", unzipDir)) {
-                        applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
-                            newOpf.overwriteToRoot(unzipDir)
-                            rememberPreImportDecision(
-                                newUuid,
-                                title,
-                                PreImportDecision(
-                                    decision = OverwriteDecision.CANCEL,
-                                    oldTitle = title,
-                                    oldUuid = uuid,
-                                    oldUri = null,
-                                    oldBook = findExistingBookByUuid(repository, uuid),
-                                    metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf, unzipDir),
-                                    createdAtMs = System.currentTimeMillis(),
-                                ),
-                            )
-                        }
-                        return
-                    }
-                    val conflict = findImportConflict(repository, uuid, "", title) ?: return
-                    val existingBook = conflict.oldBook
-                    XposedBridge.log(
-                        "$LOG_PREFIX pre-import conflict intercepted: title=$title, uuid=$uuid, conflict=$conflict",
-                    )
-
-                    val decision = consumePreImportDecision(uuid, title)?.decision
-                        ?: if (signaledOnlineImport || isOnlineCompletionImport(uuid, "", conflict)) {
-                            XposedBridge.log(
-                                "$LOG_PREFIX online completion pre-import overwrite forced silently: " +
-                                    "title=$title, uuid=$uuid signaled=$signaledOnlineImport oldBook=${conflict.oldUuid}",
-                            )
-                            OverwriteDecision.OVERWRITE
-                        } else {
-                            showOverwriteConfirm(conflict.oldTitle, title)
-                        }
-                    val preDecision = PreImportDecision(
-                        decision = decision,
-                        oldTitle = conflict.oldTitle,
-                        oldUuid = conflict.oldUuid,
-                        oldUri = null,
-                        oldBook = existingBook,
-                        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf, unzipDir),
-                        createdAtMs = System.currentTimeMillis(),
-                    )
-                    rememberPreImportDecision(uuid, title, preDecision)
-                    when (decision) {
-                        OverwriteDecision.OVERWRITE -> {
-                            val oldUuid = conflict.oldUuid
-                            if (!oldUuid.isNullOrBlank() && oldUuid != uuid) {
-                                val newOpf = opf.withUuid(oldUuid)
-                                newOpf.overwriteToRoot(unzipDir)
-                                rememberPreImportDecision(oldUuid, title, preDecision)
-                                XposedBridge.log("$LOG_PREFIX pre-import opf uuid rewritten: $uuid -> $oldUuid")
-                            }
-                            clearExistingBookDirContentsBeforeImport(param.args?.getOrNull(1), oldUuid ?: uuid)
-                        }
-                        OverwriteDecision.INDEPENDENT -> {
-                            val newUuid = UUID.randomUUID().toString()
-                            val newOpf = opf.withUuid(newUuid)
-                            newOpf.overwriteToRoot(unzipDir)
-                            rememberPreImportDecision(newUuid, title, preDecision)
-                            XposedBridge.log("$LOG_PREFIX pre-import independent uuid generated: $uuid -> $newUuid, title=$title")
-                        }
-                        OverwriteDecision.CANCEL -> {
-                            rememberCancelledImport(uuid, title, "", unzipDir)
-
-                            applyCancelAsIndependentCopy(opf, title) { newUuid, newOpf ->
-                                newOpf.overwriteToRoot(unzipDir)
-                                rememberPreImportDecision(newUuid, title, preDecision)
-                            }
-                        }
-                        OverwriteDecision.PASSTHROUGH -> {
-                            XposedBridge.log("$LOG_PREFIX pre-import conflict passed through to host default: title=$title, uuid=$uuid")
-                        }
-                    }
-                }
-            })
-            XposedBridge.log("$LOG_PREFIX epub file manager import hook installed: ${importMethod.name}")
+                })
+                nativeStaging.install(handles)
+                hookNativeImport(handles)
+                hookNativeTxtImport(handles)
+                hookImportCommits(handles)
+                hookEpubFileManagerImport(handles)
+            }
+            ModuleImportPrecheck.attach(this)
+            ModuleResources.blockWhile {
+                stagedEpubDirectories.entries.removeAll { System.currentTimeMillis() - it.value.createdAtMs > PRE_IMPORT_DECISION_TTL_MS }
+                if (runningImports.isEmpty() && stagedEpubDirectories.isEmpty()) null else "图书导入仍在完成，请稍后重载"
+            }
+            ModuleResources.cleanup {
+                pendingPreImportDecisions.clear()
+                importRuns.clear()
+                activeImport.remove()
+                activeRequestEpoch.remove()
+                stagedEpubDirectories.clear()
+                ModuleImportPrecheck.detach(this)
+            }
+            HookRuntime.log("$LOG_PREFIX reader overwrite check hook installed")
             true
         }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to hook epub file manager import: ${it.stackTraceToString()}")
+            handles.asReversed().forEach { handle -> runCatching { handle.unhook() } }
+            HookRuntime.log("$LOG_PREFIX failed to hook reader overwrite check: ${it.stackTraceToString()}")
         }.getOrDefault(false)
     }
 
-    private fun applyPreImportDecision(
-        param: XC_MethodHook.MethodHookParam,
-        opf: Any,
-        uuid: String,
-        preDecision: PreImportDecision,
+    private fun hookWorkerManagerRepositoryCapture(handles: MutableList<io.github.libxposed.api.XposedInterface.HookHandle>) {
+        host.constructors("worker.").forEach { constructor ->
+            handles += HookRuntime.hookMethod(constructor, object : HookCallback() {
+                override fun after(param: Call) {
+                    if (param.throwable != null) return
+                    host.field("worker.repository").get(param.thisObject)?.let { repository ->
+                        repositoryRef = WeakReference(repository)
+                        ReaMicroBookMetadataSync.rememberBookshelfRepository(repository)
+                    }
+                }
+            })
+        }
+    }
+
+    private class ImportRun(
+        val identity: AccountHostRuntime.Identity,
+        val epoch: Long,
+        val repository: Any,
+        val uuid: String,
+        val oldBook: Any?,
+        var metadata: BookMetadataPatch,
+        val nativeJob: Any?,
+        val independent: Boolean = false,
     ) {
-        when (preDecision.decision) {
-            OverwriteDecision.OVERWRITE -> {
-                val oldUuid = preDecision.oldUuid
-                if (!oldUuid.isNullOrBlank() && oldUuid != uuid) {
-                    val newOpf = opf.withUuid(oldUuid)
-                    param.args[2] = newOpf
-                    prepareBookDirForOverwriteUuid(param.args?.getOrNull(1), oldUuid, newOpf)?.let { oldBookDir ->
-                        param.args[1] = oldBookDir
+        val closed = AtomicBoolean()
+        @Volatile var bookCommitted = false
+        @Volatile var preparedBook: Any? = null
+        var publication: OnlineCompletionDirectoryPublication? = null
+    }
+
+    private data class EpubStage(
+        val identity: AccountHostRuntime.Identity,
+        val epoch: Long,
+        val title: String,
+        val originalUuid: String,
+        val targetUuid: String,
+        val temporaryUuid: String,
+        val preDecision: PreImportDecision?,
+        val booksDirectory: Any,
+        val source: Any,
+        val sourceOpf: Any,
+        val createdAtMs: Long = System.currentTimeMillis(),
+    )
+
+    private fun bindImportRun(param: HookCallback.Call, run: ImportRun) {
+        param.setObjectExtra(RUN_EXTRA, run)
+        param.setObjectExtra(PREVIOUS_RUN_EXTRA, activeImport.get())
+        activeImport.set(run)
+        if (param.getObjectExtra(REQUEST_EPOCH_EXTRA) == null) bindRequestEpoch(param, run.epoch)
+    }
+
+    private fun bindRequestEpoch(param: HookCallback.Call, epoch: Long) {
+        param.setObjectExtra(REQUEST_EPOCH_EXTRA, epoch)
+        param.setObjectExtra(PREVIOUS_EPOCH_EXTRA, activeRequestEpoch.get())
+        activeRequestEpoch.set(epoch)
+    }
+
+    private fun restoreRequestEpoch(param: HookCallback.Call) {
+        if (param.getObjectExtra(REQUEST_EPOCH_EXTRA) != null) {
+            activeRequestEpoch.set(param.getObjectExtra(PREVIOUS_EPOCH_EXTRA) as? Long)
+        }
+    }
+
+    private fun hookNativeImport(handles: MutableList<XposedInterface.HookHandle>) {
+        for (role in listOf("importContinuation", "txtContinuation")) {
+            handles += HookRuntime.hookMethod(host.constructor(role), object : HookCallback() {
+                override fun after(param: Call) {
+                    val run = activeImport.get() ?: return
+                    if (param.throwable == null && param.args.firstOrNull() === run.repository) {
+                        importRuns[requireNotNull(param.thisObject)] = run
                     }
                 }
-                preDecision.oldUri?.takeIf { it.isNotBlank() }?.let { oldUri ->
-                    param.args[3] = oldUri
-                }
-                ReaMicroBookMetadataSync.syncBookMetadataAsync(
-                    repository = param.thisObject,
-                    book = preDecision.oldBook,
-                    patch = ReaMicroBookMetadataSync.metadataFromOpf(param.args?.getOrNull(2), param.args?.getOrNull(1))
-                        .mergeWith(preDecision.metadataPatch)
-                        .preserveAssociationOf(preDecision.oldBook)
-                        .withSize(importBookSize(param.args)),
-                    delayMs = POST_IMPORT_METADATA_SYNC_DELAY_MS,
-                )
-                XposedBridge.log(
-                    "$LOG_PREFIX importBook reused pre-import overwrite decision: uuid=$uuid -> ${preDecision.oldUuid}",
-                )
-            }
-            OverwriteDecision.INDEPENDENT -> {
-
-                val conflictingUuid = preDecision.oldUuid
-                if (conflictingUuid.isNullOrBlank() || uuid == conflictingUuid) {
-                    val newUuid = UUID.randomUUID().toString()
-                    val newOpf = opf.withUuid(newUuid)
-                    if (resolveImportUuid(newOpf).orEmpty() == newUuid) {
-                        param.args[2] = newOpf
-                        copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)?.let { newBookDir ->
-                            param.args[1] = newBookDir
-                        }
-                        XposedBridge.log("$LOG_PREFIX importBook independent fallback applied: $uuid -> $newUuid")
-                    } else {
-                        XposedBridge.log(
-                            "$LOG_PREFIX importBook independent fallback FAILED (uuid rewrite unavailable): uuid=$uuid",
-                        )
+            })
+        }
+        val imported = host.method("import")
+        handles += HookRuntime.hookMethod(imported, object : HookCallback(XposedInterface.PRIORITY_LOWEST) {
+            override fun before(param: Call) {
+                try {
+                    param.setObjectExtra(INITIAL_DIRECTORY_EXTRA, param.args.getOrNull(host.index("import.directory")))
+                    val continuation = param.args.getOrNull(host.index("import.continuation"))
+                    val resumed = continuation?.takeIf { host.type("importContinuation").isInstance(it) }
+                        ?.let(importRuns::get)
+                    if (resumed != null) {
+                        bindImportRun(param, resumed)
+                        checkStorageIdentity(resumed.identity, resumed.epoch)
+                        return
                     }
-                } else {
-                    XposedBridge.log("$LOG_PREFIX importBook reused pre-import independent decision: uuid=$uuid")
+                    val opf = param.args.getOrNull(host.index("import.opf")) ?: return
+                    val incoming = param.args.getOrNull(host.index("import.directory"))
+                    val incomingStage = incoming?.let { stagedEpubDirectories[File(it.toString()).canonicalPath] }
+                    if (!settingsProvider().canRunReaderOverwriteCheck) {
+                        if (incomingStage != null) throw CancellationException("导入模块已关闭")
+                        return
+                    }
+                    bindRequestEpoch(param, cancellationEpoch.get())
+                    incomingStage?.let { stage ->
+                        checkStorageIdentity(stage.identity, stage.epoch)
+                    }
+                    val repository = requireNotNull(param.thisObject)
+                    val identity = storageIdentity()
+                    val incomingFile = requireNotNull(incoming).let { File(it.toString()).canonicalFile }
+                    if (incomingFile.parentFile != nativeBooksRoot(identity) || !incomingFile.isDirectory) {
+                        throw CancellationException("导入目录与当前账号不一致或已取消，请重新导入")
+                    }
+                    repositoryRef = WeakReference(repository)
+                    ReaMicroBookMetadataSync.rememberBookshelfRepository(repository)
+                    val source = param.args.getOrNull(host.index("import.source"))
+                    val uri = param.args.getOrNull(host.index("import.uri"))?.toString().orEmpty().trim()
+                    val title = resolveImportTitle(opf, source) ?: "未命名"
+                    val originalUuid = resolveImportUuid(opf).orEmpty()
+                    require(originalUuid.isNotBlank()) { "导入图书缺少有效标识" }
+                    val preDecision = consumePreImportDecision(originalUuid, title, identity)
+                    val conflict = if (preDecision == null) findImportConflict(repository, originalUuid, uri, title, identity) else null
+                    val oldBook = preDecision?.oldBook ?: conflict?.oldBook
+                    val decision = preDecision?.decision ?: conflict?.let { showOverwriteConfirm(it.oldTitle, title, identity) }
+                    checkStorageIdentity(identity)
+                    if (decision == OverwriteDecision.CANCEL || decision == OverwriteDecision.PASSTHROUGH) {
+                        throw CancellationException("导入已取消")
+                    }
+                    val overwriteBook = if (decision == OverwriteDecision.OVERWRITE) {
+                        requireNotNull(oldBook) { "覆盖图书不存在" }
+                        ReaMicroBookMetadataSync.latestBook(repository, oldBook)
+                            ?: error("原图书已变化，请重新导入")
+                    } else null
+                    val targetUuid = when (decision) {
+                        OverwriteDecision.OVERWRITE -> requireNotNull(overwriteBook.uuidOrNull())
+                        OverwriteDecision.INDEPENDENT -> if (originalUuid == preDecision?.oldUuid || preDecision == null) {
+                            UUID.randomUUID().toString()
+                        } else originalUuid
+                        else -> originalUuid
+                    }
+                    val newOpf = opf.withUuid(targetUuid)
+                    param.args[host.index("import.opf")] = newOpf
+                    if (overwriteBook != null) {
+                        overwriteBook.uriOrNull()?.let { param.args[host.index("import.uri")] = it }
+                    } else if (decision == OverwriteDecision.INDEPENDENT && uri.isNotBlank()) {
+                        param.args[host.index("import.uri")] = "$uri#reamicro-independent-$targetUuid"
+                    }
+                    val incomingDirectory = param.args.getOrNull(host.index("import.directory"))
+                    val metadata = ReaMicroBookMetadataSync.metadataFromOpf(newOpf, incomingDirectory)
+                        .mergeWith(preDecision?.metadataPatch ?: BookMetadataPatch())
+                        .withSize(importBookSize(param.args))
+                    val originalCompletion = requireNotNull(continuation) { "原生导入协程不存在" }
+                    val run = ImportRun(identity, requireNotNull(activeRequestEpoch.get()), repository, targetUuid,
+                        overwriteBook, metadata, HostCoroutines.continuationJob(classLoader, originalCompletion),
+                        independent = decision == OverwriteDecision.INDEPENDENT)
+                    runningImports += run
+                    bindImportRun(param, run)
+                    param.args[host.index("import.directory")] = prepareImportDirectory(incomingDirectory, targetUuid, newOpf, run)
+                    guardNativeImportProgress(param, identity)
+                    HostCoroutines.observeContinuation(
+                        classLoader, param, host.index("import.continuation"),
+                        onCompleted = { result, success -> finishImport(run, result, success) },
+                    )
+                    HookRuntime.log("$LOG_PREFIX import prepared: overwrite=${overwriteBook != null}, independent=${decision == OverwriteDecision.INDEPENDENT}")
+                } catch (failure: Throwable) {
+                    param.throwable = failure
+                    if (failure !is CancellationException) HookRuntime.logError("$LOG_PREFIX import stopped before native overwrite", failure)
                 }
             }
-            OverwriteDecision.CANCEL -> {
-                rememberCancelledImport(uuid, preDecision.oldTitle, "", param.args?.getOrNull(0))
 
-                applyCancelAsIndependentCopy(opf, preDecision.oldTitle) { newUuid, newOpf ->
-                    param.args[2] = newOpf
-                    copyBookDirForIndependentUuid(param.args?.getOrNull(1), newUuid, newOpf)
-                        ?.let { newBookDir -> param.args[1] = newBookDir }
-                }
+            override fun after(param: Call) {
+                finishNativeImport(param)
             }
-            OverwriteDecision.PASSTHROUGH -> {
+        })
+        HookRuntime.deoptimize(imported)
+    }
 
-                XposedBridge.log("$LOG_PREFIX importBook reused pre-import passthrough decision: uuid=$uuid")
+    private fun finishNativeImport(param: HookCallback.Call) {
+        val run = param.getObjectExtra(RUN_EXTRA) as? ImportRun
+        try {
+            if (run != null && (param.throwable != null || param.result !== HostCoroutines.suspended(classLoader))) {
+                finishImport(run, param.result, param.throwable == null)
+            }
+            if (param.throwable != null) cleanupStagedEpubDirectory(param.getObjectExtra(INITIAL_DIRECTORY_EXTRA))
+        } finally {
+            try {
+                if (run != null) activeImport.set(param.getObjectExtra(PREVIOUS_RUN_EXTRA) as? ImportRun)
+                restoreRequestEpoch(param)
+            } finally {
+                HostCoroutines.finishInvocationContinuations(classLoader, param)
             }
         }
     }
 
-    private fun findImportConflict(repository: Any, uuid: String, uriOverride: String, title: String): ImportConflict? {
-        val uuidBook = if (uuid.isNotBlank()) findExistingBookByUuid(repository, uuid) else null
-        val duplicateByUuid = uuidBook != null
-        val urlBook = if (uriOverride.isNotBlank()) {
-            findExistingBookByUrl(repository, uriOverride)
-                ?.takeIf { book ->
-                    book.hasLocalBookData(repository) ||
-                        OnlineCompletionImportSignal.matches(uuid, title, uriOverride) ||
-                        isOnlineCompletionBook(book)
+    private fun hookNativeTxtImport(handles: MutableList<XposedInterface.HookHandle>) {
+        val method = host.method("txt")
+        handles += HookRuntime.hookMethod(method, object : HookCallback(XposedInterface.PRIORITY_HIGHEST) {
+            override fun before(param: Call) {
+                try { prepareTxtImport(param) } catch (error: Throwable) {
+                    param.throwable = error
+                    if (error !is CancellationException) HookRuntime.logError("$LOG_PREFIX TXT import stopped before book commit", error)
                 }
+            }
+            override fun after(param: Call) = finishNativeImport(param)
+        })
+        handles += HookRuntime.hookMethod(method, object : HookCallback(XposedInterface.PRIORITY_LOWEST) {
+            override fun before(param: Call) {
+                val run = activeImport.get() ?: return
+                if (param.thisObject !== run.repository || param.args.getOrNull(host.index("txt.book")) == null) return
+                try {
+                    checkStorageIdentity(run.identity, run.epoch)
+                    val slot = host.index("txt.uri")
+                    val uri = param.args.getOrNull(slot)?.toString().orEmpty()
+                    if (run.oldBook != null) run.oldBook.uriOrNull()?.let { param.args[slot] = it }
+                    else if (run.independent && uri.isNotBlank()) param.args[slot] = "$uri#reamicro-independent-${run.uuid}"
+                    run.metadata = run.metadata.withSize((param.args.getOrNull(host.index("txt.size")) as? Number)?.toLong())
+                } catch (error: Throwable) { param.throwable = error }
+            }
+        })
+        HookRuntime.deoptimize(method)
+    }
+
+    private fun prepareTxtImport(param: HookCallback.Call) {
+        val originalCompletion = param.args.getOrNull(host.index("txt.continuation"))
+        val resumed = originalCompletion?.takeIf(::isImportContinuation)?.let(importRuns::get)
+        if (resumed != null) {
+            bindImportRun(param, resumed)
+            checkStorageIdentity(resumed.identity, resumed.epoch)
+            return
+        }
+        if (!settingsProvider().canRunReaderOverwriteCheck) return
+        bindRequestEpoch(param, cancellationEpoch.get())
+        val identity = storageIdentity()
+        val book = requireNotNull(param.args.getOrNull(host.index("txt.book")))
+        val sourcePath = requireNotNull(param.args.getOrNull(host.index("txt.directory")))
+        val source = File(sourcePath.toString()).canonicalFile
+        val epoch = requireNotNull(activeRequestEpoch.get())
+        check(book.longOrNull("uid") == identity.accountId && nativeStaging.ownsTxtDirectory(source, identity, epoch)) {
+            "TXT 导入暂存目录与当前账号不一致"
+        }
+        val opf = requireNotNull(obtainOpf(sourcePath)) { "TXT 转换内容不可用" }
+        val uuid = requireNotNull(book.uuidOrNull())
+        val title = book.titleOrNull() ?: resolveImportTitle(opf, null) ?: "未命名"
+        val repository = requireNotNull(param.thisObject)
+        val uri = param.args.getOrNull(host.index("txt.uri"))?.toString().orEmpty()
+        val preDecision = consumePreImportDecision(uuid, title, identity)
+        val conflict = if (preDecision == null) findImportConflict(repository, uuid, uri, title, identity) else null
+        val decision = preDecision?.decision ?: conflict?.let { showOverwriteConfirm(it.oldTitle, title, identity) }
+        if (decision == OverwriteDecision.CANCEL || decision == OverwriteDecision.PASSTHROUGH) throw CancellationException("导入已取消")
+        val old = if (decision == OverwriteDecision.OVERWRITE) {
+            ReaMicroBookMetadataSync.latestBook(repository, requireNotNull(preDecision?.oldBook ?: conflict?.oldBook))
+                ?: error("原图书已变化，请重新导入")
+        } else null
+        val targetUuid = old?.uuidOrNull() ?: if (decision == OverwriteDecision.INDEPENDENT) UUID.randomUUID().toString() else uuid
+        val newOpf = opf.withUuid(targetUuid)
+        val metadata = ReaMicroBookMetadataSync.metadataFromOpf(newOpf, sourcePath)
+            .mergeWith(preDecision?.metadataPatch ?: BookMetadataPatch()).withSize(book.longOrNull("size"))
+        val completion = requireNotNull(originalCompletion)
+        val run = ImportRun(identity, epoch, repository, targetUuid, old, metadata,
+            HostCoroutines.continuationJob(classLoader, completion), decision == OverwriteDecision.INDEPENDENT)
+        bindTxtRun(param, run, book, sourcePath, newOpf)
+    }
+
+    private fun bindTxtRun(param: HookCallback.Call, run: ImportRun, book: Any, source: Any, opf: Any) {
+        runningImports += run
+        bindImportRun(param, run)
+        param.args[host.index("txt.book")] = requireNotNull(HostReaderPositionBindings.current).copy("book", book,
+            mapOf("id" to 0L, "uuid" to run.uuid, "uri" to File(nativeBooksRoot(run.identity), run.uuid).path))
+        param.args[host.index("txt.directory")] = prepareImportDirectory(source, run.uuid, opf, run, nativeBooksRoot(run.identity))
+        HostCoroutines.observeContinuation(classLoader, param, host.index("txt.continuation"),
+            onCompleted = { result, success -> finishImport(run, result, success) })
+    }
+
+    private fun isImportContinuation(value: Any): Boolean =
+        host.type("importContinuation").isInstance(value) || host.type("txtContinuation").isInstance(value)
+
+    private fun importRunForCommit(param: HookCallback.Call): ImportRun? {
+        val continuation = param.args.lastOrNull() ?: return null
+        if (!isImportContinuation(continuation)) return null
+        val run = importRuns[continuation] ?: return null
+        if (host.read("repository.dao", run.repository) !== param.thisObject) return null
+        checkStorageIdentity(run.identity, run.epoch)
+        return run
+    }
+
+    private fun bookProperties(book: Any): Map<String, Any?> = requireNotNull(HostReaderPositionBindings.current)
+        .properties("book").mapValues { it.value.get(book) }
+
+    private fun patchedImportBook(run: ImportRun, book: Any, preserveLatestOwner: Boolean = false): Any {
+        val before = bookProperties(book)
+        check(before["uid"] == run.identity.accountId && before["uuid"] == run.uuid) { "原生导入图书与确认目标不一致" }
+        val owner = if (preserveLatestOwner && run.oldBook != null) {
+            ReaMicroBookMetadataSync.latestBook(run.repository, run.oldBook) ?: error("原图书记录已变化，请重新导入")
+        } else run.oldBook
+        checkStorageIdentity(run.identity, run.epoch)
+        val changes = BookImportOverwritePolicy.changes(before, owner?.let(::bookProperties), run.metadata,
+            System.currentTimeMillis(), preserveLatestOwner)
+        return requireNotNull(HostReaderPositionBindings.current).copy("book", book, changes)
+            .also { run.preparedBook = it }
+    }
+
+    private fun markImportBookCommitted(run: ImportRun, book: Any, success: Boolean) {
+        if (!success) return
+        run.preparedBook = book
+        run.bookCommitted = true
+    }
+
+    private fun hookImportCommits(handles: MutableList<XposedInterface.HookHandle>) {
+        // Patching the native copy before its equality check also handles a content/size-only update.
+        handles += HookRuntime.hookMethod(host.method("bookCopy"), object : HookCallback() {
+            override fun after(param: Call) {
+                val run = activeImport.get() ?: return
+                val old = run.oldBook ?: return
+                val source = param.args.firstOrNull() ?: return
+                if (param.throwable != null || source.longOrNull("id") != old.longOrNull("id") ||
+                    source.longOrNull("uid") != run.identity.accountId || source.uuidOrNull() != run.uuid) return
+                try {
+                    checkStorageIdentity(run.identity)
+                    param.result = patchedImportBook(run, requireNotNull(param.result))
+                } catch (failure: Throwable) { param.throwable = failure }
+            }
+        })
+        for (role in listOf("daoUpdate", "daoInsert")) {
+            val commit = host.method(role)
+            handles += HookRuntime.hookMethod(commit, object : HookCallback(XposedInterface.PRIORITY_LOWEST) {
+                override fun before(param: Call) {
+                    try {
+                        val run = importRunForCommit(param) ?: return
+                        val book = patchedImportBook(run, requireNotNull(param.args.firstOrNull()), preserveLatestOwner = true)
+                        param.args[0] = book
+                        param.setObjectExtra(RUN_EXTRA, run)
+                        param.setObjectExtra(COMMIT_BOOK_EXTRA, book)
+                        val replacePlaceholder = role == "daoInsert" && run.oldBook != null
+                        val oldId = run.oldBook.longOrNull("id")
+                        HostCoroutines.observeContinuation(
+                            classLoader, param, param.args.lastIndex,
+                            onCompleted = { _, success -> markImportBookCommitted(run, book, success) },
+                            transformSuccess = { value -> if (replacePlaceholder) requireNotNull(oldId) else value },
+                        )
+                        if (replacePlaceholder) {
+                            // Keep the primary key and its child records; an INSERT OR REPLACE can delete them.
+                            val result = host.method("daoUpdate").invoke(param.thisObject, *param.args)
+                            param.result = if (result === HostCoroutines.suspended(classLoader)) result else requireNotNull(oldId)
+                        }
+                    } catch (failure: Throwable) { param.throwable = failure }
+                }
+                override fun after(param: Call) {
+                    try {
+                        val run = param.getObjectExtra(RUN_EXTRA) as? ImportRun ?: return
+                        val book = param.getObjectExtra(COMMIT_BOOK_EXTRA) ?: return
+                        if (param.result !== HostCoroutines.suspended(classLoader)) {
+                            markImportBookCommitted(run, book, param.throwable == null)
+                        }
+                    } finally {
+                        HostCoroutines.finishInvocationContinuations(classLoader, param)
+                    }
+                }
+            })
+            HookRuntime.deoptimize(commit)
+        }
+        handles += HookRuntime.hookMethod(host.method("daoDelete"), object : HookCallback() {
+            override fun before(param: Call) {
+                try {
+                    val run = importRunForCommit(param) ?: return
+                    val oldId = run.oldBook.longOrNull("id") ?: return
+                    check((param.args.firstOrNull() as? Number)?.toLong() == oldId) { "覆盖导入的原书主键已变化" }
+                    // The native placeholder branch and native error cleanup must not delete the original owner.
+                    param.result = HostCoroutines.unit(classLoader)
+                } catch (failure: Throwable) { param.throwable = failure }
+            }
+        })
+        HookRuntime.deoptimize(host.method("daoDelete"))
+        HookRuntime.deoptimize(host.method("bookCopy"))
+    }
+
+    private fun finishImport(run: ImportRun, result: Any?, success: Boolean) {
+        if (!run.closed.compareAndSet(false, true)) return
+        var keepContent = false
+        try {
+            val id = if (result != null && host.type("pair").isInstance(result)) {
+                (host.read("pair.second", result) as? Number)?.toLong()
+            } else null
+            val oldId = run.oldBook.longOrNull("id")
+            val completed = success && id != null && id > 0L && (oldId == null || id == oldId)
+            // A successful Pair is produced after the native row/catalog work. Verification,
+            // notification or cancellation after that boundary cannot undo its content files.
+            keepContent = ImportCompletionState.keepPublishedContent(completed, run.bookCommitted && run.oldBook != null)
+            if (keepContent) run.publication?.complete()
+            if (completed) {
+                if (AccountHostRuntime.isCurrentStorage(run.identity, activityProvider())) {
+                    val expected = run.preparedBook ?: run.oldBook
+                    if (expected != null) {
+                        val stored = if (run.oldBook == null) {
+                            findExistingBookByUuid(run.repository, run.uuid, run.identity)
+                                ?.takeIf { it.longOrNull("id") == id }
+                        } else ReaMicroBookMetadataSync.latestBook(run.repository, expected)
+                            ?: error("导入完成后未读到原图书")
+                        requireNotNull(stored) { "导入完成后未读到书架记录" }
+                        val patch = run.metadata.withPreservedAssociation(expected.longOrNull("cloudId"),
+                            host.read("book.publisher", expected) as? String)
+                        check(ReaMicroBookMetadataSync.verifyPatch(stored, if (run.oldBook == null) stored else expected, patch)) {
+                            "导入完成回读与提交元数据不同"
+                        }
+                    }
+                }
+                run.publication?.complete()
+                HookRuntime.log("$LOG_PREFIX import committed and verified: overwrite=${run.oldBook != null}")
+            } else if (!keepContent) {
+                run.publication?.rollback()
+                HookRuntime.log("$LOG_PREFIX import cancelled before book commit; staged files rolled back")
+            } else {
+                // The content row is already durable; retain its matching files if a later auxiliary step fails.
+                run.publication?.complete()
+                HookRuntime.log("$LOG_PREFIX import ended after content commit; original book owner retained")
+            }
+        } catch (failure: Throwable) {
+            if (keepContent) runCatching { run.publication?.complete() }
+            else runCatching { run.publication?.rollback() }.onFailure(failure::addSuppressed)
+            HookRuntime.logError("$LOG_PREFIX import completion verification stopped", failure)
+        } finally {
+            synchronized(importRuns) { importRuns.entries.removeAll { it.value === run } }
+            runningImports -= run
+        }
+    }
+
+    private fun hookEpubFileManagerImport(handles: MutableList<XposedInterface.HookHandle>) {
+        val imported = host.method("epubImport")
+        handles += HookRuntime.hookMethod(imported, object : HookCallback(XposedInterface.PRIORITY_HIGHEST) {
+            override fun before(param: Call) {
+                try {
+                    if (!settingsProvider().canRunReaderOverwriteCheck) return
+                    bindRequestEpoch(param, cancellationEpoch.get())
+                    val identity = storageIdentity()
+                    val source = param.args.getOrNull(host.index("epubImport.source")) ?: return
+                    val opf = obtainOpf(source) ?: return
+                    val title = resolveImportTitle(opf, null) ?: "未命名"
+                    val uuid = resolveImportUuid(opf).orEmpty()
+                    require(uuid.isNotBlank()) { "导入图书缺少有效标识" }
+                    // Online downloads already parse into private staging and own their publication transaction.
+                    val booksDirectory = requireNotNull(param.args.getOrNull(host.index("epubImport.directory")))
+                    val nativeBooksRoot = nativeBooksRoot(identity)
+                    if (OnlineCompletionImportSignal.matches(uuid, title, "") &&
+                        File(booksDirectory.toString()).canonicalFile != nativeBooksRoot) return
+                    if (File(booksDirectory.toString()).canonicalFile != nativeBooksRoot) {
+                        throw CancellationException("EPUB导入目录与当前账号不一致，请重新导入")
+                    }
+                    val remembered = consumePreImportDecision(uuid, title, identity)
+                    val conflict = if (remembered == null) repositoryRef?.get()?.let {
+                        findImportConflict(it, uuid, "", title, identity)
+                    } else null
+                    val preDecision = remembered ?: conflict?.let {
+                        val choice = showOverwriteConfirm(it.oldTitle, title, identity)
+                        preDecisionOf(choice, it, opf, source, identity)
+                    }
+                    checkStorageIdentity(identity)
+                    if (preDecision?.decision == OverwriteDecision.CANCEL || preDecision?.decision == OverwriteDecision.PASSTHROUGH) {
+                        throw CancellationException("导入已取消")
+                    }
+                    val targetUuid = when (preDecision?.decision) {
+                        OverwriteDecision.OVERWRITE -> requireNotNull(preDecision.oldUuid)
+                        OverwriteDecision.INDEPENDENT -> UUID.randomUUID().toString()
+                        else -> uuid
+                    }
+                    val temporaryUuid = newEpubImportStagingUuid(nativeBooksRoot, targetUuid)
+                    val stage = EpubStage(identity, requireNotNull(activeRequestEpoch.get()), title, uuid, targetUuid,
+                        temporaryUuid, preDecision, booksDirectory, source, opf)
+                    param.setObjectExtra(EPUB_STAGE_EXTRA, stage)
+                    opf.withUuid(temporaryUuid).overwriteToRoot(source, identity)
+                } catch (failure: Throwable) {
+                    param.throwable = failure
+                    if (failure !is CancellationException) HookRuntime.logError("$LOG_PREFIX EPUB import stopped before native overwrite", failure)
+                }
+            }
+            override fun after(param: Call) {
+                val stage = param.getObjectExtra(EPUB_STAGE_EXTRA) as? EpubStage
+                try {
+                    if (stage == null) return
+                    if (param.throwable != null) return
+                    checkStorageIdentity(stage.identity, stage.epoch)
+                    val result = requireNotNull(param.result)
+                    val directory = requireNotNull(host.read("pair.first", result))
+                    val opf = requireNotNull(host.read("pair.second", result))
+                    val expected = requireNotNull(host.method("resolve").invoke(stage.booksDirectory, stage.temporaryUuid, true))
+                    check(File(directory.toString()).canonicalFile == File(expected.toString()).canonicalFile) { "原生EPUB暂存目录发生变化" }
+                    opf.withUuid(stage.targetUuid).overwriteToRoot(directory, stage.identity)
+                    stagedEpubDirectories[File(directory.toString()).canonicalPath] = stage
+                    stage.preDecision?.let { rememberPreImportDecision(stage.targetUuid, stage.title, it) }
+                    HookRuntime.log("$LOG_PREFIX EPUB staged and verified: prechecked=${stage.preDecision != null}")
+                } catch (failure: Throwable) {
+                    param.throwable = failure
+                    HookRuntime.logError("$LOG_PREFIX EPUB staging completion stopped", failure)
+                } finally {
+                    if (stage != null && AccountHostRuntime.isCurrentStorage(stage.identity, activityProvider())) {
+                        runCatching {
+                            AccountHostRuntime.withCurrentStorage(stage.identity) {
+                                stage.sourceOpf.withUuid(stage.originalUuid)
+                                host.method("overwrite").invoke(stage.sourceOpf, stage.source)
+                                // Some parsers can share their in-memory OPF; the returned object stays at the target UUID.
+                                if (param.throwable == null) host.read("pair.second", param.result)?.withUuid(stage.targetUuid)
+                            }
+                        }.onFailure { HookRuntime.logError("$LOG_PREFIX EPUB source identifier restore stopped", it) }
+                    }
+                    if (stage != null && param.throwable != null && AccountHostRuntime.isCurrentStorage(stage.identity, activityProvider())) {
+                        runCatching {
+                            val path = host.method("resolve").invoke(stage.booksDirectory, stage.temporaryUuid, true) ?: return@runCatching
+                            val directory = File(path.toString()).canonicalFile
+                            val parent = File(stage.booksDirectory.toString()).canonicalFile
+                            check(directory.name == stage.temporaryUuid && directory.parentFile == parent)
+                            if (directory.exists()) deleteImportPath(directory, stage.identity)
+                        }.onFailure { HookRuntime.logError("$LOG_PREFIX EPUB staging cleanup stopped", it) }
+                    }
+                    restoreRequestEpoch(param)
+                }
+            }
+        })
+        HookRuntime.deoptimize(imported)
+    }
+
+    private fun findImportConflict(
+        repository: Any, uuid: String, uriOverride: String, title: String, identity: AccountHostRuntime.Identity,
+    ): ImportConflict? {
+        checkStorageIdentity(identity)
+        val uuidBook = if (uuid.isNotBlank()) findExistingBookByUuid(repository, uuid, identity) else null
+        val duplicateByUuid = uuidBook != null
+        val urlBook = if (uuidBook == null && uriOverride.isNotBlank()) {
+            findExistingBookByUrl(repository, uriOverride, identity)
         } else {
             null
         }
-        val titleBook = findExistingBookByExactTitle(repository, title, uuid)
-        val existingBook = titleBook ?: urlBook ?: uuidBook
+        val titleBook = if (uuidBook == null && urlBook == null) findExistingBookByExactTitle(repository, title, identity) else null
+        val existingBook = selectImportConflict(uuidBook, urlBook, titleBook)
         if (!duplicateByUuid && urlBook == null && titleBook == null) return null
+        HookRuntime.log("$LOG_PREFIX import conflict matched: uuid=$duplicateByUuid, source=${urlBook != null}, title=${titleBook != null}")
         return ImportConflict(
             oldBook = existingBook,
             oldTitle = existingBook.titleOrNull() ?: title,
             oldUuid = existingBook.uuidOrNull(),
-            oldUri = if (titleBook != null) null else existingBook.uriOrNull(),
-            byUuid = duplicateByUuid,
-            byUrl = urlBook != null,
-            byTitle = titleBook != null,
+            oldUri = existingBook.uriOrNull(),
         )
     }
 
-    private fun findExistingBookByUrl(repository: Any, url: String): Any? {
-        val candidates = (
-            repository.javaClass.methods.asSequence() +
-                repository.javaClass.declaredMethods.asSequence()
-            )
-            .filter { method ->
-                (method.hostNameMatches("liveBookByUrl") || method.hostNameMatches("findBookByUrl")) &&
-                    method.parameterTypes.size in 1..2
-            }
-            .distinct()
-            .toList()
-        candidates.firstOrNull { it.parameterTypes.size == 1 }?.let { flowMethod ->
-            flowMethod.isAccessible = true
-            val flow = runCatching { flowMethod.invoke(repository, url) }.getOrNull()
-            if (flow != null) return firstFlowValue(flow)
-        }
-        val findMethod = candidates.firstOrNull { method ->
-            method.parameterTypes.size == 2 &&
-                typeMatches(method.parameterTypes.last(), KOTLIN_CONTINUATION_CLASS)
-        }?.apply { isAccessible = true } ?: return null
-        return invokeSuspendBlocking(findMethod, repository, url)
-    }
+    private fun findExistingBookByUrl(repository: Any, url: String, identity: AccountHostRuntime.Identity): Any? =
+        listExistingBooks(repository, identity).firstOrNull { it.uriOrNull() == url && (it.longOrNull("id") ?: 0L) > 0L }
 
-    private fun firstFlowValue(flow: Any): Any? {
-        if (HostSymbols.usesRc3Abi) {
-            val first = classLoader.hostClass("ReaMicroHost.FlowFirst").hostAbiMethod(
-                "e", classLoader.hostClass("kotlinx.coroutines.flow.Flow"),
-                classLoader.hostClass(KOTLIN_CONTINUATION_CLASS),
-            )
-            return invokeSuspendBlocking(first, null, flow)
-        }
-        val flowKt = XposedHelpers.findClass(FLOW_KT_CLASS, classLoader)
-        val firstMethod = (flowKt.methods.asSequence() + flowKt.declaredMethods.asSequence())
-            .firstOrNull { it.hostNameMatches("first") && it.parameterTypes.size == 2 }
-            ?.apply { isAccessible = true }
-            ?: return null
-        return invokeSuspendBlocking(firstMethod, null, flow)
-    }
+    private fun firstFlowValue(flow: Any): Any? = invokeSuspendBlocking(host.method("first"), null, flow)
 
     private fun resolveImportTitle(opf: Any?, file: Any?): String? =
-        sequenceOf(
-            runCatching { callStringPath(opf, "metadata", "title", "value") }.getOrNull(),
-            runCatching { resolveImportTitleFromFile(file) }.getOrNull(),
-            runCatching { callStringPath(file, "name") }.getOrNull(),
-        ).firstOrNull { !it.isNullOrBlank() }
+        (host.read("title.value", host.read("metadata.title", host.read("opf.metadata", opf))) as? String)
+            ?.takeIf(String::isNotBlank) ?: resolveImportTitleFromFile(file)
 
     private fun resolveImportUuid(opf: Any?): String? =
-        sequenceOf(
-            runCatching { callStringPath(opf, "metadata", "uuid", "value") }.getOrNull(),
-            runCatching { callStringPath(opf, "metadata", "getUuid", "value") }.getOrNull(),
-            runCatching { resolveReaMicroMd5Identifier(opf) }.getOrNull(),
-        ).firstOrNull { !it.isNullOrBlank() }
-
-    private fun isOnlineCompletionUuid(uuid: String): Boolean =
-        uuid.startsWith(ONLINE_COMPLETION_UUID_PREFIX)
-
-    private fun isOnlineCompletionImport(uuid: String, uriOverride: String, conflict: ImportConflict): Boolean =
-        isOnlineCompletionUuid(uuid) ||
-            isOnlineCompletionPath(uriOverride) ||
-            isOnlineCompletionBook(conflict.oldBook)
-
-    private fun isOnlineCompletionBook(book: Any?): Boolean =
-        isOnlineCompletionPath(book.stringOrNull("getBackupId").orEmpty()) ||
-            isOnlineCompletionPath(book.uriOrNull().orEmpty()) ||
-            isOnlineCompletionUuid(book.uuidOrNull().orEmpty()) ||
-            (book.intOrNull("getBackupType") == BACKUP_TYPE_ONLINE_COMPLETION &&
-                book.stringOrNull("getBackupCode").orEmpty().startsWith("online_"))
-
-    private fun isOnlineCompletionPath(value: String): Boolean =
-        value.startsWith(ONLINE_COMPLETION_BOOK_PREFIX) ||
-            value.startsWith(ONLINE_COMPLETION_SOURCE_PREFIX)
+        (host.read("identifier.value", host.read("metadata.uuid", host.read("opf.metadata", opf))) as? String)
+            ?.takeIf(String::isNotBlank) ?: resolveReaMicroMd5Identifier(opf)
 
     private fun resolveReaMicroMd5Identifier(opf: Any?): String? {
-        val metadata = noArgValue(opf, "getMetadata") ?: noArgValue(opf, "metadata") ?: return null
-        val metas = noArgValue(metadata, "getMetas") ?: noArgValue(metadata, "metas") ?: return null
-        return (metas as? Iterable<*>)
-            ?.firstNotNullOfOrNull { meta ->
-                val property = callStringPath(meta, "property")?.trim()
-                    ?: callStringPath(meta, "getProperty")?.trim()
-                if (!property.equals("reamicro:md5", ignoreCase = true)) return@firstNotNullOfOrNull null
-                sequenceOf(
-                    callStringPath(meta, "value"),
-                    callStringPath(meta, "content"),
-                    callStringPath(meta, "getValue"),
-                    callStringPath(meta, "getContent"),
-                )
-                    .mapNotNull { it?.trim() }
-                    .firstOrNull { REAMICRO_MD5_REGEX.matches(it) }
-            }
+        val metadata = host.read("opf.metadata", opf) ?: return null
+        val metas = host.read("metadata.metas", metadata) as? Iterable<*> ?: return null
+        return metas.firstNotNullOfOrNull { meta ->
+            if (!(host.read("meta.property", meta) as? String).equals("reamicro:md5", ignoreCase = true)) return@firstNotNullOfOrNull null
+            (host.read("meta.value", meta) as? String)?.trim()?.takeIf(REAMICRO_MD5_REGEX::matches)
+        }
     }
 
-    private fun showOverwriteConfirm(oldTitle: String, newTitle: String): OverwriteDecision {
+    private fun showOverwriteConfirm(
+        oldTitle: String, newTitle: String, identity: AccountHostRuntime.Identity,
+    ): OverwriteDecision {
+        checkStorageIdentity(identity)
         val activity = activityProvider() ?: run {
-            XposedBridge.log("$LOG_PREFIX no activity for overwrite confirmation; refusing silent overwrite")
+            HookRuntime.log("$LOG_PREFIX no activity for overwrite confirmation; refusing silent overwrite")
             return OverwriteDecision.CANCEL
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            XposedBridge.log("$LOG_PREFIX overwrite confirmation requested on main thread; refusing silent overwrite")
+            HookRuntime.log("$LOG_PREFIX overwrite confirmation requested on main thread; refusing silent overwrite")
             return OverwriteDecision.CANCEL
         }
         val latch = CountDownLatch(1)
         var decision = OverwriteDecision.CANCEL
-        activity.runOnUiThread {
-            showOverwriteDialog(activity, oldTitle, newTitle) { result ->
-                decision = result
+        var shownDialog: Dialog? = null
+        activity.runOnModuleUiThread {
+            if (activity.isFinishing || activity.isDestroyed || !settingsProvider().canRunReaderOverwriteCheck ||
+                !AccountHostRuntime.isCurrentStorage(identity, activity)) {
+                latch.countDown()
+                return@runOnModuleUiThread
+            }
+            runCatching {
+                shownDialog = showOverwriteDialog(activity, oldTitle, newTitle, identity) { result ->
+                    decision = if (AccountHostRuntime.isCurrentStorage(identity, activity)) result else OverwriteDecision.CANCEL
+                    latch.countDown()
+                }
+                HookRuntime.log("$LOG_PREFIX overwrite confirmation requested")
+            }.onFailure {
+                HookRuntime.logError("$LOG_PREFIX native overwrite confirmation unavailable", it)
                 latch.countDown()
             }
         }
-        latch.await()
-        return decision
+        try {
+            while (!latch.await(100L, TimeUnit.MILLISECONDS)) {
+                checkStorageIdentity(identity)
+                if (activity.isFinishing || activity.isDestroyed) throw CancellationException("导入确认页面已关闭")
+            }
+            checkStorageIdentity(identity)
+            HookRuntime.log("$LOG_PREFIX overwrite confirmation resolved: $decision")
+            return decision
+        } finally {
+            activity.runOnModuleUiThread { shownDialog?.takeIf(Dialog::isShowing)?.dismiss() }
+        }
     }
 
     private fun showOverwriteDialog(
         activity: Activity,
         oldTitle: String,
         newTitle: String,
+        identity: AccountHostRuntime.Identity,
         onResult: (OverwriteDecision) -> Unit,
-    ) {
-        var resolved = false
-        val dialog = Dialog(activity)
-        val dp = activity.resources.displayMetrics.density
-        val colors = DialogColors(activity)
-        val card = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding((22 * dp).toInt(), (22 * dp).toInt(), (22 * dp).toInt(), (18 * dp).toInt())
-            background = roundedDrawable(colors.card, 8 * dp)
-        }
-        card.addView(TextView(activity).apply {
-            text = "原：$oldTitle\n新：$newTitle"
-            textSize = 19f
-            setTextColor(colors.title)
-            includeFontPadding = false
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { bottomMargin = (16 * dp).toInt() }
-        })
-        card.addView(actionButton(activity, "覆盖导入", colors.primarySoft, colors.primaryText) {
-            resolved = true
-            onResult(OverwriteDecision.OVERWRITE)
-            dialog.dismiss()
-        })
-        card.addView(actionButton(activity, "独立导入", colors.neutralSoft, colors.neutralText) {
-            resolved = true
-            onResult(OverwriteDecision.INDEPENDENT)
-            dialog.dismiss()
-        })
-        card.addView(actionButton(activity, "取消导入", colors.dangerSoft, colors.dangerText) {
-            resolved = true
-            onResult(OverwriteDecision.CANCEL)
-            dialog.dismiss()
-        })
-        dialog.setContentView(card)
-        dialog.setOnCancelListener {
-            if (!resolved) {
-                resolved = true
-                onResult(OverwriteDecision.CANCEL)
-            }
-        }
-        dialog.setOnDismissListener {
-            if (!resolved) {
-                resolved = true
-                onResult(OverwriteDecision.CANCEL)
-            }
-        }
-        dialog.window?.let { window ->
-            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            window.setDimAmount(0.42f)
-            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        }
-        dialog.show()
-        dialog.window?.setLayout(
-            (activity.resources.displayMetrics.widthPixels * 0.86f).toInt(),
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        )
-    }
+    ): Dialog = HostImportOverwriteDialogs.show(activity, oldTitle, newTitle,
+        isCurrent = { !activity.isFinishing && !activity.isDestroyed && settingsProvider().canRunReaderOverwriteCheck &&
+            AccountHostRuntime.isCurrentStorage(identity, activity) },
+        onResult = { choice ->
+            onResult(when (choice) {
+                HostImportOverwriteDialogs.Choice.COVER -> OverwriteDecision.OVERWRITE
+                HostImportOverwriteDialogs.Choice.IMPORT_NEW -> OverwriteDecision.INDEPENDENT
+                HostImportOverwriteDialogs.Choice.CANCEL -> OverwriteDecision.CANCEL
+            })
+        },
+    )
 
-    private fun actionButton(
-        context: Context,
-        label: String,
-        backgroundColor: Int,
-        textColor: Int,
-        onClick: () -> Unit,
-    ): TextView {
-        val dp = context.resources.displayMetrics.density
-        return TextView(context).apply {
-            text = label
-            textSize = 17f
-            gravity = Gravity.CENTER
-            setTextColor(textColor)
-            includeFontPadding = false
-            background = roundedDrawable(backgroundColor, 8 * dp)
-            setOnClickListener { onClick() }
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                (56 * dp).toInt(),
-            ).apply { topMargin = (10 * dp).toInt() }
+    private fun findExistingBookByExactTitle(
+        repository: Any, title: String, identity: AccountHostRuntime.Identity,
+    ): Any? {
+        val normalized = title.normalizedBookTitle()
+        if (normalized.isBlank()) return null
+        return listExistingBooks(repository, identity).firstOrNull { book ->
+            book.titleOrNull()?.normalizedBookTitle() == normalized && (book.longOrNull("id") ?: 0L) > 0L
         }
     }
 
-    private fun roundedDrawable(color: Int, radius: Float): GradientDrawable =
-        GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = radius
-            setColor(color)
-        }
+    private fun storageIdentity(): AccountHostRuntime.Identity =
+        requireNotNull(AccountHostRuntime.storageSnapshot(activityProvider())) { "账号状态正在变化，请稍后重新导入" }
 
-    private class DialogColors(context: Context) {
-        private val palette = ModuleDialogTheme.palette(context)
-        val card: Int = palette.pageBackground
-        val title: Int = palette.title
-        val primarySoft: Int = palette.rowBackground
-        val primaryText: Int = palette.primaryText
-        val neutralSoft: Int = palette.rowBackground
-        val neutralText: Int = palette.neutralText
-        val dangerSoft: Int = palette.rowBackground
-        val dangerText: Int = palette.destructiveText
+    private fun nativeBooksRoot(identity: AccountHostRuntime.Identity): File {
+        val context = activityProvider() ?: currentApplicationContext() ?: error("导入存储环境暂不可用")
+        return File(context.filesDir, "${identity.accountId}/books").canonicalFile
     }
 
-    private fun findExistingBookByExactTitle(repository: Any, title: String, importUuid: String): Any? {
-        val normalizedTitle = title.normalizedBookTitle()
-        if (normalizedTitle.isBlank()) return null
-        val listedBook = listExistingBooks(repository)?.firstOrNull { book ->
-            val candidateTitle = book.titleOrNull()?.normalizedBookTitle()
-            val candidateUuid = book.uuidOrNull().orEmpty()
-            candidateTitle == normalizedTitle && candidateUuid != importUuid && book.hasLocalBookData(repository)
+    private fun checkStorageIdentity(identity: AccountHostRuntime.Identity, epoch: Long? = activeRequestEpoch.get()) {
+        if (Thread.currentThread().isInterrupted || !ModuleResources.accepting || !settingsProvider().canRunReaderOverwriteCheck) {
+            throw CancellationException("导入模块已关闭，请重新导入")
         }
-        if (listedBook != null) return listedBook
-
-        val uid = currentUserId(repository) ?: return null
-        val bookDao = repository.fieldValue("bookDao") ?: return null
-        val searchMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
-            .firstOrNull { candidate ->
-                candidate.hostNameMatches("search") &&
-                    candidate.parameterTypes.size == 3 &&
-                    candidate.parameterTypes[1] == String::class.java
-            }
-            ?.apply { isAccessible = true }
-            ?: return null
-        val result = runCatching { invokeSuspendBlocking(searchMethod, bookDao, uid, title) }
-            .onFailure {
-                XposedBridge.log("$LOG_PREFIX failed to search existing title: ${it.stackTraceToString()}")
-            }
-            .getOrNull()
-        val candidates = result as? Iterable<*> ?: return null
-        return candidates.firstOrNull { book ->
-            val candidateTitle = book.titleOrNull()?.normalizedBookTitle()
-            val candidateUuid = book.uuidOrNull().orEmpty()
-            candidateTitle == normalizedTitle && candidateUuid != importUuid && book.hasLocalBookData(repository)
+        if (epoch != null && epoch != cancellationEpoch.get()) throw CancellationException("原导入请求已取消，请重新导入")
+        if (!AccountHostRuntime.isCurrentStorage(identity, activityProvider())) {
+            throw CancellationException("账号已切换，请重新导入")
         }
     }
 
-    private fun listExistingBooks(repository: Any): Iterable<*>? {
-        val uid = currentUserId(repository) ?: return null
-        val bookDao = repository.fieldValue("bookDao") ?: return null
-        val listMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
-            .firstOrNull { candidate ->
-                candidate.hostNameMatches("listByUid") &&
-                    candidate.parameterTypes.size == 1 &&
-                    candidate.parameterTypes[0] == java.lang.Long.TYPE
-            }
-            ?.apply { isAccessible = true }
-            ?: return null
-        val flow = runCatching { listMethod.invoke(bookDao, uid) }
-            .onFailure {
-                XposedBridge.log("$LOG_PREFIX failed to get book list flow: ${it.stackTraceToString()}")
-            }
-            .getOrNull()
-            ?: return null
-        return runCatching { firstFlowValue(flow) as? Iterable<*> }
-            .onFailure {
-                XposedBridge.log("$LOG_PREFIX failed to collect existing books: ${it.stackTraceToString()}")
-            }
-            .getOrNull()
+    private fun guardNativeImportProgress(param: HookCallback.Call, identity: AccountHostRuntime.Identity) {
+        val epoch = requireNotNull(activeRequestEpoch.get())
+        val index = host.index("import.progress")
+        val previous = param.args.getOrNull(index)
+        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+        param.args[index] = ui.function(host.type("function1"), fallback = { throw CancellationException("导入模块状态已变化") }) { arguments ->
+            // Both hosts emit progress(10) after UserFlow.first and before the first UID-bound DAO call.
+            ImportCompletionState.forwardProgress(
+                (arguments?.firstOrNull() as? Number)?.toInt() ?: 0,
+                checkCurrent = { checkStorageIdentity(identity, epoch) },
+                notify = { if (previous != null) ui.method("invoke1").invoke(previous, *arguments.orEmpty()) },
+                afterCommitError = { HookRuntime.logError("$LOG_PREFIX final import progress notification failed after commit", it) },
+            )
+            HostCoroutines.unit(classLoader)
+        }
     }
 
-    private fun findExistingBookByUuid(repository: Any, uuid: String): Any? {
-        val uid = currentUserId(repository) ?: return null
-        val bookDao = repository.fieldValue("bookDao") ?: return null
-        val findMethod = (bookDao.javaClass.methods.asSequence() + bookDao.javaClass.declaredMethods.asSequence())
-            .firstOrNull { candidate ->
-                candidate.hostNameMatches("findByUidAndUuid") &&
-                    candidate.parameterTypes.size == 3 &&
-                    candidate.parameterTypes.count { it == String::class.java } == 1 &&
-                    candidate.parameterTypes[0] == java.lang.Long.TYPE
-            }
-            ?.apply { isAccessible = true }
-            ?: return null
-        return runCatching { invokeSuspendBlocking(findMethod, bookDao, uid, uuid) }
-            .getOrNull()
-            ?.takeIf { it.hasLocalBookData(repository) }
+    private fun listExistingBooks(repository: Any, identity: AccountHostRuntime.Identity): Iterable<*> {
+        checkStorageIdentity(identity)
+        val dao = requireNotNull(host.read("repository.dao", repository))
+        val flow = requireNotNull(host.method("list").invoke(dao, identity.accountId))
+        val books = firstFlowValue(flow) as? Iterable<*> ?: error("Import book list returned an unexpected value")
+        checkStorageIdentity(identity)
+        return books.filterNotNull().filter { it.longOrNull("uid") == identity.accountId }
     }
 
-    private fun currentUserId(repository: Any): Long? =
-        runCatching {
-            val flow = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
-                .firstOrNull { it.hostNameMatches("getCurrentUserFlow") && it.parameterTypes.isEmpty() }
-                ?.apply { isAccessible = true }
-                ?.invoke(repository)
-                ?: repository.fieldValue("currentUserFlow")
-            flow?.let {
-                firstFlowValue(it)?.longOrNull("getId")
-                    ?.takeIf { userId -> userId > 0L }
-                    ?.let { userId -> return@runCatching userId }
-            }
-
-            val userStorage = repository.fieldValue("userStorage")
-            val storedUid = userStorage?.fieldValue("uid")
-                ?: userStorage?.let { storage ->
-                    (storage.javaClass.declaredFields.asSequence() + storage.javaClass.fields.asSequence())
-                        .firstOrNull { it.type == java.lang.Long::class.java }
-                        ?.apply { isAccessible = true }
-                        ?.get(storage)
-                }
-            (storedUid as? Number)?.toLong()?.takeIf { it > 0L }
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to resolve current user id: ${it.stackTraceToString()}")
-        }.getOrNull()
-
-    private fun Any.fieldValue(name: String): Any? =
-        runCatching {
-            var current: Class<*>? = javaClass
-            while (current != null) {
-                current.declaredFields.firstOrNull { it.hostNameMatches(name) }?.let { field ->
-                    field.isAccessible = true
-                    return field.get(this)
-                }
-                current = current.superclass
-            }
-            null
-        }.getOrNull()
-
-    private fun Any?.titleOrNull(): String? =
-        stringOrNull("getTitle")
-
-    private fun Any?.uuidOrNull(): String? =
-        stringOrNull("getUuid")
-
-    private fun Any?.uriOrNull(): String? =
-        stringOrNull("getUri")
-
-    private fun Any?.longOrNull(methodName: String): Long? =
-        runCatching {
-            (this?.let { XposedHelpers.callMethod(it, methodName) } as? Number)?.toLong()
-        }.getOrNull()
-
-    private fun Any?.intOrNull(methodName: String): Int? =
-        runCatching {
-            (this?.let { XposedHelpers.callMethod(it, methodName) } as? Number)?.toInt()
-        }.getOrNull()
-
-    private fun Any?.stringOrNull(methodName: String): String? =
-        runCatching {
-            this?.let { XposedHelpers.callMethod(it, methodName) }?.toString()
-        }.getOrNull()?.takeIf { it.isNotBlank() }
-
-    private fun Any?.hasLocalBookData(repository: Any): Boolean {
-        val uuid = uuidOrNull()?.trim().orEmpty()
-        if (uuid.isBlank()) return false
-
-        val hostResult = runCatching {
-            val checkMethod = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
-                .firstOrNull {
-                    it.hostNameMatches("checkBookExists") &&
-                        it.parameterTypes.size == 2 &&
-                        it.parameterTypes[0] == String::class.java &&
-                        typeMatches(it.parameterTypes[1], KOTLIN_CONTINUATION_CLASS)
-                }
-                ?.apply { isAccessible = true }
-                ?: return@runCatching null
-            invokeSuspendBlocking(checkMethod, repository, uuid) as? Boolean
-        }.getOrNull()
-        if (hostResult == true) return true
-        if (hostResult == false) return false
-
-        val context = activityProvider()?.applicationContext ?: currentApplicationContext() ?: return false
-        val uid = longOrNull("getUid") ?: return false
-        return File(context.filesDir, "$uid/books/$uuid/META-INF/container.xml").isFile
+    private fun findExistingBookByUuid(repository: Any, uuid: String, identity: AccountHostRuntime.Identity): Any? {
+        checkStorageIdentity(identity)
+        val dao = requireNotNull(host.read("repository.dao", repository))
+        val values = mapOf<Int, Any?>(host.index("find.uid") to identity.accountId, host.index("find.uuid") to uuid)
+        val arguments = host.method("find").parameterTypes.indices
+            .filter { it != host.index("find.continuation") }.map(values::getValue)
+        val book = invokeSuspendBlocking(host.method("find"), dao, *arguments.toTypedArray())
+        checkStorageIdentity(identity)
+        return book?.takeIf { it.longOrNull("uid") == identity.accountId && (it.longOrNull("id") ?: 0L) > 0L }
     }
+    private fun Any?.titleOrNull(): String? = stringOrNull("title")
+    private fun Any?.uuidOrNull(): String? = stringOrNull("uuid")
+    private fun Any?.uriOrNull(): String? = stringOrNull("uri")
+    private fun Any?.longOrNull(property: String): Long? = (host.read("book.$property", this) as? Number)?.toLong()
+    private fun Any?.stringOrNull(property: String): String? = (host.read("book.$property", this) as? String)?.takeIf(String::isNotBlank)
 
     private fun String.normalizedBookTitle(): String =
         trim().replace(Regex("\\s+"), " ")
 
-    private fun currentApplicationContext(): Context? =
-        runCatching {
-            Class.forName("android.app.ActivityThread")
-                .hostMethod("currentApplication")
-                .apply { isAccessible = true }
-                .invoke(null) as? Context
-        }.getOrNull()?.applicationContext
-
-    private fun decisionKey(uuid: String, title: String): String =
-        "${uuid.trim()}|${title.normalizedBookTitle()}"
-
-    private fun logImportBookCall(param: XC_MethodHook.MethodHookParam) {
-        runCatching {
-            val method = param.method
-            val declaring = method?.declaringClass?.name?.substringAfterLast('.')
-            val params = method?.parameterTypes?.joinToString(",") { it.simpleName }.orEmpty()
-            val args = param.args?.joinToString(",") { it?.javaClass?.simpleName ?: "null" }.orEmpty()
-            XposedBridge.log("$LOG_PREFIX importBook call: $declaring#$params args=[$args]")
-
-            if (param.args?.getOrNull(0) == null && param.args?.getOrNull(2) == null) {
-                val frames = Throwable().stackTrace.take(16).joinToString("\n") { "    at $it" }
-                XposedBridge.log("$LOG_PREFIX importBook identity-less call stack:\n$frames")
-            }
-        }
+    private inline fun <T> withRequestEpoch(action: () -> T): T {
+        val previous = activeRequestEpoch.get()
+        activeRequestEpoch.set(cancellationEpoch.get())
+        return try { action() } finally { activeRequestEpoch.set(previous) }
     }
 
-    internal fun precheckModuleImport(epubFile: File, sourceUri: String): Boolean {
-        if (!settingsProvider().canRunReaderOverwriteCheck) return true
-        if (!epubFile.isFile) return true
-        val repository = repositoryRef?.get() ?: return true
-        val opf = obtainOpf(okioPathOf(epubFile) ?: return true) ?: return true
+    internal fun precheckModuleImport(epubFile: File, sourceUri: String): Boolean = withRequestEpoch { runCatching {
+        if (!settingsProvider().canRunReaderOverwriteCheck) return@runCatching true
+        if (!epubFile.isFile) return@runCatching true
+        val repository = repositoryRef?.get() ?: return@runCatching true
+        val identity = storageIdentity()
+        val root = okioPathOf(epubFile) ?: return@runCatching true
+        val opf = obtainOpf(root) ?: return@runCatching true
         val uuid = resolveImportUuid(opf).orEmpty()
-        val title = resolveImportTitle(opf, null) ?: return true
-        val conflict = findImportConflict(repository, uuid, sourceUri, title) ?: return true
-        XposedBridge.log(
-            "$LOG_PREFIX module import precheck conflict: title=$title, uuid=$uuid, " +
-                "uri=${sourceUri.take(80)}, oldUuid=${conflict.oldUuid}",
-        )
-        return when (val decision = showOverwriteConfirm(conflict.oldTitle, title)) {
-            OverwriteDecision.CANCEL -> {
-                rememberCancelledImport(uuid, title, sourceUri, epubFile)
-                XposedBridge.log("$LOG_PREFIX module import precheck cancelled before native queue: title=$title")
-                false
-            }
-            OverwriteDecision.PASSTHROUGH -> false
+        val title = resolveImportTitle(opf, null) ?: return@runCatching true
+        val conflict = findImportConflict(repository, uuid, sourceUri, title, identity) ?: return@runCatching true
+        val decision = showOverwriteConfirm(conflict.oldTitle, title, identity)
+        checkStorageIdentity(identity)
+        when (decision) {
+            OverwriteDecision.CANCEL, OverwriteDecision.PASSTHROUGH -> false
             OverwriteDecision.OVERWRITE, OverwriteDecision.INDEPENDENT -> {
-
-                rememberPreImportDecision(uuid, title, preDecisionOf(decision, conflict.oldUuid, conflict.oldBook, opf))
-                XposedBridge.log("$LOG_PREFIX module import precheck decision=$decision title=$title")
+                rememberPreImportDecision(uuid, title, preDecisionOf(decision, conflict, opf, null, identity))
                 true
             }
         }
+    }.onFailure {
+        if (it !is CancellationException) HookRuntime.logError("$LOG_PREFIX module import precheck stopped", it)
+    }.getOrDefault(false) }
+
+    internal fun prepareModuleDirectoryImport(
+        directory: File, sourceUri: String, fallbackUuid: String, fallbackTitle: String, continuingUuid: String?,
+    ): ModuleDirectoryImportPlan = withRequestEpoch {
+        if (!settingsProvider().canRunReaderOverwriteCheck) return@withRequestEpoch ModuleDirectoryImportPlan(true, fallbackUuid, fallbackTitle)
+        val identity = storageIdentity()
+        val repository = requireNotNull(repositoryRef?.get() ?: ReaMicroBookMetadataSync.currentBookshelfRepository()) {
+            "阅微导入服务暂不可用，请稍后重试"
+        }
+        val root = requireNotNull(okioPathOf(directory))
+        val opf = requireNotNull(obtainOpf(root)) { "导入内容不可用" }
+        val uuid = resolveImportUuid(opf) ?: fallbackUuid
+        val title = resolveImportTitle(opf, null) ?: fallbackTitle
+        val conflict = if (continuingUuid == null) findImportConflict(repository, uuid, sourceUri, title, identity) else {
+            val book = requireNotNull(findExistingBookByUuid(repository, continuingUuid, identity)) {
+                "本次下载的书架记录已变化，请重新下载"
+            }
+            ImportConflict(book, book.titleOrNull() ?: title, book.uuidOrNull(), book.uriOrNull())
+        }
+        val choice = if (continuingUuid != null) OverwriteDecision.OVERWRITE
+            else conflict?.let { showOverwriteConfirm(it.oldTitle, title, identity) }
+        if (choice == OverwriteDecision.CANCEL || choice == OverwriteDecision.PASSTHROUGH) {
+            return@withRequestEpoch ModuleDirectoryImportPlan(false, uuid, title)
+        }
+        checkStorageIdentity(identity)
+        val targetUuid = when (choice) {
+            OverwriteDecision.OVERWRITE -> requireNotNull(conflict?.oldUuid)
+            OverwriteDecision.INDEPENDENT -> UUID.randomUUID().toString()
+            else -> uuid
+        }
+        val prepared = opf.withUuid(targetUuid)
+        prepared.overwriteToRoot(root, identity)
+        val decision = if (choice == null) null else preDecisionOf(choice, requireNotNull(conflict), prepared, root, identity)
+        if (decision != null) rememberPreImportDecision(targetUuid, title, decision)
+        ModuleDirectoryImportPlan(true, targetUuid, title, decision)
+    }
+
+    internal fun discardModuleDirectoryImport(plan: ModuleDirectoryImportPlan) {
+        (plan.token as? PreImportDecision)?.let(pendingPreImportDecisions::forget)
     }
 
     private fun preDecisionOf(
         decision: OverwriteDecision,
-        oldUuid: String?,
-        oldBook: Any?,
+        conflict: ImportConflict,
         opf: Any,
-    ): PreImportDecision = PreImportDecision(
-        decision = decision,
-        oldTitle = "",
-        oldUuid = oldUuid,
-        oldUri = null,
-        oldBook = oldBook,
-        metadataPatch = ReaMicroBookMetadataSync.metadataFromOpf(opf),
-        createdAtMs = System.currentTimeMillis(),
-    )
+        root: Any?,
+        identity: AccountHostRuntime.Identity,
+    ) = PreImportDecision(decision, conflict.oldTitle, conflict.oldUuid, conflict.oldUri, conflict.oldBook,
+        ReaMicroBookMetadataSync.metadataFromOpf(opf, root), identity, requireNotNull(activeRequestEpoch.get()))
 
-    private fun okioPathOf(file: File): Any? = runCatching {
-        val pathClass = XposedHelpers.findClass(OKIO_PATH_CLASS, classLoader)
-        val companion = pathClass.getField("Companion").get(null) ?: return null
-        companion.javaClass.methods
-            .firstOrNull {
-                it.hostNameMatches("toPath") && it.parameterTypes.size == 1 &&
-                    it.parameterTypes[0] == String::class.java
-            }
-            ?.apply { isAccessible = true }
-            ?.invoke(companion, file.absolutePath)
-    }.getOrNull()
+    private fun okioPathOf(file: File): Any? = host.method("path").invoke(null, file.absolutePath, false)
 
-    private fun sourceFileName(source: Any?): String {
-        if (source == null) return ""
-        val reflective = runCatching {
-            source.javaClass.methods
-                .firstOrNull { it.parameterTypes.isEmpty() && it.hostNameMatches("getName") }
-                ?.invoke(source)
-                ?.toString()
-        }.getOrNull()
-        val raw = reflective?.takeIf { it.isNotBlank() } ?: source.toString()
-        return runCatching { File(raw).name }.getOrDefault(raw).trim()
-    }
-
-    private fun rememberCancelledImport(uuid: String, title: String, uri: String = "", source: Any? = null) {
-        val remembered = ImportCancellations.remember(
-            uuid = uuid,
-            title = title,
-            uri = uri,
-            fileName = sourceFileName(source),
-            fileSize = platformFileSize(source) ?: 0L,
-        )
-        if (!remembered) {
-
-            XposedBridge.log("$LOG_PREFIX cancelled import could not be remembered (no usable identity): title=$title")
-        }
-    }
-
-    private fun isRecentlyCancelled(uuid: String, title: String, uri: String = "", source: Any? = null): Boolean =
-        ImportCancellations.isCancelled(
-            uuid = uuid,
-            title = title,
-            uri = uri,
-            fileName = sourceFileName(source),
-            fileSize = platformFileSize(source) ?: 0L,
-        )
+    private fun sourceFileName(source: Any?): String = localFile(source)?.name
+        ?: source?.toString()?.let { File(it).name }.orEmpty()
 
     private fun rememberPreImportDecision(uuid: String, title: String, decision: PreImportDecision) {
-        pendingPreImportDecisions[decisionKey(uuid, title)] = decision
-        clearExpiredPreImportDecisions()
+        checkStorageIdentity(decision.storageIdentity)
+        pendingPreImportDecisions.remember(decision.storageIdentity.accountId, decision.storageIdentity.generation, uuid, title, decision)
     }
 
-    private fun consumePreImportDecision(uuid: String, title: String): PreImportDecision? {
-        clearExpiredPreImportDecisions()
-        return pendingPreImportDecisions.remove(decisionKey(uuid, title))
-    }
-
-    private fun clearExpiredPreImportDecisions() {
-        val now = System.currentTimeMillis()
-        pendingPreImportDecisions.entries.removeAll { (_, decision) ->
-            now - decision.createdAtMs > PRE_IMPORT_DECISION_TTL_MS
+    private fun consumePreImportDecision(uuid: String, title: String, identity: AccountHostRuntime.Identity): PreImportDecision? =
+        pendingPreImportDecisions.consume(identity.accountId, identity.generation, uuid, title)?.also {
+            checkStorageIdentity(it.storageIdentity, it.epoch)
         }
+
+    private fun importSibling(bookDir: Any?, uuid: String, targetParent: File? = null): Pair<Any, Pair<File, File>> {
+        val sourcePath = requireNotNull(bookDir) { "Import directory unavailable" }
+        val parentPath = requireNotNull(host.method("parent").invoke(sourcePath)) { "Import parent unavailable" }
+        val sourceParent = File(parentPath.toString()).canonicalFile
+        val parent = targetParent ?: sourceParent
+        val targetPath = if (targetParent == null) requireNotNull(host.method("resolve").invoke(parentPath, uuid, true))
+            else requireNotNull(okioPathOf(File(parent, uuid)))
+        val source = File(sourcePath.toString()).canonicalFile
+        val target = File(targetPath.toString()).canonicalFile
+        check(source.parentFile == sourceParent && target.parentFile == parent && target != parent) { "Invalid import directory" }
+        check(source.isDirectory) { "Import source directory missing" }
+        return targetPath to (source to target)
     }
-
-    private fun clearExistingBookDirContentsBeforeImport(booksDir: Any?, uuid: String?) {
-        runCatching {
-            val cleanUuid = uuid?.trim()?.takeIf { it.isNotBlank() } ?: return
-            val basePath = booksDir ?: return
-            val targetPath = basePath.javaClass.methods.firstOrNull {
-                it.hostNameMatches("resolve") &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == String::class.java
-            }?.invoke(basePath, cleanUuid, true) ?: return
-            val base = File(basePath.toString()).canonicalFile
-            val target = File(targetPath.toString()).canonicalFile
-            val basePrefix = base.path.trimEnd(File.separatorChar) + File.separator
-            if (!target.path.startsWith(basePrefix) || target == base) {
-                XposedBridge.log("$LOG_PREFIX refused to clear unexpected overwrite dir: $target")
-                return
-            }
-            if (target.isDirectory) {
-                val children = target.listFiles().orEmpty()
-                children.forEach { child -> child.deleteRecursively() }
-                XposedBridge.log("$LOG_PREFIX cleared existing book dir before overwrite import: $target children=${children.size}")
-            }
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to clear existing book dir before import: ${it.stackTraceToString()}")
-        }
-    }
-
-    private fun prepareBookDirForOverwriteUuid(bookDir: Any?, oldUuid: String, newOpf: Any): Any? =
-        runCatching {
-            val sourcePath = bookDir ?: return null
-            val parentPath = sourcePath.javaClass.methods.firstOrNull {
-                it.hostNameMatches("parent") && it.parameterTypes.isEmpty()
-            }?.invoke(sourcePath) ?: return null
-            val targetPath = parentPath.javaClass.methods.firstOrNull {
-                it.hostNameMatches("resolve") &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == String::class.java
-            }?.invoke(parentPath, oldUuid, true) ?: return null
-
-            val source = File(sourcePath.toString())
-            val target = File(targetPath.toString())
-            if (!source.exists() || !source.isDirectory) return null
-            if (source.canonicalPath != target.canonicalPath) {
-                target.parentFile?.mkdirs()
-                if (target.exists()) target.deleteRecursively()
-                source.copyRecursively(target, overwrite = true)
-                source.deleteRecursively()
-            }
-            newOpf.javaClass.methods.firstOrNull {
-                it.hostNameMatches("overwrite") && it.parameterTypes.size == 1
-            }?.invoke(newOpf, targetPath)
-            targetPath
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to prepare overwrite import book dir: ${it.stackTraceToString()}")
-        }.getOrNull()
-
-    private fun copyBookDirForIndependentUuid(bookDir: Any?, newUuid: String, newOpf: Any): Any? =
-        runCatching {
-            val sourcePath = bookDir ?: return null
-            val parentPath = sourcePath.javaClass.methods.firstOrNull {
-                it.hostNameMatches("parent") && it.parameterTypes.isEmpty()
-            }?.invoke(sourcePath) ?: return null
-            val targetPath = parentPath.javaClass.methods.firstOrNull {
-                it.hostNameMatches("resolve") &&
-                    it.parameterTypes.size == 2 &&
-                    it.parameterTypes[0] == String::class.java
-            }?.invoke(parentPath, newUuid, true) ?: return null
-
-            val source = File(sourcePath.toString())
-            val target = File(targetPath.toString())
-            if (!source.exists() || !source.isDirectory) return null
-            if (target.exists()) target.deleteRecursively()
-            source.copyRecursively(target, overwrite = true)
-            newOpf.javaClass.methods.firstOrNull {
-                it.hostNameMatches("overwrite") && it.parameterTypes.size == 1
-            }?.invoke(newOpf, targetPath)
-            targetPath
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to copy independent import book dir: ${it.stackTraceToString()}")
-        }.getOrNull()
-
-    private fun obtainOpf(root: Any): Any? =
-        runCatching {
-            if (HostSymbols.usesRc3Abi) {
-                return@runCatching classLoader.hostStaticMethod(
-                    OPF_CLASS, "obtain", classLoader.hostClass(OKIO_PATH_CLASS),
-                ).invoke(null, root)
-            }
-            val opfClass = XposedHelpers.findClass(OPF_CLASS, classLoader)
-            val instance = sequenceOf("INSTANCE", "Companion")
-                .mapNotNull { fieldName ->
-                    runCatching {
-                        opfClass.companionField(fieldName)?.let { field ->
-                            field.isAccessible = true
-                            field.get(null)
-                        }
-                    }.getOrNull()
-                }
-                .firstOrNull()
-                ?: (opfClass.declaredFields.asSequence() + opfClass.fields.asSequence())
-                    .filter { Modifier.isStatic(it.modifiers) && it.type.name.contains("Opf\$Companion") }
-                    .mapNotNull { field ->
-                        runCatching {
-                            field.isAccessible = true
-                            field.get(null)
-                        }.getOrNull()
+    private fun prepareImportDirectory(bookDir: Any?, uuid: String, opf: Any, run: ImportRun, targetParent: File? = null): Any {
+        val (targetPath, directories) = importSibling(bookDir, uuid, targetParent)
+        val (source, target) = directories
+        checkStorageIdentity(run.identity)
+        // No directory is replaced here, so existing local cover bytes remain in place.
+        if (source == target) return targetPath
+        val stage = File(requireNotNull(target.parentFile), ".${target.name}.reamicro-stage-${UUID.randomUUID()}")
+        try {
+            Files.walk(source.toPath()).use { paths ->
+                paths.forEach { path ->
+                    checkStorageIdentity(run.identity)
+                    check(!Files.isSymbolicLink(path)) { "导入目录包含符号链接" }
+                    val destination = stage.toPath().resolve(source.toPath().relativize(path)).toFile()
+                    if (Files.isDirectory(path)) {
+                        AccountHostRuntime.withCurrentStorage(run.identity) { check(destination.isDirectory || destination.mkdirs()) }
+                    } else {
+                        copyOnlineCompletionFileAtomically(path.toFile(), destination,
+                            commit = { action -> AccountHostRuntime.withCurrentStorage(run.identity, action = action) },
+                            checkCurrent = { checkStorageIdentity(run.identity) })
                     }
-                    .firstOrNull()
-                ?: return null
-            (instance.javaClass.methods.asSequence() + instance.javaClass.declaredMethods.asSequence())
-                .firstOrNull { it.hostNameMatches("obtain") && it.parameterTypes.size == 1 }
-                ?.apply { isAccessible = true }
-                ?.invoke(instance, root)
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to obtain import opf: ${it.stackTraceToString()}")
-        }.getOrNull()
-
-    private fun Class<*>.companionField(name: String) =
-        runCatching { getDeclaredField(name) }
-            .recoverCatching { getField(name) }
-            .getOrNull()
-
-    private fun Any.overwriteToRoot(root: Any): Any =
-        runCatching {
-            javaClass.methods.firstOrNull { it.hostNameMatches("overwrite") && it.parameterTypes.size == 1 }
-                ?.apply { isAccessible = true }
-                ?.invoke(this, root) ?: this
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to overwrite opf before import: ${it.stackTraceToString()}")
-        }.getOrDefault(this)
-
-    private fun Any.withUuid(uuid: String): Any =
-        runCatching {
-            val metadata = XposedHelpers.callMethod(this, "getMetadata") ?: error("Metadata is null")
-            val identifier = XposedHelpers.callMethod(metadata, "getUuid") ?: error("Metadata.uuid is null")
-            if (rewriteIdentifierValue(identifier, uuid)) {
-                return this
-            }
-            error("Identifier value field not writable")
-        }.onFailure {
-            XposedBridge.log("$LOG_PREFIX failed to rewrite import opf uuid: ${it.stackTraceToString()}")
-        }.getOrDefault(this)
-
-    private fun rewriteIdentifierValue(identifier: Any, uuid: String): Boolean = runCatching {
-        val currentValue = runCatching {
-            identifier.javaClass.methods.firstOrNull { it.hostNameMatches("getValue") && it.parameterTypes.isEmpty() }
-                ?.invoke(identifier) as? String
-        }.getOrNull()
-        val fields = identifier.javaClass.declaredFields.filter { it.type == String::class.java }
-        val target = fields.firstOrNull { it.hostNameMatches("value") }
-            ?: fields.firstOrNull { field ->
-                currentValue != null && runCatching {
-                    field.isAccessible = true
-                    field.get(identifier) == currentValue
-                }.getOrDefault(false)
-            }
-            ?: return false
-        target.isAccessible = true
-        target.set(identifier, uuid)
-        XposedBridge.log("$LOG_PREFIX rewrote identifier value field '${target.name}' -> $uuid")
-        true
-    }.getOrElse {
-        XposedBridge.log("$LOG_PREFIX rewrite identifier value failed: ${it.stackTraceToString()}")
-        false
-    }
-
-    private fun applyCancelAsIndependentCopy(
-        opf: Any,
-        title: String,
-        applyNewUuid: (newUuid: String, newOpf: Any) -> Unit,
-    ): String? {
-        val newUuid = UUID.randomUUID().toString()
-        val newOpf = opf.withUuid(newUuid)
-
-        if (resolveImportUuid(newOpf).orEmpty() != newUuid) {
-            XposedBridge.log("$LOG_PREFIX cancel-as-independent could NOT rewrite uuid; aborting copy path: title=$title")
-            return null
-        }
-        applyNewUuid(newUuid, newOpf)
-        markCancelledCopyForDeletion(newUuid)
-        XposedBridge.log("$LOG_PREFIX cancel-as-independent copy created: title=$title newUuid=$newUuid")
-        return newUuid
-    }
-
-    private fun markCancelledCopyForDeletion(uuid: String) {
-        if (uuid.isBlank()) return
-        cancelledImportCopies[uuid] = System.currentTimeMillis()
-        clearExpiredCancelledCopies()
-    }
-
-    private fun clearExpiredCancelledCopies() {
-        val now = System.currentTimeMillis()
-        cancelledImportCopies.entries.removeAll { (_, at) -> now - at > CANCELLED_COPY_TTL_MS }
-    }
-
-    private fun scheduleCancelledCopyCleanup(param: XC_MethodHook.MethodHookParam) {
-        val uuid = resolveImportUuid(param.args?.getOrNull(2)).orEmpty()
-        if (uuid.isBlank() || cancelledImportCopies.remove(uuid) == null) return
-        val repository = repositoryRef?.get()
-        val bookDir = param.args?.getOrNull(1)
-        com.reamicro.fix.reload.ModuleResources.thread {
-            var deleted = false
-            repeat(CANCELLED_COPY_DELETE_ATTEMPTS) {
-                val book = repository?.let { findExistingBookByUuid(it, uuid) }
-                if (book != null && repository != null) {
-                    val result = runCatching { deleteBookEntity(repository, book) }
-                    XposedBridge.log(
-                        "$LOG_PREFIX cancelled copy deleted: uuid=$uuid ok=${result.isSuccess} " +
-                            "error=${result.exceptionOrNull()?.message.orEmpty().take(80)}",
-                    )
-                    deleted = result.isSuccess
-                    return@thread
                 }
-                runCatching { Thread.sleep(CANCELLED_COPY_DELETE_RETRY_MS) }
             }
-            if (!deleted) {
-                XposedBridge.log("$LOG_PREFIX cancelled copy not found for deletion (kept the row): uuid=$uuid")
+            checkStorageIdentity(run.identity)
+            run.oldBook?.let { original ->
+                preserveImportCoverFile(
+                    target, stage, bookProperties(original)["cover"] as? String, run.metadata.cover,
+                    commit = { action -> AccountHostRuntime.withCurrentStorage(run.identity, action = action) },
+                    checkCurrent = { checkStorageIdentity(run.identity) },
+                )?.let { preserved -> run.metadata = run.metadata.copy(cover = preserved) }
             }
-        }.apply {
-            isDaemon = true
-            name = "ReaMicroCancelCleanup"
-        }.start()
-
-        clearExistingBookDirContentsBeforeImport(bookDir, uuid)
-    }
-
-    private fun deleteBookEntity(repository: Any, book: Any) {
-        val method = (repository.javaClass.methods.asSequence() + repository.javaClass.declaredMethods.asSequence())
-            .firstOrNull {
-                it.hostNameMatches("deleteBook") &&
-                    it.parameterTypes.lastOrNull()?.let { typeMatches(it, KOTLIN_CONTINUATION_CLASS) } == true
+            host.method("overwrite").invoke(opf, requireNotNull(okioPathOf(stage)))
+            run.publication = publishOnlineCompletionDirectory(stage, target,
+                commit = { action -> AccountHostRuntime.withCurrentStorage(run.identity, action = action) },
+                checkCurrent = { check(AccountHostRuntime.isCurrentStorage(run.identity, activityProvider())) { "账号已切换" } })
+            // Only the module's unique EPUB temporary directory can be discarded before completion.
+            stagedEpubDirectories.remove(source.canonicalPath)?.let { stage ->
+                check(stage.identity.accountId == run.identity.accountId && stage.identity.generation == run.identity.generation)
+                deleteImportPath(source, run.identity)
             }
-            ?.apply { isAccessible = true }
-            ?: error("BookshelfRepository.deleteBook not found")
-        invokeSuspendBlocking(method, repository, book)
-    }
-
-    private fun method(targetClass: Class<*>, name: String, parameterCount: Int): Method =
-        (targetClass.methods.asSequence() + targetClass.declaredMethods.asSequence())
-            .firstOrNull { it.hostNameMatches(name) && it.parameterTypes.size == parameterCount }
-            ?.apply { isAccessible = true }
-            ?: error("Method not found: ${targetClass.name}#$name/$parameterCount")
-
-    private fun callStringPath(target: Any?, vararg path: String): String? {
-        var current = target ?: return null
-        for (name in path) {
-            current = when (current) {
-                is String -> return current
-                else -> runCatching {
-                    val getter = if (name.startsWith("get")) name
-                        else "get" + name.replaceFirstChar { it.uppercaseChar() }
-                    if (HostSymbols.resolveAccessorFieldName(current.javaClass, getter) != null) {
-                        return@runCatching XposedHelpers.callMethod(current, getter)
-                    }
-                    current.javaClass.methods.firstOrNull {
-                        it.parameterTypes.isEmpty() &&
-                            (it.hostNameMatches(name) || it.hostNameMatches("get" + name.replaceFirstChar { ch -> ch.uppercaseChar() }))
-                    }?.apply { isAccessible = true }?.invoke(current)
-                }.getOrNull() ?: return null
+            return targetPath
+        } finally {
+            if (stage.exists()) Files.walk(stage.toPath()).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::delete)
             }
         }
-        return current?.toString()
     }
 
-    private fun resolveImportTitleFromFile(file: Any?): String? =
-        runCatching {
-            file?.javaClass?.methods?.firstOrNull { it.hostNameMatches("getNameWithoutExtension") && it.parameterTypes.isEmpty() }
-                ?.invoke(file)?.toString()
-        }.getOrNull()
+    private fun deleteImportPath(file: File, identity: AccountHostRuntime.Identity) {
+        check(AccountHostRuntime.isCurrentStorage(identity, activityProvider())) { "清理导入暂存时账号已变化" }
+        Files.walk(file.toPath()).use { paths ->
+            paths.sorted(Comparator.reverseOrder()).forEach { path ->
+                AccountHostRuntime.withCurrentStorage(identity) { Files.delete(path) }
+            }
+        }
+    }
 
+    private fun cleanupStagedEpubDirectory(value: Any?) {
+        val directory = value?.let { File(it.toString()).canonicalFile } ?: return
+        val stage = stagedEpubDirectories.remove(directory.path) ?: return
+        runCatching {
+            val parent = File(stage.booksDirectory.toString()).canonicalFile
+            check(directory.parentFile == parent && directory.name == stage.temporaryUuid) { "导入暂存目录发生变化" }
+            if (directory.exists()) deleteImportPath(directory, stage.identity)
+        }.onFailure { HookRuntime.logError("$LOG_PREFIX cancelled EPUB staging cleanup stopped", it) }
+    }
+    private fun obtainOpf(root: Any): Any? = runCatching {
+        host.method("obtain").invoke(null, root)
+    }.onFailure { HookRuntime.logError("$LOG_PREFIX import OPF read failed", it) }.getOrNull()
+
+    private fun Any.overwriteToRoot(root: Any, identity: AccountHostRuntime.Identity): Any = apply {
+        checkStorageIdentity(identity)
+        host.method("overwrite").invoke(this, root)
+        checkStorageIdentity(identity)
+    }
+
+    private fun Any.withUuid(uuid: String): Any = apply {
+        val metadata = requireNotNull(host.read("opf.metadata", this)) { "Import metadata unavailable" }
+        val identifier = requireNotNull(host.read("metadata.uuid", metadata)) { "Import UUID unavailable" }
+        host.field("identifier.value").set(identifier, uuid)
+        check(host.field("identifier.value").get(identifier) == uuid) { "Import UUID could not be rewritten" }
+    }
+
+    private fun resolveImportTitleFromFile(file: Any?): String? = sourceFileName(file).substringBeforeLast('.')
+        .takeIf(String::isNotBlank)
     private fun importBookSize(args: Array<Any?>?): Long? =
-        (args?.getOrNull(4) as? Number)?.toLong()?.takeIf { it > 0L }
-            ?: platformFileSize(args?.getOrNull(0))
-
-    private fun platformFileSize(platformFile: Any?): Long? =
-        runCatching {
-            val androidFile = noArgValue(platformFile, "getAndroidFile")
-                ?: noArgValue(platformFile, "component1")
-            val file = noArgValue(androidFile, "getFile") as? File
-                ?: platformFile?.toString()?.let { File(it) }
-            file?.takeIf { it.isFile }?.length()?.takeIf { it > 0L }
-        }.getOrNull()
-
-    private fun noArgValue(target: Any?, name: String): Any? {
-        if (target == null) return null
-        return runCatching {
-            target.javaClass.methods.firstOrNull { it.hostNameMatches(name) && it.parameterTypes.isEmpty() }
-                ?.apply { isAccessible = true }
-                ?.invoke(target)
-        }.getOrNull()
+        (args?.getOrNull(host.index("import.size")) as? Number)?.toLong()?.takeIf { it > 0L }
+            ?: platformFileSize(args?.getOrNull(host.index("import.source")))
+    private fun localFile(source: Any?): File? = when {
+        source == null -> null
+        source is File -> source
+        host.type("path").isInstance(source) -> File(source.toString())
+        host.type("platform").isInstance(source) -> com.reamicro.fix.core.HostRuntimeBindings.files?.file(source)
+        else -> null
     }
-
+    private fun platformFileSize(file: Any?): Long? = localFile(file)?.takeIf(File::isFile)?.length()?.takeIf { it > 0L }
     private fun invokeSuspendBlocking(method: Method, target: Any?, vararg args: Any?): Any? =
         com.reamicro.fix.core.HostCoroutines.invoke(classLoader, method, target, *args)
-
-    private fun emptyCoroutineContext(): Any =
-        XposedHelpers.findClass(KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS, classLoader)
-            .hostField("INSTANCE")
-            .apply { isAccessible = true }
-            .get(null) ?: error("EmptyCoroutineContext unavailable")
-
-    private fun coroutineSuspended(): Any =
-        runCatching {
-            XposedHelpers.findClass(KOTLIN_INTRINSICS_CLASS, classLoader).methods.first {
-                it.hostNameMatches("getCOROUTINE_SUSPENDED") && it.parameterTypes.isEmpty()
-            }.apply { isAccessible = true }.invoke(null)
-        }.getOrElse {
-            XposedHelpers.findClass(KOTLIN_COROUTINE_SINGLETONS_CLASS, classLoader)
-                .enumConstants
-                ?.firstOrNull { value -> value.toString() == "COROUTINE_SUSPENDED" }
-                ?: error("COROUTINE_SUSPENDED unavailable")
-        }
 
     private enum class OverwriteDecision {
         OVERWRITE,
@@ -1307,9 +1068,6 @@ class ReaderImportOverwriteHook(
         val oldTitle: String,
         val oldUuid: String?,
         val oldUri: String?,
-        val byUuid: Boolean,
-        val byUrl: Boolean,
-        val byTitle: Boolean,
     )
 
     private data class PreImportDecision(
@@ -1319,57 +1077,21 @@ class ReaderImportOverwriteHook(
         val oldUri: String?,
         val oldBook: Any?,
         val metadataPatch: BookMetadataPatch,
-        val createdAtMs: Long,
+        val storageIdentity: AccountHostRuntime.Identity,
+        val epoch: Long,
     )
-
-    private fun BookMetadataPatch.mergeWith(fallback: BookMetadataPatch): BookMetadataPatch =
-        BookMetadataPatch(
-            title = title ?: fallback.title,
-            subtitle = subtitle ?: fallback.subtitle,
-            author = author ?: fallback.author,
-            cover = cover ?: fallback.cover,
-            size = size ?: fallback.size,
-            publisher = publisher ?: fallback.publisher,
-        )
-
-    /** 覆盖文件只刷新书籍内容元数据，已有第三方关联归属继续跟随原书。 */
-    private fun BookMetadataPatch.preserveAssociationOf(book: Any?): BookMetadataPatch {
-        return withPreservedAssociation(
-            cloudId = book.longOrNull("getCloudId"),
-            publisher = book.stringOrNull("getPublisher"),
-        )
-    }
-
-    private fun BookMetadataPatch.withSize(size: Long?): BookMetadataPatch =
-        if (size != null && size > 0L) copy(size = size) else this
 
     private companion object {
         const val LOG_PREFIX = "ReaMicro LSP"
-        const val BOOKSHELF_REPOSITORY_CLASS = HostClasses.Host.BOOKSHELF_REPOSITORY
-        const val BOOKSHELF_IMPORT_BOOK_METHOD = "importBook"
-        const val WORKER_MANAGER_CLASS = HostClasses.Host.WORKER_MANAGER
-        const val EPUB_FILE_MANAGER_CLASS = HostClasses.Host.EPUB_FILE_MANAGER
-        const val EPUB_IMPORT_METHOD = "import"
-        const val OPF_CLASS = HostClasses.Epub.OPF
-        const val OKIO_PATH_CLASS = HostClasses.ThirdParty.OKIO_PATH
-        const val KOTLIN_PAIR_CLASS = HostClasses.Kotlin.KOTLIN_PAIR
-        const val FLOW_KT_CLASS = "kotlinx.coroutines.flow.FlowKt"
-        const val KOTLIN_CONTINUATION_CLASS = HostClasses.Kotlin.KOTLIN_CONTINUATION
-        const val KOTLIN_RESULT_KT_CLASS = HostClasses.Kotlin.KOTLIN_RESULT_KT
-        const val KOTLIN_EMPTY_COROUTINE_CONTEXT_CLASS = HostClasses.Kotlin.KOTLIN_EMPTY_COROUTINE_CONTEXT
-        const val KOTLIN_INTRINSICS_CLASS = HostClasses.Kotlin.KOTLIN_INTRINSICS
-        const val KOTLIN_COROUTINE_SINGLETONS_CLASS = HostClasses.Kotlin.KOTLIN_COROUTINE_SINGLETONS
-        const val BACKUP_TYPE_ONLINE_COMPLETION = 10
-        const val ONLINE_COMPLETION_SOURCE_PREFIX = "reamicro-online-source://"
-        const val ONLINE_COMPLETION_BOOK_PREFIX = "reamicro-online-book://"
-        const val ONLINE_COMPLETION_UUID_PREFIX = "reamicro-online-"
+        const val RUN_EXTRA = "reamicro.import.run"
+        const val PREVIOUS_RUN_EXTRA = "reamicro.import.previous.run"
+        const val REQUEST_EPOCH_EXTRA = "reamicro.import.request.epoch"
+        const val PREVIOUS_EPOCH_EXTRA = "reamicro.import.previous.epoch"
+        const val COMMIT_BOOK_EXTRA = "reamicro.import.commit.book"
+        const val EPUB_STAGE_EXTRA = "reamicro.epub.stage"
+        const val INITIAL_DIRECTORY_EXTRA = "reamicro.import.initial.directory"
         const val PRE_IMPORT_DECISION_TTL_MS = 120_000L
 
-        const val CANCELLED_COPY_TTL_MS = 10 * 60_000L
-
-        const val CANCELLED_COPY_DELETE_ATTEMPTS = 6
-        const val CANCELLED_COPY_DELETE_RETRY_MS = 500L
-        const val POST_IMPORT_METADATA_SYNC_DELAY_MS = 2_500L
         val REAMICRO_MD5_REGEX = Regex("^[0-9a-fA-F]{32}$")
     }
 }

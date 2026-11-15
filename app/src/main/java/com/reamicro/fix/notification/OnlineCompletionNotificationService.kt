@@ -4,17 +4,19 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
-import com.reamicro.fix.R
+import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogState
 
@@ -22,6 +24,15 @@ class OnlineCompletionNotificationService : Service() {
     private var foregroundId: Int = 0
     private val activeNotifications = linkedMapOf<Int, Notification>()
     private val activeNotificationKeys = linkedMapOf<Int, String>()
+    private val liveness = OnlineNotificationLiveness()
+    private var latestStartId = 0
+    private var acknowledgementRegistered = false
+    private val acknowledgement = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            liveness.acknowledge(intent.getIntExtra(EXTRA_ID, 0),
+                intent.getStringExtra(EXTRA_KEY).orEmpty(), SystemClock.elapsedRealtime())
+        }
+    }
     private var wakeLock: PowerManager.WakeLock? = null
     private val wakeLockHandler = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val wakeLockRenewal = object : Runnable {
@@ -34,14 +45,28 @@ class OnlineCompletionNotificationService : Service() {
     private val hostHeartbeat = object : Runnable {
         override fun run() {
             if (foregroundId == 0) return
+            liveness.expired(SystemClock.elapsedRealtime()).forEach { id ->
+                ModuleAndroidLog.legacy(LOG_TAG, "host task heartbeat expired id=$id")
+                cancelHostTask(id, activeNotificationKeys[id].orEmpty())
+                removeActiveNotification(id, latestStartId)
+            }
+            if (foregroundId == 0) return
             sendHostHeartbeat()
             wakeLockHandler.postDelayed(this, HOST_HEARTBEAT_INTERVAL_MS)
         }
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        ContextCompat.registerReceiver(this, acknowledgement, IntentFilter(ACTION_ONLINE_COMPLETION_HEARTBEAT_ACK),
+            ContextCompat.RECEIVER_EXPORTED)
+        acknowledgementRegistered = true
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId = startId
         ModuleLogState.applyFromIntent(intent)
         val id = intent?.getIntExtra(EXTRA_ID, 0)?.takeIf { it > 0 } ?: FALLBACK_NOTIFICATION_ID
         val title = intent?.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { ONLINE_COMPLETION_TITLE }
@@ -52,6 +77,7 @@ class OnlineCompletionNotificationService : Service() {
         val done = intent?.getBooleanExtra(EXTRA_DONE, false) == true
         runCatching {
             if (intent?.action == ACTION_ONLINE_COMPLETION_CANCEL) {
+                if (!OnlineNotificationEventOrder.matches(id, key)) return START_NOT_STICKY
                 removeActiveNotification(id, startId)
                 return START_NOT_STICKY
             }
@@ -61,11 +87,17 @@ class OnlineCompletionNotificationService : Service() {
                 stopSelf(startId)
                 return START_NOT_STICKY
             }
+            if (!OnlineNotificationEventOrder.accept(id,
+                    intent.getLongExtra(OnlineNotificationEventOrder.EXTRA_ISSUED_AT, 0L), key)) {
+                if (activeNotifications.isEmpty()) stopSelf(startId)
+                return START_NOT_STICKY
+            }
             val notification = buildNotification(id, key, cancellable, title, text, progress, done)
             val manager = notificationManager()
             if (!done) {
                 activeNotifications[id] = notification
                 activeNotificationKeys[id] = key
+                liveness.track(id, key, SystemClock.elapsedRealtime())
                 if (foregroundId == 0) {
                     foregroundId = id
                     startForegroundCompat(id, notification)
@@ -80,6 +112,7 @@ class OnlineCompletionNotificationService : Service() {
                 }
                 activeNotifications.remove(id)
                 activeNotificationKeys.remove(id)
+                liveness.remove(id)
                 if (hasNotificationPermission()) manager?.notify(id, notification)
                 if (id == foregroundId) {
                     val replacement = activeNotifications.entries.firstOrNull()
@@ -92,7 +125,7 @@ class OnlineCompletionNotificationService : Service() {
                         stopWakeLockRenewal()
                     }
                 }
-                manager?.let { cancelOnlineCompletionNotificationIfDone(it, id, true) }
+                manager?.let { cancelOnlineCompletionNotificationIfDone(it, id, true, text) }
                 if (activeNotifications.isEmpty()) stopSelf(startId)
             }
             if (!hasNotificationPermission()) {
@@ -114,13 +147,47 @@ class OnlineCompletionNotificationService : Service() {
         foregroundId = 0
         activeNotifications.clear()
         activeNotificationKeys.clear()
+        liveness.clear()
+        if (acknowledgementRegistered) {
+            unregisterReceiver(acknowledgement)
+            acknowledgementRegistered = false
+        }
         stopWakeLockRenewal()
         super.onDestroy()
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // The OS data-sync budget is exhausted. Release the lock and ask the host to stop work.
+        activeNotificationKeys.toMap().forEach { (id, key) ->
+            cancelHostTask(id, key)
+            notificationManager()?.cancel(id)
+        }
+        activeNotifications.clear()
+        activeNotificationKeys.clear()
+        liveness.clear()
+        foregroundId = 0
+        stopWakeLockRenewal()
+        stopForegroundNow(removeNotification = true)
+        stopSelf()
+    }
+
+    private fun cancelHostTask(id: Int, key: String) {
+        HOST_PACKAGES.forEach { packageName ->
+            runCatching {
+                sendBroadcast(Intent(ACTION_ONLINE_COMPLETION_CANCEL).apply {
+                    setPackage(packageName)
+                    addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                    putExtra(EXTRA_ID, id)
+                    putExtra(EXTRA_KEY, key)
+                })
+            }.onFailure { ModuleAndroidLog.legacy(LOG_TAG, "host task cancellation failed id=$id", it) }
+        }
     }
 
     private fun removeActiveNotification(id: Int, startId: Int) {
         activeNotifications.remove(id)
         activeNotificationKeys.remove(id)
+        liveness.remove(id)
         notificationManager()?.cancel(id)
         if (id == foregroundId) {
             val replacement = activeNotifications.entries.firstOrNull()
@@ -168,20 +235,21 @@ class OnlineCompletionNotificationService : Service() {
     }
 
     private fun sendHostHeartbeat() {
-        val key = activeNotificationKeys[foregroundId].orEmpty()
+        activeNotificationKeys.toMap().forEach { (id, key) ->
         HOST_PACKAGES.forEach { packageName ->
             runCatching {
                 val heartbeat = Intent(ACTION_ONLINE_COMPLETION_HEARTBEAT).apply {
                     setPackage(packageName)
                     addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
                     addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
-                    putExtra(EXTRA_ID, foregroundId)
+                    putExtra(EXTRA_ID, id)
                     putExtra(EXTRA_KEY, key)
                 }
                 sendBroadcast(heartbeat)
             }.onFailure {
                 ModuleAndroidLog.legacy(LOG_TAG, "module download heartbeat failed package=$packageName", it)
             }
+        }
         }
     }
 
@@ -253,24 +321,9 @@ class OnlineCompletionNotificationService : Service() {
             .setAutoCancel(done)
             .setProgress(100, progress, false)
         if (!done && cancellable) {
-            builder.addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "\u53d6\u6d88",
-                cancelPendingIntent(id, key),
-            )
+            OnlineCompletionNotificationActions.addTo(builder, this, id, key)
         }
         return builder.build()
-    }
-
-    private fun cancelPendingIntent(id: Int, key: String): PendingIntent {
-        val intent = Intent(ACTION_ONLINE_COMPLETION_CANCEL).apply {
-            setClass(this@OnlineCompletionNotificationService, OnlineCompletionNotificationReceiver::class.java)
-            putExtra(EXTRA_ID, id)
-            putExtra(EXTRA_KEY, key)
-        }
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        return PendingIntent.getBroadcast(this, id, intent, flags)
     }
 
     private fun ensureChannel() {
@@ -292,6 +345,7 @@ class OnlineCompletionNotificationService : Service() {
         const val ACTION_ONLINE_COMPLETION_NOTIFICATION = "com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION"
         const val ACTION_ONLINE_COMPLETION_CANCEL = "com.reamicro.fix.ONLINE_COMPLETION_CANCEL"
         const val ACTION_ONLINE_COMPLETION_HEARTBEAT = "com.reamicro.fix.ONLINE_COMPLETION_HEARTBEAT"
+        const val ACTION_ONLINE_COMPLETION_HEARTBEAT_ACK = "com.reamicro.fix.ONLINE_COMPLETION_HEARTBEAT_ACK"
         const val EXTRA_ID = "id"
         const val EXTRA_KEY = "key"
         const val EXTRA_CANCELLABLE = "cancellable"
@@ -305,7 +359,7 @@ class OnlineCompletionNotificationService : Service() {
         const val WAKE_LOCK_TAG = "ReaMicro:OnlineCompletion"
         const val WAKE_LOCK_TIMEOUT_MS = 15 * 60 * 1_000L
         const val WAKE_LOCK_RENEW_INTERVAL_MS = 10 * 60 * 1_000L
-        const val HOST_HEARTBEAT_INTERVAL_MS = 15_000L
-        val HOST_PACKAGES = arrayOf("app.zhendong.reamicro", "app.zhendong.reamicro.fix")
+        const val HOST_HEARTBEAT_INTERVAL_MS = 30_000L
+        val HOST_PACKAGES = com.reamicro.fix.core.HostPackages.all
     }
 }
