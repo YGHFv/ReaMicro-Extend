@@ -230,10 +230,10 @@ internal class HostYouShuLoginDialog(
                     Spacer(Modifier.height(10.dp))
                     Row(Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        TextButton(onClick = { dismiss() }, modifier = Modifier.weight(1f)) {
-                            Text("取消", color = native.role("OnBackground"), style = typography.labelLarge)
+                        com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() }, modifier = Modifier.weight(1f)) {
+                            Text("取消", style = typography.labelLarge)
                         }
-                        TextButton(onClick = { finishLogin() }, enabled = !checking && !loading,
+                        com.reamicro.fix.ui.DialogActionButton(onClick = { finishLogin() }, enabled = !checking && !loading,
                             modifier = Modifier.weight(1f)) {
                             Text("完成", style = typography.labelLarge)
                         }

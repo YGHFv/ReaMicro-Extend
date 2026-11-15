@@ -107,17 +107,6 @@ internal class SyncAuthUiBridge(private val drive: WebDavDriveHook) {
                     // Parameters changed at this call site; do not retain native unchanged bits.
                     param.args[7] = 0
                 }
-                override fun after(param: Call) {
-                    if (param.throwable != null || drive.webDavRenderingSyncAuthCard.get() == true) return
-                    val frame = drive.syncAuthCardRender.get() ?: return
-                    frame.nativeAuthRowsSeen++
-                    if (frame.isRunning || frame.webDavRendered || !drive.canShowWebDavEntry()) return
-                    val composer = param.args[6] ?: return
-                    frame.webDavRendered = true
-                    if (hasWebDavLogin(drive.currentContext())) {
-                        frame.webDavRendered = drive.renderSyncWebDavAuthorizedCard(composer, frame.onSetupDefaultDir, frame.onPick)
-                    } else drive.renderSyncWebDavAvailableCard(composer, frame.onAuthorize)
-                }
             })
             hook("available", object : HookCallback() {
                 override fun before(param: Call) {
@@ -128,6 +117,7 @@ internal class SyncAuthUiBridge(private val drive: WebDavDriveHook) {
                     if ((drive.webDavIconDepth.get() ?: 0) > 0) return
                     val frame = drive.syncAuthCardRender.get() ?: return
                     if (frame.isRunning || !drive.canShowWebDavEntry()) return
+                    // 宿主已渲染全部授权卡片；未授权 WebDAV 与原有可用网盘共用最后的分组。
                     if (hasWebDavLogin(drive.currentContext())) {
                         if (!frame.webDavRendered) {
                             frame.webDavRendered = true

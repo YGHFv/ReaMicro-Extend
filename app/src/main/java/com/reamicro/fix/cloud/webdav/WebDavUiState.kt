@@ -7,7 +7,6 @@ internal data class SyncAuthCardRenderContext(
     val onAuthorize: Any? = null,
     val isRunning: Boolean = false,
     var webDavRendered: Boolean = false,
-    var nativeAuthRowsSeen: Int = 0,
 )
 
 internal data class ImportUnauthRenderContext(

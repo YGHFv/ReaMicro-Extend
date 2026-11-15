@@ -62,6 +62,10 @@ class ReaMicroGlobalFontHook(
                         args[family] = resolved.family
                         val mask = symbols.number("mask")
                         args[mask] = (args[mask] as Int) and symbols.number("familyBit").inv()
+                        // 默认掩码按源码参数编号计算；R8 合并值类参数后不能用反射下标推算。
+                        val sourceIndex = Integer.numberOfTrailingZeros(symbols.number("familyBit"))
+                        val changed = symbols.number("composer") + 1 + sourceIndex / 10
+                        args[changed] = (args[changed] as Int) and (14 shl (3 * (sourceIndex % 10))).inv()
                         logApplied("text", resolved.selection)
                     }
                 })

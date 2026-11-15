@@ -780,7 +780,7 @@ internal class EpubScriptaPanel(
                                                             Text(if (loading) "正在读取文件…" else failure.orEmpty(),
                                                                 Modifier.padding(top = 12.dp), style = MaterialTheme.typography.bodyMedium,
                                                                 color = if (failure != null) p.error else p.caption)
-                                                            if (failure != null) TextButton(enabled = !saving && !dismissRequested,
+                                                            if (failure != null) com.reamicro.fix.ui.DialogActionButton(enabled = !saving && !dismissRequested,
                                                                 onClick = { retry++ }) { Text("重试", style = MaterialTheme.typography.labelMedium) }
                                                         }
                                                     } else {

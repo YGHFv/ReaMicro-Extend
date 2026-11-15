@@ -455,10 +455,12 @@ internal object HostSourceBrowserBridge {
             }, LinearLayout.LayoutParams(0, -2, 2f))
             row.addView(Button(owner).apply {
                 text = "取消"
+                com.reamicro.fix.ui.applyDialogActionStyle(this)
                 setOnClickListener { fail(CancellationException("用户取消书源网页")) }
             }, LinearLayout.LayoutParams(0, -2, 1f))
             row.addView(Button(owner).apply {
                 text = if (verification) "提交" else if (request.awaitResult) "完成验证" else "关闭"
+                com.reamicro.fix.ui.applyDialogActionStyle(this)
                 isEnabled = false
                 setOnClickListener {
                     if (verification) {

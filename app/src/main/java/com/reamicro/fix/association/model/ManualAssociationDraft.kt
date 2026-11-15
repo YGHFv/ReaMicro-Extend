@@ -1,5 +1,7 @@
 package com.reamicro.fix.association.model
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 data class ManualAssociationDraft(
     val title: String,
     val author: String = "",
@@ -21,7 +23,15 @@ data class ManualAssociationDraft(
     fun validate(): ManualAssociationValidation = ManualAssociationValidation(
         titleError = title.trim().takeIf { it.isEmpty() }?.let { "书名不能为空" },
         authorError = author.trim().takeIf { it.isEmpty() }?.let { "作者不能为空" },
-        introError = intro.trim().takeIf { it.length > MAX_INTRO_LENGTH }?.let { "简介不能超过 ${MAX_INTRO_LENGTH} 字" },
+        introError = when {
+            intro.isBlank() -> "简介不能为空"
+            intro.trim().length > MAX_INTRO_LENGTH -> "简介不能超过 ${MAX_INTRO_LENGTH} 字"
+            else -> null
+        },
+        wordsError = words.takeIf { it.isBlank() }?.let { "字数不能为空" },
+        statusError = status.trim().takeIf { it !in STATUS_OPTIONS }?.let { "请选择连载或完结状态" },
+        coverError = coverUrl.trim().takeIf { !isCoverAddress(it) }
+            ?.let { "请输入有效的 HTTP 或 HTTPS 封面地址" },
     )
 
     fun toCandidate(): ManualAssociationCandidate {
@@ -41,7 +51,11 @@ data class ManualAssociationDraft(
 
     companion object {
         const val MAX_INTRO_LENGTH = 2_000
-        val STATUS_OPTIONS = listOf("", "连载", "完结")
+        val STATUS_OPTIONS = listOf("连载", "完结")
+
+        fun isCoverAddress(value: String): Boolean =
+            value.isNotBlank() && value.none { it.isWhitespace() || it.isISOControl() } &&
+                value.toHttpUrlOrNull() != null
 
         fun fromFile(
             fileMetadata: AssociatedFileMetadata,
@@ -60,9 +74,13 @@ data class ManualAssociationValidation(
     val authorError: String? = null,
     val introError: String? = null,
     val sourceError: String? = null,
+    val coverError: String? = null,
+    val wordsError: String? = null,
+    val statusError: String? = null,
 ) {
-    val isValid: Boolean = titleError == null && authorError == null && introError == null && sourceError == null
-    val firstError: String? = titleError ?: authorError ?: introError ?: sourceError
+    val isValid: Boolean = titleError == null && authorError == null && introError == null && sourceError == null &&
+        coverError == null && wordsError == null && statusError == null
+    val firstError: String? = titleError ?: authorError ?: sourceError ?: wordsError ?: statusError ?: coverError ?: introError
 }
 
 data class ManualAssociationCandidate(

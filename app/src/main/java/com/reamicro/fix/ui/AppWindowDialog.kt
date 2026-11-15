@@ -39,11 +39,7 @@ import com.reamicro.fix.R
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
-import top.yukonga.miuix.kmp.basic.Button
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.glass.GlassDialogButton
-import top.yukonga.miuix.kmp.glass.GlassDialogButtonRole
 import top.yukonga.miuix.kmp.glass.GlassDialogDefaults
 import top.yukonga.miuix.kmp.glass.glassDialogSurface
 import top.yukonga.miuix.kmp.integration.WindowSurfaceDialog
@@ -240,32 +236,16 @@ internal fun ModuleDialogActionButton(
     primary: Boolean = false,
     dangerous: Boolean = false,
 ) {
-    if (useModuleGlass()) {
-        GlassDialogButton(
-            onClick = onClick,
-            modifier = modifier,
-            enabled = enabled,
-            role = when {
-                dangerous -> GlassDialogButtonRole.Destructive
-                primary -> GlassDialogButtonRole.Primary
-                else -> GlassDialogButtonRole.Normal
-            },
-        ) {
-            Text(text, style = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.button, textAlign = TextAlign.Center)
-        }
-    } else {
-        Button(
-            onClick = onClick,
-            modifier = modifier,
-            minHeight = 48.dp,
-            enabled = enabled,
-            colors = when {
-                dangerous -> ButtonDefaults.buttonColorsPrimary(color = Color(0xFFC63838), contentColor = Color.White)
-                primary -> ButtonDefaults.buttonColorsPrimary()
-                else -> ButtonDefaults.buttonColors()
-            },
-        ) {
-            Text(text, textAlign = TextAlign.Center)
-        }
+    val colors = top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+    androidx.compose.material3.Button(
+        onClick = onClick, modifier = modifier.heightIn(min = 48.dp), enabled = enabled,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
+        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+            containerColor = colors.primary, contentColor = colors.onPrimary,
+            disabledContainerColor = colors.surfaceContainerHighest,
+            disabledContentColor = colors.onBackground.copy(alpha = .38f)),
+    ) {
+        Text(text, color = if (enabled) colors.onPrimary else colors.onBackground.copy(alpha = .38f),
+            style = top.yukonga.miuix.kmp.theme.MiuixTheme.textStyles.button, textAlign = TextAlign.Center)
     }
 }

@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.ComponentCallbacks
 import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.view.View
 import android.view.Window
 import androidx.compose.foundation.BorderStroke
@@ -28,9 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalConfiguration
@@ -57,6 +53,11 @@ import com.reamicro.fix.association.model.BookSource
 import com.reamicro.fix.association.model.ManualAssociationDraft
 import com.reamicro.fix.core.InjectedModuleContext
 import com.reamicro.fix.reload.ModuleUiRuntime
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** Host-styled metadata draft; the original host candidate screen still confirms the association. */
@@ -65,10 +66,9 @@ internal class HostManualAssociationEditor(
     initial: ManualAssociationDraft,
     sources: List<BookSource>,
     private val isCurrent: () -> Boolean,
-    private val onChooseCover: () -> Unit,
-    private val coverPreview: (String) -> Bitmap?,
+    private val prepareCover: (String, () -> Unit) -> String?,
     private val onClosed: () -> Unit,
-    private val onPreview: (ManualAssociationDraft) -> Unit,
+    private val onPreview: (ManualAssociationDraft, String?) -> Unit,
 ) : Dialog(InjectedModuleContext.create(activity), R.style.EpubFullScreenDialog) {
     private enum class Selection { PLATFORM, STATUS }
     private data class Choice(val id: String, val title: String)
@@ -79,11 +79,9 @@ internal class HostManualAssociationEditor(
         ?: availableSources.firstOrNull() ?: initial.source))
     private var selection by mutableStateOf<Selection?>(null)
     private var submitted by mutableStateOf(false)
-    private var coverImportBusy by mutableStateOf(false)
-    private var coverRevision by mutableIntStateOf(0)
     private var problem by mutableStateOf<String?>(null)
     private var configurationEpoch by mutableIntStateOf(0)
-    private var closed = false
+    @Volatile private var closed = false
     private var compose: ComposeView? = null
     private var callbackRegistered = false
     private val owner = ModuleComposeOwner(activity) { dismiss() }
@@ -157,45 +155,43 @@ internal class HostManualAssociationEditor(
         }
     }
 
-    private fun preview() {
-        if (closed || submitted || coverImportBusy) return
+    private fun preview(scope: CoroutineScope) {
+        if (closed || submitted) return
         val normalized = draft.normalized()
         val validation = service.validate(normalized)
         if (!validation.isValid) { problem = validation.firstError; return }
         submitted = true
         problem = null
-        try {
-            check(!activity.isFinishing && !activity.isDestroyed && isCurrent()) { "关联页面已变化，请重新打开手动编辑" }
-            onPreview(normalized)
-        } catch (error: Throwable) {
-            if (!closed) {
-                submitted = false
-                problem = error.message ?: "生成关联预览失败，请重试"
+        scope.launch {
+            try {
+                val jobContext = currentCoroutineContext()
+                val staged = withContext(ModuleUiRuntime.io) {
+                    prepareCover(normalized.coverUrl) {
+                        jobContext.ensureActive()
+                        check(!closed && !activity.isFinishing && !activity.isDestroyed && isCurrent()) {
+                            "关联页面已变化，请重新打开手动编辑"
+                        }
+                    }
+                }
+                check(!closed && !activity.isFinishing && !activity.isDestroyed && isCurrent()) {
+                    "关联页面已变化，请重新打开手动编辑"
+                }
+                onPreview(normalized, staged)
+                dismiss()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (!closed) problem = error.message ?: "生成关联预览失败，请重试"
+            } finally {
+                if (!closed) submitted = false
             }
-            return
         }
-        dismiss()
     }
 
     private fun changed(next: ManualAssociationDraft) {
         if (closed || submitted) return
         draft = next
         problem = null
-    }
-
-    fun setCoverBusy(busy: Boolean) {
-        if (!closed) coverImportBusy = busy
-    }
-
-    fun coverImported(path: String) {
-        if (!closed && isCurrent()) {
-            coverRevision++
-            changed(draft.copy(coverUrl = path))
-        }
-    }
-
-    fun showCoverProblem(message: String) {
-        if (!closed && isCurrent()) problem = message
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -210,8 +206,9 @@ internal class HostManualAssociationEditor(
         val foreground = native.role("OnBackground")
         val focus = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current
+        val scope = rememberCoroutineScope()
         val validation = service.validate(draft)
-        val submit = { focus.clearFocus(); keyboard?.hide(); preview() }
+        val submit = { focus.clearFocus(); keyboard?.hide(); preview(scope) }
         val maxHeight = (config.screenHeightDp * .75f).dp
         LaunchedEffect(native) {
             configureEpubEdgeToEdgeWindow(window, native.contentArgb, native.dark)
@@ -237,9 +234,9 @@ internal class HostManualAssociationEditor(
                                 Color(native.borderVariantArgb).copy(alpha = .68f))) {
                             Column(Modifier.fillMaxWidth().padding(horizontal = (18f * scale).dp, vertical = (16f * scale).dp),
                                 verticalArrangement = Arrangement.spacedBy((12f * scale).dp)) {
-                                CoverField(scale, native) {
-                                    focus.clearFocus(); keyboard?.hide(); onChooseCover()
-                                }
+                                Field("封面地址", draft.coverUrl, "请输入封面地址", scale, native,
+                                    keyboardType = KeyboardType.Uri, error = validation.coverError.takeIf { draft.coverUrl.isNotEmpty() },
+                                    onNext = { focus.moveFocus(FocusDirection.Next) }) { changed(draft.copy(coverUrl = it)) }
                                 Field("书名", draft.title, "请输入书名", scale, native,
                                     error = validation.titleError.takeIf { draft.title.isNotEmpty() },
                                     onNext = { focus.moveFocus(FocusDirection.Next) }) { changed(draft.copy(title = it)) }
@@ -250,12 +247,14 @@ internal class HostManualAssociationEditor(
                                     focus.clearFocus(); keyboard?.hide(); selection = Selection.PLATFORM
                                 }
                                 Field("字数", draft.words, "未填写", scale, native,
+                                    error = validation.wordsError.takeIf { draft.words.isNotEmpty() },
                                     onNext = { focus.moveFocus(FocusDirection.Next) }) { changed(draft.copy(words = it)) }
-                                SelectionField("状态", draft.status.ifBlank { "未填写" }, scale, native) {
+                                SelectionField("状态", draft.status.ifBlank { "请选择状态" }, scale, native,
+                                    validation.statusError.takeIf { draft.status.isNotEmpty() }) {
                                     focus.clearFocus(); keyboard?.hide(); selection = Selection.STATUS
                                 }
                                 Field("简介", draft.intro, "未填写", scale, native, multiline = true,
-                                    error = validation.introError,
+                                    error = validation.introError.takeIf { draft.intro.isNotEmpty() },
                                     onNext = submit) { changed(draft.copy(intro = it)) }
                             }
                         }
@@ -267,21 +266,13 @@ internal class HostManualAssociationEditor(
                     }
                     Column(Modifier.fillMaxWidth().padding(top = (4f * scale).dp),
                         verticalArrangement = Arrangement.spacedBy((8f * scale).dp)) {
-                        Button(onClick = submit, enabled = validation.isValid && !submitted && !coverImportBusy,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                            shape = RoundedCornerShape((4f * scale).dp), colors = ButtonDefaults.buttonColors(
-                                containerColor = native.role("Primary"), contentColor = native.role("OnPrimary"),
-                                disabledContainerColor = native.role("SurfaceContainerHighest"),
-                                disabledContentColor = foreground.copy(alpha = .38f))) {
-                            Text(if (submitted) "正在生成…" else "预览关联", style = typography.labelLarge)
+                        com.reamicro.fix.ui.DialogActionButton(onClick = submit, enabled = validation.isValid && !submitted,
+                            modifier = Modifier.fillMaxWidth()) {
+                            Text(if (submitted) "正在生成…" else "预览", style = typography.labelLarge)
                         }
-                        TextButton(onClick = { dismiss() }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                            shape = RoundedCornerShape((4f * scale).dp),
-                            contentPadding = PaddingValues((12f * scale).dp),
-                            colors = ButtonDefaults.textButtonColors(
-                                containerColor = native.role("SurfaceContainerHighest"),
-                                contentColor = Color(native.captionArgb))) {
-                            Text("取消", style = typography.bodyLarge)
+                        com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                            Text("取消", style = typography.labelLarge)
                         }
                     }
                 }
@@ -306,50 +297,6 @@ internal class HostManualAssociationEditor(
             contentAlignment = Alignment.Center) {
             Box(Modifier.size((40f * scale).dp, (4f * scale).dp)
                 .background(native.role("SurfaceContainerHighest"), RoundedCornerShape(scale.dp)))
-        }
-    }
-
-    @Composable
-    private fun CoverField(scale: Float, native: HostThemeColors.Snapshot, choose: () -> Unit) {
-        val path = draft.coverUrl
-        val preview by produceState<Pair<Boolean, Bitmap?>>(true to null, path, coverRevision) {
-            value = true to null
-            value = false to withContext(ModuleUiRuntime.io) { coverPreview(path) }
-        }
-        val bitmap = preview.second
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((4f * scale).dp)) {
-            Text("封面", style = MaterialTheme.typography.labelMedium, color = native.role("OnBackground"))
-            Row(Modifier.fillMaxWidth().heightIn(min = 80.dp),
-                horizontalArrangement = Arrangement.spacedBy((16f * scale).dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                // Same 64 × 1.4 image, 4dp inset and 8dp outer shape as the host BookCover.
-                Box(Modifier.clip(RoundedCornerShape((8f * scale).dp))
-                    .border((.8f * scale).dp, Color(native.borderVariantArgb), RoundedCornerShape((8f * scale).dp))
-                    .background(Color(native.pageArgb)).padding((4f * scale).dp)) {
-                    Box(Modifier.size((64f * scale).dp, (89.6f * scale).dp)
-                        .clip(RoundedCornerShape((4f * scale).dp)).background(native.role("SurfaceContainerHighest")),
-                        contentAlignment = Alignment.Center) {
-                        if (bitmap != null) androidx.compose.foundation.Image(bitmap.asImageBitmap(), "封面预览",
-                            Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                        else Icon(HostEmbeddedIcons.ImageOutline, null, Modifier.size(24.dp), tint = Color(native.captionArgb))
-                    }
-                }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy((4f * scale).dp)) {
-                    TextButton(onClick = choose, enabled = !submitted && !coverImportBusy,
-                        modifier = Modifier.heightIn(min = 48.dp)) {
-                        Text(if (coverImportBusy) "正在读取…" else if (path.isBlank()) "选择封面" else "更换封面",
-                            style = MaterialTheme.typography.labelLarge)
-                    }
-                    Text(when {
-                        coverImportBusy || preview.first -> "正在读取封面…"
-                        path.isBlank() -> "可选择本地图片"
-                        bitmap != null -> "确认关联后保存"
-                        path.startsWith("http", true) -> "当前网络封面"
-                        else -> "封面预览不可用，可重新选择"
-                    }, color = Color(native.captionArgb), style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                }
-            }
         }
     }
 
@@ -455,14 +402,9 @@ internal class HostManualAssociationEditor(
                     }
                 }
                 Spacer(Modifier.height((16f * scale).dp))
-                Surface(shape = RoundedCornerShape((8f * scale).dp), color = Color(native.brightArgb),
-                    border = BorderStroke((.8f * scale).dp, Color(native.borderVariantArgb))) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                        .clickable(role = Role.Button, onClickLabel = "取消选择") { selection = null }
-                        .padding(horizontal = (18f * scale).dp, vertical = (16f * scale).dp),
-                        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                        Text("取消", style = MaterialTheme.typography.bodyLarge, color = Color(native.captionArgb))
-                    }
+                com.reamicro.fix.ui.DialogActionButton(onClick = { selection = null },
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text("取消", style = MaterialTheme.typography.labelLarge)
                 }
             }
         }

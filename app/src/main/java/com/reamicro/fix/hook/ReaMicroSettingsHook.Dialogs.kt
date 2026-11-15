@@ -404,22 +404,7 @@ internal fun ReaMicroSettingsHook.settingsDialogButton(
         EmbeddedHostUi.text(this, "LabelLarge")
         gravity = Gravity.CENTER
         setSingleLine(true)
-        minHeight = settingsDp(context, 44)
-        setPadding(settingsDp(context, 8), settingsDp(context, 10), settingsDp(context, 8), settingsDp(context, 10))
-        when (role) {
-            SettingsDialogButtonRole.Primary -> {
-                setTextColor(colors.primaryText)
-                background = settingsRoundedRect(colors.primarySoft, settingsDp(context, 8), colors.border)
-            }
-            SettingsDialogButtonRole.Neutral -> {
-                setTextColor(colors.neutralText)
-                background = settingsRoundedRect(colors.neutralSoft, settingsDp(context, 8), colors.border)
-            }
-            SettingsDialogButtonRole.Destructive -> {
-                setTextColor(colors.destructiveText)
-                background = settingsRoundedRect(colors.destructiveSoft, settingsDp(context, 8), colors.border)
-            }
-        }
+        com.reamicro.fix.ui.applyDialogActionStyle(this, context)
     }
 
 internal fun ReaMicroSettingsHook.settingsDialogButtonParams(context: Context): LinearLayout.LayoutParams =

@@ -167,19 +167,14 @@ internal fun StructureEditorOverlay(
                     if (!error.isNullOrBlank()) Text(error, Modifier.padding(vertical = 4.dp),
                         style = MaterialTheme.typography.bodySmall, color = palette.error)
                     HorizontalDivider(Modifier.padding(bottom = 16.dp), thickness = .8.dp, color = palette.borderVariant)
-                    OutlinedButton(
+                    com.reamicro.fix.ui.DialogActionButton(
                         onClick = submit,
-                        modifier = Modifier.fillMaxWidth().height(40.dp).semantics { contentDescription = shown.confirmLabel ?: "保存编辑内容" },
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = shown.confirmLabel ?: "保存编辑内容" },
                         enabled = canSave,
-                        shape = RoundedCornerShape(4.dp),
-                        border = BorderStroke(.8.dp, palette.borderVariant),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = palette.text, disabledContentColor = palette.caption),
                     ) {
                         if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp,
-                            color = palette.native.role("Tertiary"), trackColor = palette.content)
-                        else Text(shown.confirmLabel ?: stringResource(R.string.epub_structure_editor_confirm), style = MaterialTheme.typography.labelMedium,
-                            color = if (canSave) palette.text else palette.caption)
+                            color = MaterialTheme.colorScheme.onPrimary, trackColor = Color.Transparent)
+                        else Text(shown.confirmLabel ?: stringResource(R.string.epub_structure_editor_confirm), style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }

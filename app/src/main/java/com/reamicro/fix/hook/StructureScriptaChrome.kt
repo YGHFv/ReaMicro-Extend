@@ -258,15 +258,12 @@ internal fun StructureScriptaUnsavedPrompt(
                     Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium, color = palette.caption)
                 HorizontalDivider(Modifier.padding(vertical = 12.dp), thickness = StructureContentStyle.dividerWidth,
                     color = palette.borderVariant)
-                for ((label, color, action) in listOf(
-                    Triple(if (retainedSwitching) "保存并切换" else "保存并返回", palette.primary, onSave),
-                    Triple("继续编辑", palette.text, onContinue), Triple("不保存", palette.error, onDiscard))) {
-                    OutlinedButton(onClick = action, enabled = visible && !busy,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                        shape = RoundedCornerShape(StructureContentStyle.actionCorner),
-                        border = BorderStroke(StructureContentStyle.dividerWidth, palette.borderVariant),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = color)) {
-                        Text(label, style = MaterialTheme.typography.labelMedium)
+                for ((label, action) in listOf(
+                    (if (retainedSwitching) "保存并切换" else "保存并返回") to onSave,
+                    "继续编辑" to onContinue, "不保存" to onDiscard)) {
+                    com.reamicro.fix.ui.DialogActionButton(onClick = action, enabled = visible && !busy,
+                        modifier = Modifier.fillMaxWidth()) {
+                        Text(label, style = MaterialTheme.typography.labelLarge)
                     }
                     Spacer(Modifier.height(4.dp))
                 }

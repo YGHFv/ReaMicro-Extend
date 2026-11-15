@@ -152,14 +152,9 @@ internal class HostAssociationDialog(
                         }
                     }
                     Spacer(Modifier.height((16 * scale).dp))
-                    Surface(shape = RoundedCornerShape((8 * scale).dp), color = palette.bright,
-                        border = BorderStroke((.8f * scale).dp, palette.borderVariant)) {
-                        Box(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .clickable(role = Role.Button, onClickLabel = "关闭关联操作") { dismiss() }
-                            .padding(horizontal = (18 * scale).dp, vertical = (16 * scale).dp),
-                            contentAlignment = Alignment.Center) {
-                            Text("取消操作", style = MaterialTheme.typography.bodyLarge)
-                        }
+                    com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() },
+                        modifier = Modifier.fillMaxWidth()) {
+                        Text("取消操作", style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }

@@ -112,19 +112,23 @@ internal object HostSettingsDialogs {
                         val first = if (slot == 0) 0 else if (slot == 1) 1 else owner.actions.size
                         val end = if (slot == 0) minOf(1, owner.actions.size) else owner.actions.size
                         if (first < end) {
-                            val original = requireNotNull(param.args[native.number("sentenceButtonContent")])
+                            val composer = requireNotNull(param.args[native.number("sentenceButtonComposer")])
+                            val modifier = param.args[1] ?: ui.value("modifier")
                             owner.renderingActions = true
                             try {
                                 for (index in first until end) {
                                     val action = owner.actions[index]
-                                    val onClick = ui.callback(ui.type("function0")) {
-                                        if (owner.acceptsUpdates) action.onClick()
-                                    }
-                                    val content = HostSentenceActionContent.labeled(
-                                        0x524D4143 + index, original, action.title,
+                                    HostAndroidViews(hook.classLoader).render(
+                                        ui.function(ui.type("function1")) {
+                                            TextView(owner.owner).apply {
+                                                text = action.title
+                                                gravity = android.view.Gravity.CENTER
+                                                com.reamicro.fix.ui.applyDialogActionStyle(this)
+                                                isClickable = true
+                                                setOnClickListener { if (owner.acceptsUpdates) action.onClick() }
+                                            }
+                                        }, modifier, composer,
                                     )
-                                    val arguments = native.sentenceActionArguments(param.args, onClick, content)
-                                    native.method("sentenceButton").invoke(null, *arguments)
                                 }
                             } finally {
                                 owner.renderingActions = false

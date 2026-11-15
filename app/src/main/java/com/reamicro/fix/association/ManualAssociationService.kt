@@ -23,11 +23,17 @@ class ManualAssociationService(
         author: String = draft.author,
         intro: String = draft.intro,
         source: BookSource = draft.source,
+        words: String = draft.words,
+        status: String = draft.status,
+        coverUrl: String = draft.coverUrl,
     ): ManualAssociationDraft = draft.copy(
         title = title,
         author = author,
         intro = intro,
         source = source,
+        words = words,
+        status = status,
+        coverUrl = coverUrl,
     )
 
     fun validate(draft: ManualAssociationDraft): ManualAssociationValidation {

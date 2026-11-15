@@ -266,26 +266,19 @@ internal class HostBookImageDialog(
                             horizontalArrangement = Arrangement.spacedBy((8f * scale).dp),
                             verticalArrangement = Arrangement.spacedBy((8f * scale).dp)) {
                             actions.forEach { action ->
-                                OutlinedButton(onClick = { sheetFocus.clearFocus(); sheetKeyboard?.hide(); action.run() }, enabled = action.enabled,
+                                com.reamicro.fix.ui.DialogActionButton(onClick = { sheetFocus.clearFocus(); sheetKeyboard?.hide(); action.run() }, enabled = action.enabled,
                                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                                    shape = RoundedCornerShape((BookImageDialogStyle.BUTTON_CORNER * scale).dp),
-                                    border = BorderStroke((BookImageDialogStyle.BORDER * scale).dp, palette.borderVariant),
-                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = palette.text,
-                                        disabledContentColor = palette.caption),
-                                    contentPadding = PaddingValues(horizontal = (12f * scale).dp, vertical = (10f * scale).dp)) {
-                                    Text(action.label, style = typography.bodyLarge)
+                                ) {
+                                    Text(action.label, style = typography.labelLarge)
                                 }
                             }
                         }
                         Spacer(Modifier.height(gap))
 
-                        OutlinedButton(onClick = { dismiss() }, enabled = !committing,
+                        com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() }, enabled = !committing,
                             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                            shape = RoundedCornerShape((BookImageDialogStyle.CARD_CORNER * scale).dp),
-                            border = BorderStroke((BookImageDialogStyle.BORDER * scale).dp, palette.borderVariant),
-                            colors = ButtonDefaults.outlinedButtonColors(containerColor = palette.page,
-                                contentColor = palette.caption, disabledContentColor = palette.caption)) {
-                            Text(if (busy) "关闭" else "取消", style = typography.bodyLarge)
+                        ) {
+                            Text(if (busy) "关闭" else "取消", style = typography.labelLarge)
                         }
                     }
                 }

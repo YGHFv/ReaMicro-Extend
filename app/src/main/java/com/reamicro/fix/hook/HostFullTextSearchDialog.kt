@@ -184,8 +184,8 @@ internal class HostFullTextSearchDialog(
                             Icon(HostEmbeddedIcons.Close,"清空搜索",Modifier.size(18.dp),tint=palette.caption)
                         }
                     }
-                    TextButton(onClick={submit()},enabled=query.isNotBlank()) { Text("搜索",color=if(query.isNotBlank())palette.primary else palette.caption) }
-                    TextButton(onClick={dismiss()}) { Text("取消",color=palette.text) }
+                    com.reamicro.fix.ui.DialogActionButton(onClick={submit()},enabled=query.isNotBlank()) { Text("搜索") }
+                    com.reamicro.fix.ui.DialogActionButton(onClick={dismiss()}) { Text("取消") }
                 }
                 // 延迟执行的 key/content 必须捕获同一批结果，不能重新读取已被清空的新状态。
                 val page=state

@@ -70,25 +70,6 @@ internal fun WebDavDriveHook.logCleartextAllowed(value: Any?, via: String) {
     }
 }
 
-internal fun WebDavDriveHook.renderSyncWebDavAvailableCard(composer: Any, onAuthorize: Any?) {
-    runCatching {
-        val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.syncUi)
-        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
-        withWebDavIcon {
-            host.call("available",
-                listOf(BACKUP_TYPE_WEBDAV),
-                ui.callback(host.type("function1")) {
-                    onAuthorize?.let { host.method("invoke1").invoke(it, BACKUP_TYPE_WEBDAV) }
-                },
-                composer,
-                0,
-            )
-        }
-    }.onFailure {
-        HookRuntime.log("$LOG_PREFIX failed to render WebDAV sync available card: ${it.stackTraceToString()}")
-    }
-}
-
 internal fun WebDavDriveHook.renderSyncWebDavAuthorizedCard(
     composer: Any,
     onSetupDefaultDir: Any?,
@@ -1410,7 +1391,7 @@ internal fun WebDavDriveHook.createWebDavAuthIntroView(
         minHeight = 0
         minWidth = 0
         background = roundedDrawable(colors.neutralButton, activity.dp(7).toFloat())
-        setPadding(0, 0, 0, 0)
+        com.reamicro.fix.ui.applyDialogActionStyle(this, activity)
         setOnClickListener {
             dialog.dismiss()
             showWebDavLoginPage()
@@ -1664,7 +1645,7 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
         minHeight = 0
         minWidth = 0
         background = roundedDrawable(colors.neutralButton, context.dp(8).toFloat())
-        setPadding(0, 0, 0, 0)
+        com.reamicro.fix.ui.applyDialogActionStyle(this, context)
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             context.dp(50),
@@ -1700,11 +1681,6 @@ internal fun WebDavDriveHook.createWebDavLoginContent(
             username.text?.toString()?.trim()?.isNotEmpty() == true &&
             password.text?.toString()?.isNotEmpty() == true
         submit.isEnabled = enabled
-        submit.background = roundedDrawable(
-            if (enabled) colors.accent else colors.neutralButton,
-            context.dp(8).toFloat(),
-        )
-        submit.alpha = if (enabled) 1f else 0.72f
     }
     val watcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit

@@ -7,6 +7,7 @@ import com.reamicro.fix.association.ManualAssociationService
 import com.reamicro.fix.association.AssociationBookIdentity
 import com.reamicro.fix.association.AssociationOwnedState
 import com.reamicro.fix.association.model.ManualAssociationDraft
+import com.reamicro.fix.association.model.AssociationPlatforms
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.HostAssociationBindings
 import com.reamicro.fix.core.HostCoroutines
@@ -38,6 +39,8 @@ internal class ManualAssociationUiHook(
         @Volatile var preview: Any? = null
         @Volatile var candidate: Any? = null
         var draft: ManualAssociationDraft? = null
+        @Volatile var coverDraft: String? = null
+        var originalCover: String? = null
         var editor = WeakReference<HostManualAssociationEditor>(null)
     }
     private data class Page(
@@ -50,7 +53,7 @@ internal class ManualAssociationUiHook(
     private val service = ManualAssociationService()
     private val factory = ReaMicroThirdPartyBookFactory(loader)
     private val editAction = HostBookEditAction(loader)
-    private val coverPicker = HostManualAssociationCoverPicker(loader)
+    private val coverPicker = ManualAssociationCoverLoader(loader)
     private val pages = ThreadLocal<ArrayDeque<Page>>()
     private val toolbars = ThreadLocal<ArrayDeque<Target>>()
     private val renderGuard = ThreadLocal<Boolean>()
@@ -65,7 +68,7 @@ internal class ManualAssociationUiHook(
         val selection: ManualAssociationCoverStore.Selection, val executionToken: Long, val job: Any,
     ) {
         val completed = java.util.concurrent.atomic.AtomicBoolean()
-        @Volatile var publication: HostManualAssociationCoverPicker.Published? = null
+        @Volatile var publication: ManualAssociationCoverLoader.Published? = null
     }
     private val confirmation = java.util.concurrent.atomic.AtomicReference<Confirmation?>()
     private val main = ModuleResources.handler(Looper.getMainLooper())
@@ -94,7 +97,7 @@ internal class ManualAssociationUiHook(
             host.method("scaffold") == ui.method("scaffold") && host.method("topBar") == ui.method("topBar"))
         val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
         try {
-            handles += coverPicker.install()
+            coverPicker.install()
             ModuleResources.blockWhile { if (confirmation.get() != null) "请等待手动关联保存完成" else null }
             repeat(host.number("candidateRender.count")) { index ->
                 val renderer = host.method("candidateRender.$index")
@@ -115,11 +118,10 @@ internal class ManualAssociationUiHook(
                 override fun before(param: Call) {
                     val target = current ?: return
                     if (param.args.getOrNull(1) !== target.candidate || !isOwnerCurrent(target)) return
-                    val draft = target.draft ?: return
-                    if (!draft.coverUrl.startsWith(ManualAssociationCoverStore.PREFIX)) return
+                    val coverDraft = target.coverDraft ?: return
                     val ownerActivity = target.activity.get() ?: return
                     val repository = param.thisObject ?: return
-                    val selected = coverPicker.acquire(draft.coverUrl)
+                    val selected = coverPicker.acquire(coverDraft)
                     if (selected == null) {
                         param.throwable = IllegalStateException("封面草稿已失效，请重新选择")
                         return
@@ -212,14 +214,14 @@ internal class ManualAssociationUiHook(
             handles += HookRuntime.hookMethod(host.method("candidateImage"), object : HookCallback() {
                 override fun before(param: Call) {
                     val target = candidateFrame.get() ?: return
-                    val draft = target.draft ?: return
+                    val coverPath = target.coverDraft ?: target.originalCover ?: return
                     if (target.preview == null || !canRender(target) || !isOwnerCurrent(target)) return
                     val slot = host.number("candidateImage.data")
                     val path = param.args.getOrNull(slot) as? String ?: return
                     val expected = target.candidate?.let { association.property("candidate", "cover", it) } as? String
                     if (path != expected) return
                     val ownerActivity = target.activity.get() ?: return
-                    val file = coverPicker.imageSource(ownerActivity, target.book, draft.coverUrl) ?: return
+                    val file = coverPicker.imageSource(ownerActivity, target.book, coverPath) ?: return
                     // Cache paths remain private. Only this owned candidate image uses the draft.
                     param.args[slot] = file
                     val changed = host.number("candidateImage.changed")
@@ -287,7 +289,7 @@ internal class ManualAssociationUiHook(
                         .onFailure { HookRuntime.logError("ReaMicro manual candidate refresh stopped", it) }
                     if (association.property("state", "isRelateSuccess", next) == true) main.post {
                         if (!retired && current === target && isOwnerCurrent(target)) {
-                            target.preview = null; target.candidate = null; target.draft = null
+                            target.preview = null; target.candidate = null; target.draft = null; target.coverDraft = null
                             coverPicker.retain(emptySet())
                             val dialog = target.editor.get(); target.editor.clear(); dialog?.dismiss()
                         }
@@ -424,50 +426,41 @@ internal class ManualAssociationUiHook(
             val state = requireNotNull(association.method("get").invoke(association.field("vm.flow").get(vm)))
             check(matchesBook(target, state)) { "关联图书已变化" }
             val book = requireNotNull(association.property("state", "book", state))
-            val repository = association.bookshelfRepository(vm)
             fun text(name: String) = association.property("book", name, book) as? String ?: ""
-            val initial = target.draft ?: ManualAssociationDraft(title = text("title"), author = text("author"), coverUrl = text("cover"))
+            target.originalCover = text("cover")
+            val remoteCover = text("cover").takeIf(ManualAssociationDraft::isCoverAddress).orEmpty()
+            val initial = target.draft ?: ManualAssociationDraft(title = text("title"), author = text("author"),
+                source = AssociationPlatforms.normalizeSource(text("publisher")) ?: service.selectableSources.first(),
+                coverUrl = remoteCover)
             target.editor.get()?.dismiss()
             val dialog = HostManualAssociationEditor(activity, initial, service.selectableSources, { usable(target) },
-                onChooseCover = choose@{
-                    val editor = target.editor.get() ?: return@choose
-                    coverPicker.open(activity, target.identity, target.book, {
-                        usable(target) && association.bookshelfRepository(vm) === repository &&
-                            target.editor.get() === editor && editor.isShowing
-                    },
-                        editor::setCoverBusy,
-                        onImported = { path ->
-                            if (usable(target)) {
-                                editor.coverImported(path)
-                                coverPicker.retain(setOfNotNull(path, target.draft?.coverUrl))
-                            }
-                        },
-                        editor::showCoverProblem)
-                },
-                coverPreview = { path ->
-                    if (isOwnerCurrent(target)) coverPicker.preview(activity, target.book, path) else null
-                },
-                onClosed = { coverPicker.retain(setOfNotNull(target.draft?.coverUrl)) }) { next ->
+                prepareCover = { url, checkCurrent -> coverPicker.download(activity, url, checkCurrent) },
+                onClosed = { coverPicker.retain(setOfNotNull(target.coverDraft)) }) { next, staged ->
                 check(usable(target)) { "关联页面已变化，请重新打开" }
                 val draft = next.normalized()
-                // Publisher cover is remote metadata; a local selection only changes Book.cover.
-                val candidate = service.buildCandidate(if (coverPicker.isDraft(draft.coverUrl))
-                    draft.copy(coverUrl = text("cover")) else draft)
-                val nativeCandidate = factory.create(candidate, text("cover"))
+                // 出版信息只提交网络地址，临时图片仅供预览和确认后的本地封面保存。
+                val candidate = service.buildCandidate(draft)
+                val nativeCandidate = factory.create(candidate, remoteCover)
                 val group = factory.createThirdPartyGroup(ManualAssociationPreview.GROUP_PREFIX + candidate.source.displayName,
                     listOf(nativeCandidate))
                 val previous = target.preview
                 val previousCandidate = target.candidate
+                val previousDraft = target.draft
+                val previousCover = target.coverDraft
                 AccountHostRuntime.withCurrentStorage(target.identity, activity) {
                     check(usable(target)) { "关联页面已变化，请重新打开" }
                     target.preview = group
                     target.candidate = nativeCandidate
+                    target.draft = draft
+                    target.coverDraft = staged
                 }
                 try {
                     check(update(target) { merge(it, target) } && usable(target)) { "账号或关联图书已变化，请重新打开" }
-                    target.draft = draft
                 } catch (error: Throwable) {
-                    target.preview = previous; target.candidate = previousCandidate; throw error
+                    target.preview = previous; target.candidate = previousCandidate
+                    target.draft = previousDraft; target.coverDraft = previousCover
+                    coverPicker.retain(setOfNotNull(previousCover))
+                    throw error
                 }
                 if (usable(target)) Toast.makeText(activity, "已生成候选，请选择后确认关联", Toast.LENGTH_SHORT).show()
             }
@@ -512,7 +505,8 @@ internal class ManualAssociationUiHook(
         val previous = current
         val oldPreview = previous?.preview
         current = null
-        previous?.preview = null; previous?.candidate = null; previous?.draft = null
+        previous?.preview = null; previous?.candidate = null; previous?.draft = null; previous?.coverDraft = null
+        previous?.originalCover = null
         val dialog = previous?.editor?.get(); previous?.editor?.clear()
         HostGeneration.onMain {
             dialog?.dismiss()

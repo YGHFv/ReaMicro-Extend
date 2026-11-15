@@ -560,7 +560,7 @@ internal class EpubStructureView(
                                         failure != null -> Column(Modifier.align(Alignment.Center).padding(24.dp),
                                             horizontalAlignment = Alignment.CenterHorizontally) {
                                             Text(failure!!, color = palette.caption)
-                                            TextButton(onClick = { refresh() }) { Text("重试") }
+                                            com.reamicro.fix.ui.DialogActionButton(onClick = { refresh() }) { Text("重试") }
                                         }
                                         else -> LazyColumn(state = treeScroll, modifier = Modifier.fillMaxSize()) {
                                             if (files.isEmpty()) item { Text("没有文件", Modifier.padding(32.dp), color = palette.caption) }
@@ -1158,7 +1158,7 @@ internal class EpubStructureView(
         val error = result?.exceptionOrNull()?.let { it.message?.takeIf(String::isNotBlank) ?: "读取失败" }
         if (error != null) Column(Modifier.padding(16.dp)) {
             Text(error!!, color = palette.error)
-            TextButton(onClick = editSource) { Text("编辑 CSS 源码") }
+            com.reamicro.fix.ui.DialogActionButton(onClick = editSource) { Text("编辑 CSS 源码") }
         }
         else if (data == null) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { StructureDataLoading() }
         else {
@@ -1168,7 +1168,7 @@ internal class EpubStructureView(
                 if (rules.length() == 0) item {
                     Column(Modifier.padding(16.dp)) {
                         Text("没有可显示的样式规则", color = palette.caption)
-                        TextButton(onClick = editSource) { Text("编辑 CSS 源码") }
+                        com.reamicro.fix.ui.DialogActionButton(onClick = editSource) { Text("编辑 CSS 源码") }
                     }
                 }
                 items(rules.length()) { index ->

@@ -9,7 +9,6 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -129,20 +128,11 @@ internal class ReaderThoughtSelectionEditor(
                             color = p.caption, textAlign = TextAlign.End, maxLines = 1)
                         Spacer(Modifier.height((HostThoughtInputStyle.ACTION_GAP_UDP * scale).dp))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(enabled = !saving, onClick = { dismiss() }) { Text("取消") }
+                            com.reamicro.fix.ui.DialogActionButton(enabled = !saving, onClick = { dismiss() }) { Text("取消") }
                             Spacer(Modifier.weight(1f))
-                            Button(enabled = !saving, onClick = { onSave(text.text, handle) },
+                            com.reamicro.fix.ui.DialogActionButton(enabled = !saving, onClick = { onSave(text.text, handle) },
                                 modifier = Modifier
-                                    .widthIn(min = (HostThoughtInputStyle.SAVE_MIN_WIDTH_UDP * scale).dp)
-                                    .height((HostThoughtInputStyle.SAVE_HEIGHT_UDP * scale).dp),
-                                shape = CircleShape,
-
-                                contentPadding = PaddingValues(HostThoughtInputStyle.SAVE_CONTENT_PADDING_DP.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = p.primary,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                                    disabledContainerColor = p.primary.copy(alpha = HostThoughtInputStyle.SAVE_DISABLED_CONTAINER_ALPHA),
-                                    disabledContentColor = MaterialTheme.colorScheme.onPrimary.copy(
-                                        alpha = HostThoughtInputStyle.SAVE_DISABLED_CONTENT_ALPHA))) {
+                                    .widthIn(min = (HostThoughtInputStyle.SAVE_MIN_WIDTH_UDP * scale).dp)) {
                                 Text(if (saving) "正在保存…" else "保存")
                             }
                         }
