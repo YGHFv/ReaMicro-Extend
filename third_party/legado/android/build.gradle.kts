@@ -29,6 +29,6 @@ dependencies {
     implementation("org.apache.commons:commons-text:1.15.0")
     implementation("cn.hutool:hutool-crypto:5.8.22")
     implementation("com.github.bumptech.glide:glide:5.0.9")
-    implementation("androidx.media3:media3-common:1.11.0")
+    implementation("androidx.media3:media3-common:1.11.1")
     implementation("me.zhanghai.android.libarchive:library:1.1.6")
 }
