@@ -55,7 +55,7 @@ class ApiPackageManager(
 
     fun install(contentPackage: ApiContentPackage): ApiPackageUpdateResult = runCatching {
         checkModuleEnabled()
-        require(contentPackage.schemaVersion == 1) { "不支持的内容包格式" }
+        requireCompatiblePackage(contentPackage, com.reamicro.fix.BuildConfig.VERSION_NAME)
         val originalSource = onlineSource(contentPackage)
         val bytes = if (originalSource == null) client.download(contentPackage)
             else OnlineSourceTask(originalSource).use { operation -> operation.run { client.download(contentPackage) } }
@@ -158,6 +158,7 @@ class ApiPackageManager(
     }
 
     fun rollback(kind: ApiPackageKind, packageId: String): ApiPackageUpdateResult = runCatching { synchronized(MUTATION_LOCK) {
+        checkModuleEnabled()
         val current = installed().firstOrNull { it.kind == kind && it.packageId == packageId }
             ?: error("内容包尚未安装")
         val directory = File(context.filesDir, "$ROOT/${kind.wireValue}/${ApiPackagePaths.component(packageId)}")
@@ -177,13 +178,16 @@ class ApiPackageManager(
             }
             ?: error("没有可回滚的历史版本")
         val (target, manifest) = historical
+        requireCompatiblePackage(target, com.reamicro.fix.BuildConfig.VERSION_NAME)
         val originalSource = onlineSource(target)
         val bytes = ApiPackagePaths.child(directory, "${manifest.nameWithoutExtension}.pkg").readBytes()
         require(sha256(bytes) == target.sha256.lowercase()) { "历史内容包摘要校验失败" }
         verifySignature(target, bytes)
+        checkModuleEnabled()
         client.checkCurrentRequest()
         val contentId = installPayload(target, bytes, originalSource,
             kind == ApiPackageKind.ONLINE_SOURCE && originalSource == null)
+        checkModuleEnabled()
         saveInstalledVersion(target, contentId)
         ApiPackageUpdateResult(packageId, target.version, true, "已回滚到 ${target.version}")
     } }.getOrElse { error ->
@@ -253,7 +257,7 @@ class ApiPackageManager(
                     ?.contentId
                     .orEmpty()
                 if (previous.isNotBlank() && previous != target.name) {
-                    File(root, previous).takeIf { it.isFile && it.parentFile == root }?.let { stale ->
+                    runCatching { ApiPackagePaths.child(root, previous) }.getOrNull()?.takeIf { it.isFile }?.let { stale ->
                         stale.setWritable(true)
                         stale.delete()
                     }

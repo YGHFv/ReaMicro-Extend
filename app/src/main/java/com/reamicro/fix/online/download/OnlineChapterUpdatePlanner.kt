@@ -154,6 +154,24 @@ internal object OnlineChapterUpdatePlanner {
         }
     }
 
+    fun requireSafeUpdate(
+        storedChapters: List<StoredOnlineChapter>,
+        remoteChapters: List<RemoteOnlineChapter>,
+        slots: List<OnlineChapterUpdateSlot>,
+    ) {
+        val matched = slots.count { it.stored != null }
+        require(remoteChapters.isNotEmpty() && matched > 0) {
+            "远端目录与本地章节没有匹配，已停止更新以避免重复下载"
+        }
+        require(remoteChapters.size >= storedChapters.size || matched == storedChapters.size) {
+            "远端目录少于本地目录，已停止更新以避免误删章节"
+        }
+        // 已有索引同样可能因源规则或章节 ID 改变而失配，不能绕过防整本重下检查。
+        require(storedChapters.size < 20 || matched.toLong() * 100 >= storedChapters.size.toLong() * 80) {
+            "本地目录与远端章节匹配率过低，已停止更新以避免重复下载"
+        }
+    }
+
     private fun queueBy(
         chapters: List<StoredOnlineChapter>,
         key: (StoredOnlineChapter) -> String?,

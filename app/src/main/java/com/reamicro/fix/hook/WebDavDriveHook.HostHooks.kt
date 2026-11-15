@@ -375,16 +375,18 @@ internal fun WebDavDriveHook.hookHomeViewModelDependencies() {
                 }
             })
         }
-        // Recomposition supplies the existing view model after a module reload.
+        // 首页可能先显示正在阅读，且 ViewModel 已在模块安装前创建；不能只等书架分页。
         val home = requireNotNull(com.reamicro.fix.core.HostHomeBindings.bookshelf)
-        val page = home.method("page")
-        val index = page.parameterTypes.indices.single { page.parameterTypes[it] == work.type("home") }
-        handles += HookRuntime.hookMethod(page, object : HookCallback() {
-            override fun before(param: Call) {
-                rememberHomeViewModelDependencies(param.args?.getOrNull(index))
-            }
-        })
-        HookRuntime.deoptimize(page)
+        for (role in listOf("screen", "page")) {
+            val method = home.method(role)
+            val index = method.parameterTypes.indices.single { method.parameterTypes[it] == work.type("home") }
+            handles += HookRuntime.hookMethod(method, object : HookCallback() {
+                override fun before(param: Call) {
+                    rememberHomeViewModelDependencies(param.args?.getOrNull(index))
+                }
+            })
+            HookRuntime.deoptimize(method)
+        }
     } catch (error: Throwable) {
         handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
         throw error

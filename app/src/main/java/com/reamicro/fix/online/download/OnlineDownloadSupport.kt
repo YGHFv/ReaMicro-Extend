@@ -134,12 +134,7 @@ internal fun onlineChapterUpdatePlan(
     }
     val plan = OnlineChapterUpdatePlanner.plan(stored, remote)
     val matchedCount = plan.count { it.stored != null }
-    if (remote.size < stored.size && matchedCount < stored.size) {
-        error("远端目录少于本地目录，已停止更新以避免误删章节")
-    }
-    if (indexed.isEmpty() && stored.size >= 20 && matchedCount * 100 < stored.size * 80) {
-        error("旧书目录与远端章节匹配率过低，已停止更新以避免重复下载")
-    }
+    OnlineChapterUpdatePlanner.requireSafeUpdate(stored, remote, plan)
     val usedHrefs = stored.mapTo(linkedSetOf()) { it.href }
     val maxFileNumber = File(bookDir, "OEBPS/Text").listFiles()
         ?.mapNotNull { file ->

@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import androidx.core.content.pm.PackageInfoCompat
 import com.reamicro.fix.core.HostPackages
 import io.github.libxposed.service.HookedTarget
 import io.github.libxposed.service.HotReloadResult
@@ -81,7 +82,7 @@ internal object HotReloadService : XposedServiceHelper.OnServiceListener {
     fun onPackageReplaced(app: Context) {
         initialize(app)
         val version = runCatching {
-            app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode
+            PackageInfoCompat.getLongVersionCode(app.packageManager.getPackageInfo(app.packageName, 0))
         }.getOrElse {
             android.util.Log.e("ReaMicroHotReload", "Cannot identify package upgrade", it)
             return

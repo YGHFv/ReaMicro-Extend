@@ -27,7 +27,6 @@ from app.retention import purge_orphan_task_logs
 from app.users import touch_user
 from app.state import (
     find_duplicate_task,
-    load_credentials,
     load_notifications,
     load_tasks,
     merge_duplicate_tasks,
@@ -35,6 +34,16 @@ from app.state import (
 )
 
 router = APIRouter()
+
+
+def require_owned_credential(credentials, credential_id: str, owner: str, task_type: str) -> None:
+    if task_type == "http":
+        return
+    credential = credentials.get(credential_id)
+    if not credential or credential.get("owner") != owner:
+        raise HTTPException(status_code=400, detail=response(
+            code="CREDENTIAL_NOT_FOUND", message="阅微凭据不存在或不属于当前账号",
+        ))
 
 
 def validated_schedule(task_type: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -79,10 +88,6 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
     if not isinstance(request_value, dict):
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 request 必须是对象"))
     credential_id = str(request_value.get("credentialId", "")).strip()
-    if task_type != "http":
-        credential = load_credentials().get(credential_id)
-        if not credential or credential.get("owner") != owner:
-            raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_NOT_FOUND", message="阅微凭据不存在或不属于当前账号"))
     schedule = payload.get("schedule", {})
     if not isinstance(schedule, dict):
         raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 schedule 必须是对象"))
@@ -94,10 +99,11 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "taskType": task_type,
         "schedule": schedule,
         "owner": owner,
-        "status": "scheduled",
+        "status": "scheduled" if bool(payload.get("enabled", True)) else "paused",
         "enabled": bool(payload.get("enabled", True)),
         "createdAt": now,
-        "nextRunAt": 0 if task_type == "yeshe_draw_card" else bounded_config_int(payload.get("nextRunAt", now), now, 0),
+        "nextRunAt": 0 if task_type == "yeshe_draw_card" or not bool(payload.get("enabled", True))
+        else bounded_config_int(payload.get("nextRunAt", now), now, 0),
         "runCount": 0,
         "automationStateVersion": 1,
         "maxRetries": min(bounded_config_int(payload.get("maxRetries", 3), 3, 0), 10),
@@ -105,12 +111,15 @@ async def create_task(request: Request, owner: str = Depends(task_owner)) -> dic
         "executionMode": execution_mode,
     }
     task["credentialId"] = credential_id
-    def create(tasks):
+    def create(values):
+        # 凭据删除与任务创建共用一个事务，防止先验证再删除留下悬空任务。
+        require_owned_credential(values["credentials"], credential_id, owner, task_type)
         task["requestEncrypted"] = encrypt_secret(request_value)
-        stored, _ = upsert_task_configuration(tasks, task, now)
+        stored, _ = upsert_task_configuration(values["tasks"], task, now)
         return response(public_task(stored))
-    result = runtime.get_state_store().mutate_namespace(
-        "tasks", create, idempotency=(owner, "create_task", idempotency_key) if idempotency_key else None,
+    result = runtime.get_state_store().mutate_namespaces(
+        ("credentials", "tasks"), create,
+        idempotency=(owner, "create_task", idempotency_key) if idempotency_key else None,
     )
     task_id = str(result["data"]["id"])
     task_log(task_id, "任务已创建")
@@ -251,17 +260,15 @@ async def configure_task(task_id: str, request: Request, owner: str = Depends(ta
         if not isinstance(request_value, dict):
             raise HTTPException(status_code=400, detail=response(code="TASK_INVALID", message="任务 request 必须是对象"))
         credential_id = str(request_value.get("credentialId", "")).strip()
-        if existing.get("taskType") != "http":
-            credential = load_credentials().get(credential_id)
-            if not credential or credential.get("owner") != owner:
-                raise HTTPException(status_code=400, detail=response(code="CREDENTIAL_NOT_FOUND", message="阅微凭据不存在或不属于当前账号"))
         changes["credentialId"] = credential_id
-    def configure(tasks):
+    def configure(values):
+        tasks = values["tasks"]
         task = tasks.get(task_id)
         if task is None or task.get("owner") != owner:
             raise HTTPException(status_code=404, detail=response(code="TASK_NOT_FOUND", message="任务不存在"))
         task.update(changes)
         if "request" in payload:
+            require_owned_credential(values["credentials"], credential_id, owner, str(task.get("taskType", "")))
             task["requestEncrypted"] = encrypt_secret(request_value)
         if "enabled" in payload:
             task["enabled"] = bool(payload.get("enabled"))
@@ -275,9 +282,14 @@ async def configure_task(task_id: str, request: Request, owner: str = Depends(ta
         task["updatedAt"] = max(now, bounded_config_int(task.get("updatedAt", 0), 0, 0) + 1)
         duplicate = find_duplicate_task(tasks, task, exclude_id=task_id)
         if duplicate:
+            # 已开始的外部请求无法撤回，不能删除它并让另一任务重复执行。
+            if duplicate[1].get("status") == "running":
+                raise HTTPException(status_code=409, detail=response(
+                    code="TASK_BUSY", message="同账号同类型的任务正在执行，请等待完成后修改",
+                ))
             tasks.pop(duplicate[0], None)
         return task, duplicate[0] if duplicate else ""
-    task, removed_id = runtime.get_state_store().mutate_namespace("tasks", configure)
+    task, removed_id = runtime.get_state_store().mutate_namespaces(("credentials", "tasks"), configure)
     if removed_id:
         audit_event("task_merged", f"owner:{owner}", metadata={"keptTaskId": task_id, "removedTaskId": removed_id, "reason": "unique_task_key"})
     task_log(task_id, "任务配置已更新")

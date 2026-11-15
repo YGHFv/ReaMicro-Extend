@@ -34,16 +34,26 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
         }
         if (method != METHOD_SAVE) return Bundle().apply { putBoolean("saved", false) }
         val settings = extras?.toSettings() ?: return null
-        ApiServerSettingsStore { appContext }.save(settings)
-        val persisted = ApiServerSettingsStore { appContext }.get()
-        val saved = persisted.enabled == settings.enabled &&
-            persisted.baseUrl == settings.baseUrl.trim().removeSuffix("/") &&
-            persisted.hostAccountId == settings.hostAccountId.trim()
-        HookRuntime.log(
-            "ReaMicro API settings mirror caller=$caller saved=$saved enabled=${persisted.enabled} " +
-                "baseUrl=${persisted.baseUrl.isNotBlank()}",
-        )
-        return Bundle().apply { putBoolean("saved", saved) }
+        val identity = Binder.clearCallingIdentity()
+        try {
+            val store = ApiServerSettingsStore { appContext }
+            store.save(settings)
+            val persisted = store.get()
+            // 回执必须核对完整配置，避免加解密失败仍被视为同步成功。
+            val saved = persisted == settings.copy(
+                baseUrl = settings.baseUrl.trim().removeSuffix("/"),
+                accountName = settings.accountName.trim(),
+                hostAccountId = settings.hostAccountId.trim(),
+                timeoutSeconds = settings.timeoutSeconds.coerceIn(5, 60),
+            )
+            HookRuntime.log(
+                "ReaMicro API settings mirror caller=$caller saved=$saved enabled=${persisted.enabled} " +
+                    "baseUrl=${persisted.baseUrl.isNotBlank()}",
+            )
+            return Bundle().apply { putBoolean("saved", saved) }
+        } finally {
+            Binder.restoreCallingIdentity(identity)
+        }
     }
 
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? = null
@@ -61,8 +71,6 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
 }
 
 fun ApiServerSettings.mirrorToModule(context: android.content.Context): Boolean {
-    val pushed = ApiServerSettingsMirror.push(context, this)
-    if (pushed) return true
     val bundle = Bundle().apply {
         putBoolean("enabled", enabled)
         putString("baseUrl", baseUrl)
@@ -76,13 +84,16 @@ fun ApiServerSettings.mirrorToModule(context: android.content.Context): Boolean 
         putBoolean("autoCheckUpdates", autoCheckUpdates)
         putString("updateChannel", updateChannel.wireValue)
     }
-    return runCatching {
+    val saved = runCatching {
         context.contentResolver.call(ApiServerSettingsBridgeProvider.URI, ApiServerSettingsBridgeProvider.METHOD_SAVE, null, bundle)
             ?.getBoolean("saved", false) == true
     }.onFailure {
 
         HookRuntime.log("ReaMicro API settings provider mirror unavailable: ${it.message}")
     }.getOrDefault(false)
+    // 广播发送成功不代表配置已保存；未取得回执时，下次宿主恢复继续核对。
+    if (!saved) ApiServerSettingsMirror.push(context, this)
+    return saved
 }
 
 private fun Bundle.toSettings(): ApiServerSettings = ApiServerSettings(

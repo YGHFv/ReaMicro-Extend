@@ -193,7 +193,8 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
             val unchanged = downloaded.isEmpty() && attempted.isEmpty() &&
                 newIndices.isEmpty() && pendingIndices.isEmpty() && failures.isEmpty() &&
                 indexFile.isFile &&
-                indexFile.readText(Charsets.UTF_8) == onlineCompletionChapterIndexJson(target, remote, chapterHrefs) &&
+                OnlineOnDemandMetadataCodec.chapterIndexMatches(indexFile.readText(Charsets.UTF_8),
+                    onlineCompletionChapterIndexJson(target, remote, chapterHrefs)) &&
                 OnlineUpdateStyleFingerprint.matches(original, styleFingerprint)
             if (unchanged) {
                 onProgress(96, "目录未变化，核对书架目录")

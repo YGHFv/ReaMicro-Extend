@@ -72,6 +72,15 @@ internal fun isPackageUpdateAvailable(
     return versionComparison > 0 || (versionComparison == 0 && remoteBuildTime > installedBuildTime)
 }
 
+internal fun requireCompatiblePackage(contentPackage: ApiContentPackage, moduleVersion: String) {
+    require(contentPackage.schemaVersion == 1) { "不支持的内容包格式" }
+    val minimum = contentPackage.minModuleVersion.trim()
+    require(minimum.isBlank() || isSemanticVersion(minimum)) { "内容包要求的模块版本无效" }
+    require(minimum.isBlank() || comparePackageVersions(moduleVersion, minimum) >= 0) {
+        "内容包需要补全计划 $minimum 或更新版本"
+    }
+}
+
 internal fun isSemanticVersion(value: String): Boolean {
     val normalized = value.trim().substringBefore('+')
     val core = normalized.substringBefore('-')

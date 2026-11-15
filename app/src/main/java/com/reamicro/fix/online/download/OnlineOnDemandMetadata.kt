@@ -88,6 +88,22 @@ internal data class OnlineOnDemandMetadata(
 }
 
 internal object OnlineOnDemandMetadataCodec {
+    fun chapterIndexMatches(stored: String, expected: String): Boolean = runCatching {
+        val previous = JSONObject(stored)
+        val next = JSONObject(expected)
+        if (listOf("sourceId", "detailUrl").any { previous.optString(it) != next.optString(it) }) return false
+        val previousChapters = previous.getJSONArray("chapters")
+        val nextChapters = next.getJSONArray("chapters")
+        if (previousChapters.length() != nextChapters.length()) return false
+        // 状态、下载时间和模式不属于远端目录变更，不能因 v1/v2 格式不同反复复制整书。
+        (0 until previousChapters.length()).all { index ->
+            val before = previousChapters.getJSONObject(index)
+            val after = nextChapters.getJSONObject(index)
+            listOf("sourceChapterId", "url", "title", "volumeTitle", "href")
+                .all { before.optString(it) == after.optString(it) }
+        }
+    }.getOrDefault(false)
+
     fun encode(metadata: OnlineOnDemandMetadata): String {
         val chapters = JSONArray()
         metadata.chapters.forEach { chapter ->
@@ -116,6 +132,9 @@ internal object OnlineOnDemandMetadataCodec {
 
     fun decode(content: String): OnlineOnDemandMetadata {
         val root = JSONObject(content)
+        // v1 是完整下载的章节索引，没有按需状态；缺少 state 不能当作未下载。
+        // 真正的按需元数据仍默认 PENDING，缺失正文由更新器另行检查。
+        val legacyFullIndex = root.optInt("version", 1) == 1 && !root.has("mode")
         val items = root.optJSONArray("chapters") ?: JSONArray()
         val chapters = buildList {
             for (index in 0 until items.length()) {
@@ -131,7 +150,8 @@ internal object OnlineOnDemandMetadataCodec {
                         href = href,
                         state = enumValueOrDefault(
                             item.optString("state"),
-                            OnlineChapterState.PENDING,
+                            if (legacyFullIndex && !item.has("state")) OnlineChapterState.READY
+                            else OnlineChapterState.PENDING,
                         ),
                         downloadedAtMs = item.optLong("downloadedAtMs", 0L).coerceAtLeast(0L),
                         attempts = item.optInt("attempts", 0).coerceAtLeast(0),

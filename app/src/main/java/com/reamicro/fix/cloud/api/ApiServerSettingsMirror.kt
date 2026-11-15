@@ -2,6 +2,8 @@ package com.reamicro.fix.cloud.api
 
 import android.content.Context
 import android.content.Intent
+import android.app.BroadcastOptions
+import android.os.Build
 import com.reamicro.fix.xposed.HookRuntime
 import org.json.JSONObject
 
@@ -12,6 +14,8 @@ object ApiServerSettingsMirror {
     const val RECEIVER_CLASS = "com.reamicro.fix.cloud.api.ApiServerSettingsMirrorReceiver"
 
     fun push(context: Context, settings: ApiServerSettings): Boolean {
+        // 旧系统无法取得广播发送方身份，改由带 Binder 身份校验的 Provider 同步。
+        if (Build.VERSION.SDK_INT < 34) return false
         val appContext = context.applicationContext
 
         val payload = settings.toMirrorJson()
@@ -21,6 +25,8 @@ object ApiServerSettingsMirror {
                     .setClassName(MODULE_PACKAGE, RECEIVER_CLASS)
                     .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
                     .putExtra(EXTRA_PAYLOAD, payload),
+                null,
+                BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle(),
             )
             true
         }.onFailure {

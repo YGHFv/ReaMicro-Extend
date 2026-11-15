@@ -189,6 +189,9 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20260719")
+
     implementation(project(":legado-parser"))
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
