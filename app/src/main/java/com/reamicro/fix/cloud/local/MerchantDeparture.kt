@@ -39,15 +39,21 @@ internal class MerchantDeparture(
 
     val configuredType: String get() = record.getJSONObject("context").optString("blessingType")
     val contextChanged: Boolean get() = !sameContext()
-    val materialsUnavailable: Boolean get() = record.optString("prayer") == MATERIALS_UNAVAILABLE
+    // 兼容旧版已记录的材料不足状态，继续出发时不再次消耗材料。
+    val prayerSkipped: Boolean get() = record.optString("prayer") in setOf(PRAYER_SKIPPED, MATERIALS_UNAVAILABLE)
+    val prayerSkipReason: String get() = record.optString("prayerSkipReason").ifBlank {
+        if (record.optString("prayer") == MATERIALS_UNAVAILABLE) "祈福材料不足" else "祈禳失败"
+    }
     val mustConfirmPrayer: Boolean get() = record.optString("prayer") in setOf(PRAYER_PENDING, PRAYER_READY)
     val startUnconfirmed: Boolean get() = record.optString("start") in setOf(START_PENDING, START_ACCEPTED)
     private val unresolved: Boolean get() = record.optString("prayer") == PRAYER_PENDING || startUnconfirmed
 
     fun prayerPending() = update("prayer", PRAYER_PENDING)
     fun prayerReady() = update("prayer", PRAYER_READY)
-    fun skipPrayer() = update("prayer", MATERIALS_UNAVAILABLE)
-    fun prayerRejected() = update("prayer", "")
+    fun skipPrayer(reason: String) {
+        record.put("prayerSkipReason", reason)
+        update("prayer", PRAYER_SKIPPED)
+    }
     fun startPending() = update("start", START_PENDING)
     fun startAccepted() = update("start", START_ACCEPTED)
     fun startRejected() = update("start", "")
@@ -75,11 +81,10 @@ internal class MerchantDeparture(
     companion object {
         private const val PRAYER_PENDING = "pending"
         private const val PRAYER_READY = "ready"
+        private const val PRAYER_SKIPPED = "skipped"
         private const val MATERIALS_UNAVAILABLE = "materials_unavailable"
         private const val START_PENDING = "pending"
         private const val START_ACCEPTED = "accepted"
-        const val MATERIALS_MESSAGE = "祈福材料不足"
-        const val SKIPPED_NOTE = "祈福材料不足，本次不祈禳"
 
         fun observeTrip(state: JSONObject, tripId: Long, checkpoint: (JSONObject) -> Unit) {
             if (tripId <= 0L) return
@@ -94,14 +99,6 @@ internal class MerchantDeparture(
             state.put(CloudTaskLocalRunner.KEY_MERCHANT_DEPARTURE, JSONObject())
             checkpoint(state)
         }
-
-        /**
-         * Both host serializers require PrayTaoistBlessingRes.success and expose message.
-         * The material message is the reported server refusal, not an invented error code.
-         * Do not classify transport exceptions, malformed booleans or successful replies by text.
-         */
-        fun insufficientMaterials(body: JSONObject): Boolean =
-            explicitRejection(body) == MATERIALS_MESSAGE
 
         fun explicitRejection(body: JSONObject): String? {
             val code = body.opt("code")

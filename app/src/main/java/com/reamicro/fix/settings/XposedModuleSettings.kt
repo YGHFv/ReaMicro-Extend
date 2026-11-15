@@ -203,7 +203,6 @@ class XposedModuleSettings(
     fun setReaderPageAnimationEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, enabled)
     fun setHomeDefaultPageEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, enabled)
     fun setOnlineDiscoverEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, enabled)
-    fun setMerchantEndTimeEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_MERCHANT_END_TIME_ENABLED, enabled)
     fun setBookImageSelectionEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, enabled)
     fun setBookLocalExportEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED, enabled)
     fun setBookBackupScrollEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, enabled)
@@ -876,7 +875,6 @@ class XposedModuleSettings(
             readerPageAnimationEnabled = prefs.getBoolean(ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, true),
             homeDefaultPageEnabled = prefs.getBoolean(ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, true),
             onlineDiscoverEnabled = prefs.getBoolean(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, true),
-            merchantEndTimeEnabled = prefs.getBoolean(ModuleSettings.KEY_MERCHANT_END_TIME_ENABLED, true),
             bookImageSelectionEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, true),
             bookLocalExportEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED, true),
             bookBackupScrollEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, true),

@@ -122,7 +122,7 @@ object CloudTaskLocalRunner {
                     state, detail = detail,
                 )
             }
-            if (blessing.skippedForMaterials) detail.put("本次祈禳", MerchantDeparture.SKIPPED_NOTE)
+            if (blessing.skippedReason.isNotBlank()) detail.put("本次祈禳", blessingSkipNote(blessing))
             val blessingNote = blessingNote(blessing, blessingType)
             departure.startPending()
             val started = runCatching {
@@ -289,6 +289,7 @@ object CloudTaskLocalRunner {
             val summary = cloudTaskItemsSummary(rewards.toString())
             if (summary.isNotBlank()) detail.put("获得", summary)
             addActiveBlessing(detail, blessing.detail)
+            if (blessing.skippedReason.isNotBlank()) detail.put("本次祈禳", blessingSkipNote(blessing))
 
             val rewardNote = if (summary.isBlank()) "" else "（$summary）"
             return Outcome(result, message + rewardNote, state, detail = detail)
@@ -476,9 +477,18 @@ object CloudTaskLocalRunner {
         request: JSONObject,
         blessingType: String,
         departure: MerchantDeparture? = null,
-    ): BlessingCheck = runCatching {
-        checkTaoistBlessing(baseUrl, token, request, blessingType, departure)
-    }.getOrElse { BlessingCheck("查询或祈禳运签失败：${it.message}", JSONObject()) }
+    ): BlessingCheck {
+        val check = runCatching {
+            checkTaoistBlessing(baseUrl, token, request, blessingType, departure)
+        }.getOrElse {
+            com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
+            BlessingCheck("查询或祈禳运签失败：${it.message}", JSONObject())
+        }
+        // 祈禳是可选步骤；失败后保存跳过状态，直接继续轶闻或行商。
+        val reason = check.failure ?: return check
+        departure?.skipPrayer(reason)
+        return skippedPrayer(reason)
+    }
 
     private fun checkTaoistBlessing(
         baseUrl: String,
@@ -488,7 +498,7 @@ object CloudTaskLocalRunner {
         departure: MerchantDeparture?,
     ): BlessingCheck {
         val type = blessingType.trim().uppercase()
-        if (departure?.materialsUnavailable == true) return skippedMerchantPrayer()
+        if (departure?.prayerSkipped == true) return skippedPrayer(departure.prayerSkipReason)
         if (type.isBlank()) return BlessingCheck(null, JSONObject())
         if (type !in setOf(BLESSING_LUCK, BLESSING_SAFETY, BLESSING_WEALTH)) {
             return BlessingCheck("不支持的运签配置：$type", JSONObject())
@@ -525,11 +535,6 @@ object CloudTaskLocalRunner {
             request.optString("prayEndpoint").ifBlank { "rest/community/pray-taoist-blessing" },
         )
         operationError(pray)?.let {
-            if (departure != null && MerchantDeparture.insufficientMaterials(pray)) {
-                departure.skipPrayer()
-                return skippedMerchantPrayer()
-            }
-            if (MerchantDeparture.explicitRejection(pray) != null) departure?.prayerRejected()
             return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject())
         }
         val prayData = pray.optJSONObject("data") ?: pray
@@ -554,9 +559,11 @@ object CloudTaskLocalRunner {
         )
     }
 
-    private fun skippedMerchantPrayer() = BlessingCheck(
-        null, JSONObject(), skippedForMaterials = true,
+    private fun skippedPrayer(reason: String) = BlessingCheck(
+        null, JSONObject(), skippedReason = reason,
     )
+
+    private fun blessingSkipNote(check: BlessingCheck) = "${check.skippedReason}，本次跳过祈禳，继续任务"
 
     private fun blessingDetail(blessing: JSONObject, source: String): JSONObject {
         val type = blessing.optString("blessingType")
@@ -575,12 +582,12 @@ object CloudTaskLocalRunner {
 
         val replacedType: String = "",
 
-        val skippedForMaterials: Boolean = false,
+        val skippedReason: String = "",
     )
 
     internal fun blessingNote(check: BlessingCheck, configuredType: String): String = when {
         check.failure != null -> "（运签：${check.failure}）"
-        check.skippedForMaterials -> " · ${MerchantDeparture.SKIPPED_NOTE}"
+        check.skippedReason.isNotBlank() -> " · ${blessingSkipNote(check)}"
         configuredType.isBlank() -> ""
         check.prayed -> {
             val label = blessingLabel(check.activeType.ifBlank { configuredType })

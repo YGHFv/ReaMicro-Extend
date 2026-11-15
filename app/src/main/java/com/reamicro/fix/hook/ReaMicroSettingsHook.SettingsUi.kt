@@ -505,7 +505,7 @@ internal fun ReaMicroSettingsHook.renderReaderCompletionSettingsContent(innerPad
         )
         val rows = listOf(
             ToggleRow(
-                key = ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, title = "翻页动画调节",
+                key = ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, title = "动画调节",
                 checked = snapshot.readerPageAnimationEnabled,
                 onChanged = { checked, _ -> settings.setReaderPageAnimationEnabled(checked); checked },
             ),
@@ -1277,8 +1277,6 @@ internal fun ReaMicroSettingsHook.renderOnlineCompletionSettingsContent(innerPad
                 }
                 add(ToggleRow(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, "发现入口", snapshot.onlineDiscoverEnabled,
                     onChanged = { checked, _ -> settings.setOnlineDiscoverEnabled(checked); checked }))
-                add(ToggleRow(ModuleSettings.KEY_MERCHANT_END_TIME_ENABLED, "行商结束时间", snapshot.merchantEndTimeEnabled,
-                    onChanged = { checked, _ -> settings.setMerchantEndTimeEnabled(checked); checked }))
             }, itemComposer)
         }
         val styleRows = listOf(

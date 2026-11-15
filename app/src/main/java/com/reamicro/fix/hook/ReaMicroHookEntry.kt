@@ -267,11 +267,6 @@ class ReaMicroHookEntry {
                 },
             ).install() }
         }
-        installFeature("TravelingMerchantEndTimeHook") {
-            HookRuntime.withFeatureGate({ moduleSettings.snapshot().merchantEndTimeEnabled }) {
-                TravelingMerchantEndTimeHook(classLoader).install()
-            }
-        }
         installFeature("LocalExportHook") {
             HookRuntime.withFeatureGate({ moduleSettings.snapshot().bookLocalExportEnabled }) { LocalExportHook(
                 classLoader = classLoader,

@@ -4,14 +4,13 @@ import com.reamicro.fix.xposed.HookRuntime
 import java.lang.reflect.Modifier
 
 internal object HostHomeBindings {
-    val QUERY_KEYS = setOf("home.preferences", "home.bookshelf", "home.header", "home.merchant")
+    val QUERY_KEYS = setOf("home.preferences", "home.bookshelf", "home.header")
     @Volatile private var contracts: Map<String, Contract> = emptyMap()
     @Volatile private var descriptors: Map<String, Map<String, String>> = emptyMap()
     @Volatile var initializationAttempted = false; private set
     val preferences get() = contracts["preferences"]
     val bookshelf get() = contracts["bookshelf"]
     val header get() = contracts["header"]
-    val merchant get() = contracts["merchant"]
     fun boundDescriptors() = descriptors.mapValues { it.value.toMap() }
     fun initialize(loader: ClassLoader, apk: String, dataDir: String) {
         initializationAttempted = true; contracts = emptyMap(); descriptors = emptyMap()
@@ -80,10 +79,6 @@ internal object HostHomeBindings {
         val required = linkedSetOf<String>()
         fun keys(prefix: String, names: String) { names.split(' ').filter(String::isNotEmpty).forEach { required += "$prefix:$it" } }
         when (group) {
-            "merchant" -> {
-                keys("class", "trip composer"); keys("method", "cards row"); keys("field", "endTime")
-                keys("value", "trip duration changed defaults")
-            }
             "preferences" -> {
                 keys("class", "session key store flow preferences continuation")
                 keys("constructor", "key"); keys("field", "store token key.name")
@@ -114,16 +109,6 @@ internal object HostHomeBindings {
         val any = Any::class.java; val int = Int::class.javaPrimitiveType!!; val bool = Boolean::class.javaPrimitiveType!!
         val float = Float::class.javaPrimitiveType!!; val long = Long::class.javaPrimitiveType!!
         when (group) {
-            "merchant" -> {
-                field("endTime", "trip", long)
-                val cards = s.method("cards"); val row = s.method("row")
-                check(Modifier.isStatic(cards.modifiers) && cards.returnType == Void.TYPE && cards.parameterTypes[s.index("trip")] == s.type("trip"))
-                check(Modifier.isStatic(row.modifiers) && row.returnType == Void.TYPE && row.parameterTypes[s.index("duration")] == String::class.java)
-                val composer = row.parameterTypes.indexOf(s.type("composer"))
-                check(s.index("duration") in 0 until composer && s.index("duration") < 10 &&
-                    s.index("changed") == composer + 1 && s.index("defaults") == composer + 2 &&
-                    row.parameterTypes.drop(composer + 1) == listOf(int, int))
-            }
             "preferences" -> {
                 field("store", "session", s.type("store")); field("token", "session", String::class.java); field("key.name", "key", String::class.java)
                 check(s.constructor("key").declaringClass == s.type("key") && s.constructor("key").parameterTypes.toList() == listOf(String::class.java))

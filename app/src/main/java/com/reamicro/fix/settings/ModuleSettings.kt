@@ -36,7 +36,6 @@ object ModuleSettings {
     const val KEY_SHELF_SKIP_COMPLETED = "shelf_skip_completed"
     const val KEY_HOME_DEFAULT_PAGE_ENABLED = "home_default_page_enabled"
     const val KEY_ONLINE_DISCOVER_ENABLED = "online_discover_enabled"
-    const val KEY_MERCHANT_END_TIME_ENABLED = "merchant_end_time_enabled"
     const val KEY_BOOK_IMAGE_SELECTION_ENABLED = "book_image_selection_enabled"
     const val KEY_BOOK_LOCAL_EXPORT_ENABLED = "book_local_export_enabled"
     const val KEY_BOOK_BACKUP_SCROLL_ENABLED = "book_backup_scroll_enabled"
@@ -239,7 +238,6 @@ data class ModuleSettingsSnapshot(
     val shelfSkipCompleted: Boolean = false,
     val homeDefaultPageEnabled: Boolean = true,
     val onlineDiscoverEnabled: Boolean = true,
-    val merchantEndTimeEnabled: Boolean = true,
     val bookImageSelectionEnabled: Boolean = true,
     val bookLocalExportEnabled: Boolean = true,
     val bookBackupScrollEnabled: Boolean = true,

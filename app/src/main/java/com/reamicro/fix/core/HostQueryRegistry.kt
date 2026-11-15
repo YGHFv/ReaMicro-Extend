@@ -24,7 +24,6 @@ internal object HostQueryRegistry {
         "graphics.vector",
         "home.bookshelf",
         "home.header",
-        "home.merchant",
         "home.preferences",
         "home.search",
         "integration.activity",

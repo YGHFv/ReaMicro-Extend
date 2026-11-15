@@ -32,29 +32,8 @@ internal object HostHomeQueries {
             "preferences" -> preferences()
             "bookshelf" -> bookshelf()
             "header" -> header()
-            "merchant" -> merchant()
             else -> error("Unknown home group: $group")
         }
-        private fun merchant(): Map<String, String> = buildMap {
-            val owner = P + "ui.shrine.components.TravelingMerchantSheetKt"
-            val trip = type(P + "data.res.community.TravelingMerchantTrip")
-            val cards = method(owner, "MerchantTripBusinessCards")
-            val row = method(owner, "MerchantLoadoutRow")
-            val end = base.getValue("field:${P}data.res.community.TravelingMerchantTrip#endTime")
-            fun contains(value: HostDexCalls.Value, text: String): Boolean = value == HostDexCalls.Text(text) ||
-                value is HostDexCalls.Call && value.arguments.any { contains(it, text) }
-            val call = flow.calls(cards.descriptor).filter { it.descriptor == row.descriptor }.single()
-            val duration = call.arguments.indices.single { contains(call.arguments[it], "约 ") && contains(call.arguments[it], " 个月") }
-            check(row.paramTypeNames[duration] == "java.lang.String")
-            val composerIndex = row.paramTypeNames.indices.single { row.paramTypeNames[it] == composer.name }
-            check(duration < composerIndex && row.paramTypeNames.drop(composerIndex + 1) == listOf("int", "int"))
-            put("class:trip", trip.descriptor); put("class:composer", composer.descriptor)
-            put("method:cards", cards.descriptor); put("method:row", row.descriptor); put("field:endTime", end)
-            put("value:trip", cards.paramTypeNames.indices.single { cards.paramTypeNames[it] == trip.name }.toString())
-            put("value:duration", duration.toString()); put("value:changed", (composerIndex + 1).toString())
-            put("value:defaults", (composerIndex + 2).toString())
-        }
-
         private fun preferences(): Map<String, String> = buildMap {
             val key = type("ReaMicroHost.PreferenceKey")
             val continuation = type("kotlin.coroutines.Continuation")
