@@ -105,6 +105,25 @@ class ApiServerSettingsStore(private val contextProvider: () -> Context?) {
     private fun prefs(): SharedPreferences? =
         contextProvider()?.applicationContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    /** 跨设备备份先解开本机 Keystore，外层账号信封负责传输加密。 */
+    internal fun portableSyncValues(): Map<String, Any?> = synchronized(WRITE_LOCK) {
+        val values = prefs()?.all.orEmpty().filterKeys { it != KEY_CACHED_META }.toMutableMap()
+        for (name in listOf(KEY_API_KEY, KEY_ACCOUNT_PASSWORD)) {
+            val encrypted = values[name] as? String ?: continue
+            val plain = decrypt(encrypted)
+            check(encrypted.isBlank() || plain.isNotBlank()) { "API 凭据无法解密，未生成备份" }
+            values[name] = plain
+        }
+        values
+    }
+
+    /** 在任何本机写入前准备新设备的密文，失败时保持原配置。 */
+    internal fun preparePortableSyncValues(values: Map<String, Any>): Map<String, Any> = synchronized(WRITE_LOCK) {
+        values.mapValues { (name, value) ->
+            if (name in listOf(KEY_API_KEY, KEY_ACCOUNT_PASSWORD)) encrypt(value as String) else value
+        }
+    }
+
     private fun encrypt(value: String): String {
         if (value.isBlank()) return ""
         return runCatching {

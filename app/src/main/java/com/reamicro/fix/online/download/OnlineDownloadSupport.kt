@@ -123,8 +123,9 @@ internal fun onlineChapterUpdatePlan(
     remoteChapters: List<OnlineChapter>,
 ): Pair<List<String>, List<Int>> {
     val indexed = readOnlineCompletionChapterIndex(bookDir)
-    val stored = indexed.ifEmpty { readLegacyOnlineCompletionChapters(bookDir) }
-    if (stored.isEmpty()) error("未找到本地图书章节索引，暂不能安全更新")
+    val bootstrap = com.reamicro.fix.cloud.webdav.OnlineBookSyncMarker.needsSourceCatalog(bookDir)
+    val stored = if (bootstrap) emptyList() else indexed.ifEmpty { readLegacyOnlineCompletionChapters(bookDir) }
+    if (stored.isEmpty() && !bootstrap) error("未找到本地图书章节索引，暂不能安全更新")
     val remote = remoteChapters.map { chapter ->
         RemoteOnlineChapter(
             sourceChapterId = OnlineChapterUpdatePlanner.stableSourceChapterId(chapter.url),
@@ -134,7 +135,7 @@ internal fun onlineChapterUpdatePlan(
     }
     val plan = OnlineChapterUpdatePlanner.plan(stored, remote)
     val matchedCount = plan.count { it.stored != null }
-    OnlineChapterUpdatePlanner.requireSafeUpdate(stored, remote, plan)
+    if (!bootstrap) OnlineChapterUpdatePlanner.requireSafeUpdate(stored, remote, plan)
     val usedHrefs = stored.mapTo(linkedSetOf()) { it.href }
     val maxFileNumber = File(bookDir, "OEBPS/Text").listFiles()
         ?.mapNotNull { file ->

@@ -77,6 +77,9 @@ internal object HostSyncBindings {
             val count = values["value:retentionBaselineConstructors"]?.toIntOrNull() ?: 0
             check(count in 1..4)
             repeat(count) { add("constructor:retentionBaselineBook$it") }
+            addAll(listOf("method:onlinePack", "method:onlineUnpack", "method:onlineRestore",
+                "class:onlineSyncBook", "class:onlineMetadata", "field:onlineSyncBook.metadata", "field:onlineMetadata.uuid",
+                "value:onlineRestore.book", "value:onlineRestore.uid"))
         }
         check(values.keys == required) { "Incomplete sync contract: missing=${required - values.keys}, extra=${values.keys - required}" }
         val m = Contract(HostRuntimeBindings.Members(values, loader), values)
@@ -85,6 +88,14 @@ internal object HostSyncBindings {
         val int = java.lang.Integer.TYPE
         val long = java.lang.Long.TYPE
         val config = m.type("config")
+        check(m.method("onlinePack").parameterTypes.toList() == listOf(m.type("file"), m.type("file"), Set::class.java) &&
+            Modifier.isStatic(m.method("onlinePack").modifiers))
+        check(m.method("onlineUnpack").parameterTypes.take(2) == listOf(m.type("file"), m.type("file")) &&
+            m.method("onlineUnpack").parameterTypes[2].isInterface && Modifier.isStatic(m.method("onlineUnpack").modifiers))
+        check(m.field("onlineSyncBook.metadata").type == m.type("onlineMetadata") &&
+            m.field("onlineMetadata.uuid").type == string)
+        check(m.method("onlineRestore").parameterTypes[m.number("onlineRestore.book")] == m.type("onlineSyncBook") &&
+            m.method("onlineRestore").parameterTypes[m.number("onlineRestore.uid")] == long)
         val revision = m.type("retentionRevision")
         check(m.method("retentionEquals").let { it.declaringClass == revision &&
             it.parameterTypes.toList() == listOf(any) && it.returnType == java.lang.Boolean.TYPE })

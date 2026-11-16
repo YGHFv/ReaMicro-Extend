@@ -1860,6 +1860,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
             commit = commit,
             checkCurrent = ::checkCurrent,
         )
+        markOnlineEpubChanged(request.bookDir.name, identity, ::checkCurrent)
         OnlineOnDemandMetadataStore.update(request.bookDir, commit = commit, checkCurrent = ::checkCurrent) { latest ->
             latest.updateChapter(request.chapterIndex) {
                 it.markReady(System.currentTimeMillis())

@@ -116,6 +116,40 @@ internal object HostSyncQueries {
         val file = type("file", requireNotNull(putFile.paramTypes[1]))
         method("toFile", file.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) && it.paramCount == 0 &&
             it.returnTypeName == "java.io.File" }.one("sync platform file"))
+        val pack = method("onlinePack", planner.invokes.filter {
+            Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
+                it.paramTypeNames == listOf(file.name, file.name, "java.util.Set") &&
+                it.invokes.any { call -> call.returnTypeName == "java.io.File" }
+        }.one("sync EPUB packaging"))
+        check(pack.usingStrings.contains("/")) { "EPUB packaging path contract differs" }
+        val restoreBook = method("onlineRestore", anchor(bridge, "EPUB 校验失败，保留本地书籍")
+            .one("sync restore book"))
+        val unpack = method("onlineUnpack", anchor(bridge, "Skip unreadable EPUB entry while extracting: ")
+            .one("sync EPUB extraction"))
+        // 恢复协程分支复杂，调用关系直接检查 DEX 指令，不依赖参数流分析的可达性。
+        val dex = HostDexIndex.forApk(apk)
+        fun invokedBy(descriptor: String) = (dex.method(descriptor).implementation?.instructions ?: emptyList()).mapNotNull { instruction ->
+            val ref = (instruction as? com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction)
+                ?.reference as? com.android.tools.smali.dexlib2.iface.reference.MethodReference
+            ref?.let { "${it.definingClass}->${it.name}(${it.parameterTypes.joinToString("")})${it.returnType}" }
+        }
+        val restoreInvokes = invokedBy(restoreBook.descriptor)
+        check(unpack.descriptor in restoreInvokes || restoreInvokes.filter {
+            it.startsWith(unpack.descriptor.substringBefore("->") + "->") &&
+                it.contains("(${file.descriptor}${file.descriptor}") && it.endsWith(")V")
+        }.any { unpack.descriptor in invokedBy(it) }) {
+            "Sync restore does not call the queried EPUB extractor or its default-argument wrapper"
+        }
+        val syncBook = type("onlineSyncBook", requireNotNull(anchor(bridge, "S3SyncBook(book=")
+            .one("sync book record").declaredClass))
+        val metadata = type("onlineMetadata", requireNotNull(anchor(bridge, "S3SyncBookMetadata(uuid=")
+            .one("sync metadata record").declaredClass))
+        val onlineProperties = HostRecordQueries.query(apk, mapOf("class:onlineSyncBook" to syncBook.descriptor,
+            "class:onlineMetadata" to metadata.descriptor))
+        out["field:onlineSyncBook.metadata"] = onlineProperties.getValue("field:onlineSyncBook#book")
+        out["field:onlineMetadata.uuid"] = onlineProperties.getValue("field:onlineMetadata#uuid")
+        out["value:onlineRestore.book"] = restoreBook.paramTypeNames.indexOf(syncBook.name).also { check(it >= 0) }.toString()
+        out["value:onlineRestore.uid"] = restoreBook.paramTypeNames.indexOf("long").also { check(it >= 0) }.toString()
 
         val save = method("saveLocal", anchor(bridge, "请先完成 S3 配置").filter {
             it.paramCount == 3 && it.paramTypeNames.take(2) == listOf("long", config.name) && !Modifier.isStatic(it.modifiers)

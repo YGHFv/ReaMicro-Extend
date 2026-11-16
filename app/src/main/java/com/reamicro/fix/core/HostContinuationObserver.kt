@@ -14,7 +14,7 @@ internal object HostContinuationObserver {
         ModuleResources.cleanup { synchronized(cache) { cache.clear() } }
     }
 
-    fun observe(loader: ClassLoader, completion: Any, completed: () -> Unit): Any {
+    fun observe(loader: ClassLoader, completion: Any, successOnly: Boolean = false, completed: () -> Unit): Any {
         val host = requireNotNull(HostRuntimeBindings.coroutines) { "Native coroutine protocol unavailable" }
         check(host.loader === loader) { "Coroutine contract belongs to another host loader" }
         val continuation = host.type("continuation")
@@ -28,7 +28,9 @@ internal object HostContinuationObserver {
                     try {
                         invoke { resume.invoke(completion, args?.getOrNull(0)) }
                     } finally {
-                        runCatching(completed).onFailure {
+                        runCatching {
+                            if (!successOnly || args?.getOrNull(0)?.let(host.type("failure")::isInstance) != true) completed()
+                        }.onFailure {
                             HookRuntime.logError("ReaMicro native continuation observation failed", it)
                         }
                     }

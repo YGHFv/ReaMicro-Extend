@@ -203,6 +203,16 @@ object OnlineSourceStore {
         listeners.forEach { listener -> runCatching(listener) }
     }
 
+    /** 手动恢复与书源结果提交互斥，旧网络任务失去版本后不能覆盖新配置。 */
+    internal fun <T> restoreConfiguration(action: () -> T): T {
+        return try { synchronized(mutationLock) {
+            sequence.incrementAndGet()
+            revisions.clear()
+            snapshots.clear()
+            try { action() } finally { snapshots.clear(); sequence.incrementAndGet() }
+        } } finally { notifyChanged() }
+    }
+
     fun cached(context: Context?): List<OnlineSourceEntry>? {
         context ?: return null
         return snapshots[sourceDir(context).absolutePath]?.map { OnlineSourceDownloadPolicyStore.attach(context, it) }

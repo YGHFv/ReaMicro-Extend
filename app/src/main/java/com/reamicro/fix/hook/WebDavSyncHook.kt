@@ -9,6 +9,11 @@ import com.reamicro.fix.cloud.webdav.WebDavSyncProtocol
 import com.reamicro.fix.cloud.webdav.WebDavSyncTransport
 import com.reamicro.fix.cloud.webdav.ShelfSyncTransport
 import com.reamicro.fix.cloud.webdav.ShelfSyncRetention
+import com.reamicro.fix.cloud.webdav.ModuleConfigSyncSettings
+import com.reamicro.fix.cloud.webdav.ModuleConfigStore
+import com.reamicro.fix.cloud.webdav.ModuleConfigRemote
+import com.reamicro.fix.cloud.webdav.OnlineBookSyncMarker
+import com.reamicro.fix.core.HostContinuationObserver
 import com.reamicro.fix.cloud.github.GitHubSyncProtocol
 import com.reamicro.fix.cloud.github.GitHubSyncTransport
 import com.reamicro.fix.cloud.github.GitHubTokenCipher
@@ -34,6 +39,7 @@ internal class WebDavSyncHook(
     private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { Thread(it, "ReaMicroWebDavSync").apply { isDaemon = true } }
     private val configuring = AtomicBoolean()
+    private val moduleConfigBusy = AtomicBoolean()
     @Volatile private var retiredState: ShelfSyncRetiredState? = null
     private var retentionScope: List<Any?>? = null
     private val baselineRevisionOwners = arrayListOf<Pair<java.lang.ref.WeakReference<Any>, String>>()
@@ -65,6 +71,7 @@ internal class WebDavSyncHook(
             configurationUi.install(::hook)
             hookRetentionGuard()
             hookTransport()
+            hookOnlineSyncMarkers()
             hookLocalConfigSave()
             // 关闭扩展后暂停标记配置，不能落回 AWS 签名并把 WebDAV 密码发给别的服务。
             hook(contract.method("isConfigured"), object : HookCallback() {
@@ -84,6 +91,25 @@ internal class WebDavSyncHook(
                 it.feature == "WebDavSyncHook" && it.name == "nativeConfigurationRoute" && it.ok
             }) { "Native WebDAV configuration route did not install" }
             hookEntry()
+            val configAction: (Boolean) -> Unit = ::requestModuleConfiguration
+            ModuleConfigSyncActions.request = configAction
+            com.reamicro.fix.reload.ModuleResources.cleanup {
+                if (ModuleConfigSyncActions.request === configAction) ModuleConfigSyncActions.request = null
+            }
+            val sourceObserver = com.reamicro.fix.online.OnlineSourceStore.observeChanges {
+                worker.execute {
+                    val activity = activityProvider() ?: return@execute
+                    val identity = AccountHostRuntime.storageSnapshot(activity) ?: return@execute
+                    val root = File(activity.filesDir, "${identity.accountId}/books").canonicalFile
+                    root.listFiles().orEmpty().filter(File::isDirectory).forEach { book ->
+                        runCatching {
+                            if (book.canonicalFile.parentFile == root && OnlineBookSyncMarker.uuid(book) == book.name)
+                                drive.refreshReceivedOnlineSyncBook(book.name, identity)
+                        }.onFailure { HookRuntime.logAlways("在线同步标记等待书源就绪后重试") }
+                    }
+                }
+            }
+            com.reamicro.fix.reload.ModuleResources.cleanup { sourceObserver.close() }
             HookRuntime.logAlways("ReaMicro WebDAV/GitHub shelf sync installed: native manifest/merge/transport")
         } catch (error: Throwable) {
             handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
@@ -300,11 +326,197 @@ internal class WebDavSyncHook(
                     // 使用宿主协程恢复协议，不在主线程执行同步网络请求。
                     suspendOperation(param) {
                         check(enabled(config)) { "此同步开关已关闭" }
+                        if ((args[0] as? String)?.endsWith("/manifest.cbor") == true &&
+                            operation in listOf("getContent", "head", "putBytes", "putProgress")) {
+                            prepareOnlineSyncPolicy(config)
+                            backupModuleConfiguration(config)
+                        }
                         execute(operation, retentionTransport(config), args)
                     }
                 }
             })
             HookRuntime.deoptimize(implementation)
+        }
+    }
+
+    private fun prepareOnlineSyncPolicy(config: Any) {
+        val activity = activityProvider() ?: return
+        val identity = AccountHostRuntime.storageSnapshot(activity) ?: return
+        val preferences = activity.getSharedPreferences(com.reamicro.fix.cloud.webdav.ModuleConfigPolicy.PREFS, 0)
+        val state = ModuleConfigSyncSettings(activity)
+        val skip = state.skipOnlineBooks
+        val progressOnly = skip && state.onlineProgressOnly
+        val key = "online_policy_" + com.reamicro.fix.cloud.webdav.ModuleConfigCrypto.digest(
+            (listOf(identity.accountId) + listOf("bucket", "endpoint", "prefix", "accessKey").map {
+                contract.config(config, it)
+            }).joinToString("|").toByteArray(Charsets.UTF_8))
+        val changed = preferences.getBoolean(key, false) != skip ||
+            preferences.getBoolean("${key}_progress", false) != progressOnly
+        val root = File(activity.filesDir, "${identity.accountId}/books").canonicalFile
+        root.listFiles().orEmpty().filter(File::isDirectory).forEach { book ->
+            check(AccountHostRuntime.isCurrentStorage(identity, activity)) { "账号状态已变化" }
+            if (book.canonicalFile.parentFile == root &&
+                ((changed && OnlineBookSyncMarker.metadata(book) != null) || File(book, ONLINE_EPUB_SYNC_PENDING).isFile))
+                drive.markOnlineEpubChanged(book.name, identity)
+        }
+        AccountHostRuntime.withCurrentStorage(identity, activity) {
+            check(preferences.edit().putBoolean(key, skip).putBoolean("${key}_progress", progressOnly).commit())
+        }
+    }
+
+    private fun hookOnlineSyncMarkers() {
+        val pack = contract.method("onlinePack")
+        hook(pack, object : HookCallback() {
+            override fun after(param: Call) {
+                if (param.throwable != null) return
+                val activity = activityProvider() ?: return
+                if (!ModuleConfigSyncSettings(activity).skipOnlineBooks) return
+                val identity = AccountHostRuntime.storageSnapshot(activity) ?: return
+                val root = (contract.method("toFile").invoke(param.args[0]) as File).canonicalFile
+                val output = contract.method("toFile").invoke(param.args[1]) as File
+                if (root.parentFile != File(activity.filesDir, "${identity.accountId}/books").canonicalFile ||
+                    output.name != "s3-sync-${root.name}.epub") return
+                try {
+                    val bucket = nativeValues(identity.session)["s3_sync_bucket"]
+                    if (bucket !in setOf(WebDavSyncProtocol.BUCKET, GitHubSyncProtocol.BUCKET)) return
+                    check(AccountHostRuntime.isCurrentStorage(identity, activity))
+                    OnlineBookSyncMarker.write(root, root.name, output, ModuleConfigSyncSettings(activity).onlineProgressOnly)
+                } catch (error: Throwable) { param.throwable = error }
+            }
+        })
+        HookRuntime.deoptimize(pack)
+        val unpack = contract.method("onlineUnpack")
+        hook(unpack, object : HookCallback() {
+            override fun after(param: Call) {
+                if (param.throwable != null) return
+                val activity = activityProvider() ?: return
+                val identity = AccountHostRuntime.storageSnapshot(activity) ?: return
+                val archive = contract.method("toFile").invoke(param.args[0]) as File
+                if (!archive.name.startsWith("s3-restore-")) return
+                val incoming = (contract.method("toFile").invoke(param.args[1]) as File).canonicalFile
+                try {
+                    val uuid = OnlineBookSyncMarker.uuid(incoming) ?: return
+                    check(incoming.name == uuid && AccountHostRuntime.isCurrentStorage(identity, activity))
+                    val local = File(activity.filesDir, "${identity.accountId}/books/$uuid").canonicalFile
+                    if (local.isDirectory) OnlineBookSyncMarker.mergeLocalContent(incoming, local, uuid)
+                } catch (error: Throwable) { param.throwable = error }
+            }
+        })
+        HookRuntime.deoptimize(unpack)
+        val restore = contract.method("onlineRestore")
+        val observationKey = "reamicro.sync.online.restore"
+        hook(restore, object : HookCallback() {
+            override fun before(param: Call) {
+                val identity = AccountHostRuntime.storageSnapshot(activityProvider()) ?: return
+                if ((param.args[contract.number("onlineRestore.uid")] as? Long) != identity.accountId) return
+                val book = param.args[contract.number("onlineRestore.book")] ?: return
+                val metadata = contract.field("onlineSyncBook.metadata").get(book) ?: return
+                val uuid = contract.field("onlineMetadata.uuid").get(metadata) as String
+                val once = AtomicBoolean()
+                val completed: () -> Unit = {
+                    if (once.compareAndSet(false, true)) worker.execute {
+                        runCatching { drive.refreshReceivedOnlineSyncBook(uuid, identity) }
+                            .onFailure { HookRuntime.logAlways("在线图书标记已保留，书源更新待重试") }
+                    }
+                }
+                param.setObjectExtra(observationKey, completed)
+                param.args[param.args.lastIndex] = HostContinuationObserver.observe(loader,
+                    requireNotNull(param.args.last()), successOnly = true, completed = completed)
+            }
+            override fun after(param: Call) {
+                val suspended = requireNotNull(com.reamicro.fix.core.HostRuntimeBindings.coroutines).suspended
+                if (param.throwable == null && param.result !== suspended) {
+                    @Suppress("UNCHECKED_CAST")
+                    (param.getObjectExtra(observationKey) as? (() -> Unit))?.invoke()
+                }
+            }
+        })
+        HookRuntime.deoptimize(restore)
+    }
+
+    private fun backupModuleConfiguration(config: Any) {
+        val activity = activityProvider() ?: return
+        val state = ModuleConfigSyncSettings(activity.applicationContext)
+        if (!state.enabled) return
+        val identity = AccountHostRuntime.snapshot(activity) ?: return
+        runCatching {
+            val selected = state.scopes
+            val plain = ModuleConfigStore(activity.applicationContext).create(identity.accountId, selected)
+            check(AccountHostRuntime.isCurrent(identity, activity) && state.enabled && state.scopes == selected)
+            val remote = guardedConfigTransport(config, identity)
+            ModuleConfigRemote(remote, contract.config(config, "prefix") as String, identity.accountId).upload(plain)
+        }.onFailure {
+            HookRuntime.logAlways("模块配置备份未完成，书架同步继续")
+            toast("模块配置备份未完成：${it.message ?: "请手动重试"}")
+        }
+    }
+
+    private fun guardedConfigTransport(config: Any, identity: AccountHostRuntime.Identity): ShelfSyncTransport {
+        val remote = transport(config)
+        return object : ShelfSyncTransport by remote {
+            private fun verifyCurrent() {
+                check(AccountHostRuntime.isCurrent(identity, activityProvider()) && enabled(config)) { "账号或同步状态已变化" }
+            }
+            override fun get(key: String): com.reamicro.fix.cloud.webdav.WebDavHttpResponse? {
+                verifyCurrent()
+                return remote.get(key).also { verifyCurrent() }
+            }
+            override fun put(key: String, bytes: ByteArray?, file: File?, mime: String, condition: String?) {
+                verifyCurrent()
+                remote.put(key, bytes, file, mime, condition)
+                verifyCurrent()
+            }
+        }
+    }
+
+    private fun requestModuleConfiguration(restore: Boolean) {
+        val activity = activityProvider() ?: return
+        val identity = AccountHostRuntime.snapshot(activity) ?: return toast("请先登录阅微账号")
+        val state = ModuleConfigSyncSettings(activity.applicationContext)
+        if (!state.enabled) return toast("请先开启同步模块配置")
+        if (restore && state.backupOnly) return toast("仅备份已开启，不下发模块配置")
+        if (!moduleConfigBusy.compareAndSet(false, true)) return toast("模块配置操作正在进行")
+        val scopes = state.scopes
+        toast(if (restore) "正在手动获取模块配置" else "正在备份模块配置")
+        worker.execute {
+            val result = runCatching {
+                fun checkCurrent() {
+                    check(AccountHostRuntime.isCurrent(identity, activity) && state.enabled &&
+                        state.scopes == scopes && (!restore || !state.backupOnly)) { "账号或同步配置已变化，操作已停止" }
+                }
+                checkCurrent()
+                val values = nativeValues(identity.session)
+                val config = contract.newConfig(
+                    values["s3_sync_endpoint"] as? String ?: error("请先配置 WebDAV 或 GitHub 同步"),
+                    values["s3_sync_bucket"] as? String ?: "",
+                    values["s3_sync_region"] as? String ?: "auto",
+                    values["s3_sync_access_key"] as? String ?: "",
+                    values["s3_sync_secret_key"] as? String ?: "",
+                    values["s3_sync_prefix"] as? String ?: "reamicro",
+                )
+                check(marked(config) && enabled(config)) { "请先配置并开启 WebDAV 或 GitHub 同步" }
+                val local = ModuleConfigStore(activity.applicationContext)
+                val before = if (restore) local.create(identity.accountId, scopes) else null
+                val remote = ModuleConfigRemote(guardedConfigTransport(config, identity),
+                    contract.config(config, "prefix") as String, identity.accountId)
+                if (restore) {
+                    val plain = remote.download()
+                    checkCurrent()
+                    check(local.create(identity.accountId, scopes).contentEquals(before)) { "获取期间本机配置已修改，未覆盖，请重新获取" }
+                    val count = local.restore(identity.accountId, scopes, plain) { action ->
+                        AccountHostRuntime.withCurrentStorage(identity, activity) { checkCurrent(); action() }
+                    }
+                    "已手动应用 $count 项模块配置"
+                } else {
+                    val plain = local.create(identity.accountId, scopes)
+                    checkCurrent()
+                    if (remote.upload(plain)) "模块配置已加密备份" else "模块配置备份已是最新"
+                }
+            }
+            moduleConfigBusy.set(false)
+            if (AccountHostRuntime.isCurrent(identity, activity)) {
+                result.onSuccess { toast(it) }.onFailure { toast(it.message ?: "模块配置操作失败，未应用") }
+            }
         }
     }
 

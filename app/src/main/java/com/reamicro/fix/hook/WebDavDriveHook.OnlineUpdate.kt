@@ -284,6 +284,7 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
             // The directory is now committed. Late notification/DAO failures must not discard it.
             runCatching { publication?.complete() }
                 .onFailure { HookRuntime.logError("在线更新已提交，旧目录清理失败", it) }
+            markOnlineEpubChanged(latest.callString("getUuid"), storageIdentity, ::checkIdentity)
             runCatching {
                 refreshOnlineCompletionCatalogTables(latest, original, storageIdentity, ::checkIdentity)
                 updateOnlineContentMetadata(latest, target, bookDirectorySize(original), storageIdentity,

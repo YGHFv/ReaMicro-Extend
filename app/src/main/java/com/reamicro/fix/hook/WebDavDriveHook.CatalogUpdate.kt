@@ -3,6 +3,7 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.CatalogTableSync
 import com.reamicro.fix.core.HostCatalogRuntime
 import com.reamicro.fix.core.OnlineBookContentPatch
+import com.reamicro.fix.core.OnlineEpubSyncPatch
 import com.reamicro.fix.core.CatalogSql
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.logging.logWebDav
@@ -74,6 +75,38 @@ internal fun WebDavDriveHook.updateOnlineContentMetadata(
     return findLocalBookById(book.callLong("getId"), storageIdentity, repository, checkCurrent)
         ?.takeIf { it.callString("getUuid") == book.callString("getUuid") }
         ?: error("元数据更新后未找到原书籍")
+}
+
+/** 已发布正文必须先标记，目录刷新失败也不能让同步复用旧 EPUB。 */
+internal const val ONLINE_EPUB_SYNC_PENDING = "META-INF/reamicro-sync-dirty.pending"
+
+internal fun WebDavDriveHook.markOnlineEpubChanged(
+    uuid: String,
+    storageIdentity: AccountHostRuntime.Identity,
+    checkCurrent: () -> Unit = {},
+) {
+    checkCurrent()
+    val context = currentContext() ?: error("Context unavailable")
+    check(AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider())) { "账号状态已变化" }
+    require(uuid.isNotBlank() && uuid !in setOf(".", "..") && uuid.none { it == '/' || it == '\\' || it.isISOControl() })
+    val pending = java.io.File(context.filesDir, "${storageIdentity.accountId}/books/$uuid/$ONLINE_EPUB_SYNC_PENDING")
+    AccountHostRuntime.withCurrentStorage(storageIdentity, activityProvider()) {
+        checkCurrent()
+        // 数据库暂时不可用时保留重试记录，下次同步先补脏位再规划上传。
+        pending.parentFile.mkdirs()
+        pending.writeText("1", Charsets.UTF_8)
+    }
+    val repository = currentBookshelfRepository() ?: error("BookshelfRepository unavailable")
+    val host = requireNotNull(com.reamicro.fix.core.HostStorageBindings.catalog)
+    val dao = requireNotNull(host.field("repository.book").get(repository))
+    HostCatalogRuntime(classLoader).transaction(dao) { sql ->
+        check(OnlineEpubSyncPatch.apply(guardedOnlineCatalogSql(sql, storageIdentity, checkCurrent),
+            storageIdentity.accountId, uuid, System.currentTimeMillis())) { "图书记录已变化，未标记旧图书" }
+    }
+    AccountHostRuntime.withCurrentStorage(storageIdentity, activityProvider()) {
+        checkCurrent()
+        check(!pending.exists() || pending.delete()) { "同步标记已保存，重试记录清理失败" }
+    }
 }
 
 private fun WebDavDriveHook.guardedOnlineCatalogSql(

@@ -191,6 +191,7 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20260719")
+    testImplementation("org.xerial:sqlite-jdbc:3.49.1.0")
 
     implementation(project(":legado-parser"))
     implementation(project(":scripta-editor"))
