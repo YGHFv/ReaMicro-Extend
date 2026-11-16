@@ -21,7 +21,7 @@ dependencies {
     api("com.google.code.gson:gson:2.14.0")
     api("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("androidx.annotation:annotation:1.9.1")
-    implementation("androidx.collection:collection:1.6.0")
+    implementation("androidx.collection:collection:1.7.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("org.jsoup:jsoup:1.16.2")
     implementation("cn.wanghaomiao:JsoupXpath:2.5.5")
