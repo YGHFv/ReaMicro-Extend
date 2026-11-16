@@ -18,7 +18,7 @@ android {
 dependencies {
     api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     api("org.mozilla:rhino:1.8.1")
-    api("com.google.code.gson:gson:2.14.0")
+    api("com.google.code.gson:gson:2.15.0")
     api("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("androidx.annotation:annotation:1.9.1")
     implementation("androidx.collection:collection:1.6.0")
