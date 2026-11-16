@@ -10,7 +10,7 @@ internal class WebDavSyncTransport(
     username: String,
     password: String,
     private val onHttpError: (Int) -> Nothing,
-) {
+) : ShelfSyncTransport {
     private val authorization = if (username.isEmpty() && password.isEmpty()) emptyMap() else mapOf(
         "Authorization" to "Basic " + Base64.encodeToString(
             "$username:$password".toByteArray(Charsets.UTF_8), Base64.NO_WRAP,
@@ -32,7 +32,7 @@ internal class WebDavSyncTransport(
             outputFile = output, binary = method == "GET" && output == null, captureHeaders = true)
     }
 
-    fun get(key: String): WebDavHttpResponse? {
+    override fun get(key: String): WebDavHttpResponse? {
         val response = request("GET", key)
         if (response.code == 404) return null
         checkStatus(response)
@@ -41,24 +41,24 @@ internal class WebDavSyncTransport(
         return response
     }
 
-    fun head(key: String): WebDavHttpResponse? {
+    override fun head(key: String): WebDavHttpResponse? {
         val response = request("HEAD", key)
         if (response.code == 404) return null
         checkStatus(response)
         return response
     }
 
-    fun put(key: String, bytes: ByteArray?, file: File?, mime: String, condition: String?) {
+    override fun put(key: String, bytes: ByteArray?, file: File?, mime: String, condition: String?) {
         ensureParents(key)
         checkStatus(request("PUT", key, bytes, file, mime, condition))
     }
 
-    fun delete(key: String) {
+    override fun delete(key: String) {
         val response = request("DELETE", key)
         if (response.code != 404) checkStatus(response)
     }
 
-    fun download(key: String, output: File) {
+    override fun download(key: String, output: File) {
         val parent = requireNotNull(output.parentFile)
         check(parent.isDirectory || parent.mkdirs()) { "无法创建同步下载目录" }
         val temp = File.createTempFile("webdav-sync-", ".part", parent)
@@ -71,7 +71,7 @@ internal class WebDavSyncTransport(
     }
 
     /** 在用户保存时仅探测随机私有对象，校验两种条件写并清理，不访问书架清单。 */
-    fun verify() {
+    override fun verify() {
         val key = ".reamicro-webdav-probe-${UUID.randomUUID()}/test.bin"
         try {
             put(key, byteArrayOf(0, 1, 2, -1), null, "application/octet-stream", "*")

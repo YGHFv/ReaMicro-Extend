@@ -11,7 +11,14 @@ internal class WebDavSyncConfigurationPage(
     private val onClosed: () -> Unit,
     private val native: HostWebDavConfigurationUi,
     private val isCurrentOwner: () -> Boolean,
+    val github: Boolean = false,
 ) {
+    val providerName: String get() = if (github) "GitHub" else "WebDAV"
+    fun label(key: String): String = if (github) when (key) {
+        "address" -> "私有仓库"
+        "username" -> "分支（留空使用默认分支）"
+        else -> "Token"
+    } else when (key) { "address" -> "地址"; "username" -> "用户名"; else -> "密码" }
     data class Credentials(val address: String, val username: String, val password: String) {
         override fun toString(): String = "WebDavCredentials(redacted)"
     }
@@ -34,7 +41,10 @@ internal class WebDavSyncConfigurationPage(
         return Credentials(host.config(value, "endpoint") as String, host.config(value, "accessKey") as String, host.config(value, "secretKey") as String)
     }
     fun readOnly(): Boolean = canceled || closed || !isCurrentOwner() || ui.stateValue(busy) == true
-    fun canSave(): Boolean = !readOnly() && WebDavConfigurationState.ready(draft().address)
+    fun canSave(): Boolean = !readOnly() && if (github) {
+        val value = draft()
+        value.address.isNotBlank() && value.password.isNotBlank()
+    } else WebDavConfigurationState.ready(draft().address)
     fun submit() { if (canSave()) onSave(draft()) }
     fun change(key: String, value: String) {
         if (readOnly()) return

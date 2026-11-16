@@ -2,6 +2,7 @@ package com.reamicro.fix.hook
 
 import android.util.Base64
 import com.reamicro.fix.cloud.webdav.WebDavSyncProtocol
+import com.reamicro.fix.cloud.github.GitHubSyncProtocol
 import org.json.JSONObject
 
 /** Connection and remote reconciliation state travel together; device id and Wi-Fi policy stay on this device. */
@@ -9,7 +10,7 @@ internal class AccountSyncPreferences private constructor(private val entries: M
     fun values(): Map<String, Any?> = entries.mapValues { (_, value) ->
         if (value is ByteArray) value.copyOf() else value
     }.let { values ->
-        if (values["s3_sync_bucket"] == WebDavSyncProtocol.BUCKET)
+        if (values["s3_sync_bucket"] in setOf(WebDavSyncProtocol.BUCKET, GitHubSyncProtocol.BUCKET))
             values + ("s3_sync_cloud_config_enabled" to false)
         else values
     }
@@ -56,7 +57,7 @@ internal class AccountSyncPreferences private constructor(private val entries: M
             val before = previous.values()
             // Old account credentials carry no S3 snapshot. Keep native device connection behavior,
             // but never reuse another account's merge baseline, deletion queue or module WebDAV login.
-            return if (before["s3_sync_bucket"] == WebDavSyncProtocol.BUCKET) {
+            return if (before["s3_sync_bucket"] in setOf(WebDavSyncProtocol.BUCKET, GitHubSyncProtocol.BUCKET)) {
                 KEYS.associateWith { if (it == "s3_sync_cloud_config_enabled") false else null }
             } else before + mapOf("s3_sync_baseline_cbor" to null, "s3_sync_pending_deletions" to null)
         }

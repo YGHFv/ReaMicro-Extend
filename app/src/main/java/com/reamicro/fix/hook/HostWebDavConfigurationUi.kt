@@ -17,6 +17,7 @@ internal class HostWebDavConfigurationUi(private val loader: ClassLoader) {
     private val unit get() = HostCoroutines.unit(loader)
     private val pages = ThreadLocal.withInitial { java.util.ArrayDeque<WebDavSyncConfigurationPage>() }
     private val entryDepth = ThreadLocal.withInitial { 0 }
+    private val entryNames = ThreadLocal.withInitial { java.util.ArrayDeque<String>() }
     private val headerDepth = ThreadLocal.withInitial { 0 }
     private val cards = Collections.synchronizedMap(WeakHashMap<Any, WebDavSyncConfigurationPage>())
     private val fields = Collections.synchronizedMap(WeakHashMap<Any, WebDavSyncConfigurationPage>())
@@ -38,9 +39,13 @@ internal class HostWebDavConfigurationUi(private val loader: ClassLoader) {
         pages.get().push(page)
         try { return action() } finally { pages.get().pop() }
     }
-    private fun <T> inEntry(action: () -> T): T {
+    private fun <T> inEntry(name: String = entryNames.get().peek() ?: "WebDAV", action: () -> T): T {
         entryDepth.set(entryDepth.get() + 1)
-        try { return action() } finally { entryDepth.set(entryDepth.get() - 1) }
+        entryNames.get().push(name)
+        try { return action() } finally {
+            entryNames.get().pop()
+            entryDepth.set(entryDepth.get() - 1)
+        }
     }
     fun install(register: (Executable, HookCallback) -> Unit) {
         check(ui.loader === loader)
@@ -86,19 +91,20 @@ internal class HostWebDavConfigurationUi(private val loader: ClassLoader) {
         })
         register(host.method("configurationIcon"), object : HookCallback() {
             override fun before(param: Call) {
-                if (headerDepth.get() > 0 && param.args[1] == "Other S3") param.args[1] = "WebDAV"
+                if (headerDepth.get() > 0 && param.args[1] == "Other S3")
+                    param.args[1] = pages.get().peek()?.providerName ?: return
             }
         })
         register(host.method("configurationField"), object : HookCallback() {
             override fun before(param: Call) {
                 val page = pages.get().peek() ?: param.args.getOrNull(6)?.let(fields::get) ?: return
                 val key = when (param.args[0]) {
-                    "Endpoint", "地址" -> "address"
-                    "Access Key", "用户名" -> "username"
-                    "Secret Key", "密码" -> "password"
+                    "Endpoint", "地址", "私有仓库" -> "address"
+                    "Access Key", "用户名", "分支（留空使用默认分支）" -> "username"
+                    "Secret Key", "密码", "Token" -> "password"
                     else -> return
                 }
-                param.args[0] = when (key) { "address" -> "地址"; "username" -> "用户名"; else -> "密码" }
+                param.args[0] = page.label(key)
                 param.args[3] = page.readOnly()
                 // Other S3 gives Endpoint a multiline field. WebDAV addresses use the same
                 // native single-line geometry as Access Key, including on independent restarts.
@@ -126,8 +132,9 @@ internal class HostWebDavConfigurationUi(private val loader: ClassLoader) {
                 }
                 if (!renderingEntry) return
                 val block = content(original)
+                val name = entryNames.get().peek() ?: "WebDAV"
                 param.args[5] = ui.lambda(0x524d5745, ui.function(ui.type("function3")) { args ->
-                    inEntry { ui.method("invoke3").invoke(block, *(args ?: emptyArray())) }
+                    inEntry(name) { ui.method("invoke3").invoke(block, *(args ?: emptyArray())) }
                 })
             }
         })
@@ -136,20 +143,29 @@ internal class HostWebDavConfigurationUi(private val loader: ClassLoader) {
                 if (!renderingEntry && headerDepth.get() == 0) return
                 val text = param.args.getOrNull(0) as? String ?: return
                 if (text == "Other S3" || text.contains("其他") && text.contains("S3")) {
-                    param.args[0] = "WebDAV"
+                    param.args[0] = entryNames.get().peek() ?: pages.get().peek()?.providerName ?: "WebDAV"
                     param.args[17] = (param.args[17] as Int) and 14.inv()
                 }
+            }
+        })
+        register(ui.method("text"), object : HookCallback() {
+            override fun before(param: Call) {
+                val page = pages.get().peek() ?: return
+                if (!page.github || param.args[0] != host.text("configurationDescription")) return
+                param.args[0] = "使用 GitHub 私有仓库同步书架、阅读进度和书籍。仓库填写 所有者/仓库 或 GitHub 地址，分支留空使用默认分支。" +
+                    "Token 需要 Contents 读写或 repo 权限。请先在仓库创建一次提交；单个文件最大 40 MiB。保存后使用阅微原生同步。"
+                param.args[17] = (param.args[17] as Int) and 14.inv()
             }
         })
         listOf("configurationBody", "configurationSaveBar", "configurationCard", "configurationHeader", "configurationHeaderRestart",
             "configurationField", "configurationSurface", "configurationIcon", "otherProvider").forEach { HookRuntime.deoptimize(host.method(it)) }
         ModuleResources.cleanup {
             cards.clear(); fields.clear(); headerRestarts.clear()
-            pages.remove(); entryDepth.remove(); headerDepth.remove()
+            pages.remove(); entryDepth.remove(); entryNames.remove(); headerDepth.remove()
         }
     }
 
-    fun renderEntry(click: Any, composer: Any) = inEntry {
+    fun renderEntry(click: Any, composer: Any, name: String = "WebDAV") = inEntry(name) {
         host.method("otherProvider").invoke(null, click, composer, 0)
     }
 
@@ -159,7 +175,7 @@ internal class HostWebDavConfigurationUi(private val loader: ClassLoader) {
 
     fun render(page: WebDavSyncConfigurationPage, composer: Any) {
         val top = ui.lambda(0x524d5754, ui.callback(ui.type("function2")) { args ->
-            host.method("configurationTopBar").invoke(null, "配置WebDAV", null, null, null, null, 0L,
+            host.method("configurationTopBar").invoke(null, "配置${page.providerName}", null, null, null, null, 0L,
                 null, null, requireNotNull(args?.getOrNull(0)), 6, 254)
         })
         val click = ui.callback(ui.type("function0")) { page.submit() }

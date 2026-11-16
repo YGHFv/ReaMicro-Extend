@@ -7,6 +7,10 @@ import com.reamicro.fix.cloud.webdav.NativeHostHttp
 import com.reamicro.fix.cloud.webdav.CleartextScope
 import com.reamicro.fix.cloud.webdav.WebDavSyncProtocol
 import com.reamicro.fix.cloud.webdav.WebDavSyncTransport
+import com.reamicro.fix.cloud.webdav.ShelfSyncTransport
+import com.reamicro.fix.cloud.github.GitHubSyncProtocol
+import com.reamicro.fix.cloud.github.GitHubSyncTransport
+import com.reamicro.fix.cloud.github.GitHubTokenCipher
 import com.reamicro.fix.core.HostCoroutines
 import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.core.HostSyncBindings
@@ -60,7 +64,13 @@ internal class WebDavSyncHook(
             // 关闭扩展后暂停标记配置，不能落回 AWS 签名并把 WebDAV 密码发给别的服务。
             hook(contract.method("isConfigured"), object : HookCallback() {
                 override fun before(param: Call) {
-                    if (marked(param.thisObject) && !settingsProvider().canRunWebDavSync) param.result = false
+                    val config = param.thisObject
+                    if (!marked(config)) return
+                    if (!settingsProvider().canRunWebDavSync) param.result = false
+                    // GitHub 默认分支允许留空，不能沿用原生 S3 对 Access Key 的非空检查。
+                    else if (contract.config(requireNotNull(config), "bucket") == GitHubSyncProtocol.BUCKET)
+                        param.result = (contract.config(config, "endpoint") as String).isNotBlank() &&
+                            (contract.config(config, "secretKey") as String).isNotBlank()
                 }
             })
             HookRuntime.deoptimize(contract.method("isConfigured"))
@@ -69,7 +79,7 @@ internal class WebDavSyncHook(
                 it.feature == "WebDavSyncHook" && it.name == "nativeConfigurationRoute" && it.ok
             }) { "Native WebDAV configuration route did not install" }
             hookEntry()
-            HookRuntime.logAlways("ReaMicro WebDAV shelf sync installed: native manifest/merge/transport")
+            HookRuntime.logAlways("ReaMicro WebDAV/GitHub shelf sync installed: native manifest/merge/transport")
         } catch (error: Throwable) {
             handles.asReversed().forEach { runCatching { it.unhook() }.onFailure(error::addSuppressed) }
             handles.clear()
@@ -89,6 +99,8 @@ internal class WebDavSyncHook(
                     if (settingsProvider().canRunWebDavSync) {
                         renderEntry(composer)
                         configurationUi.entryGap(composer)
+                        renderEntry(composer, true)
+                        configurationUi.entryGap(composer)
                     }
                 } finally {
                     nativeUi.instance("endGroup", composer, false)
@@ -99,15 +111,34 @@ internal class WebDavSyncHook(
         HookRuntime.deoptimize(contract.method("providerChoices"))
     }
 
-    private fun renderEntry(composer: Any) {
-        val click = nativeUi.callback(contract.type("function0")) { showConfiguration() }
-        configurationUi.renderEntry(click, composer)
+    private fun renderEntry(composer: Any, github: Boolean = false) {
+        val click = nativeUi.callback(contract.type("function0")) { showConfiguration(github) }
+        configurationUi.renderEntry(click, composer, if (github) "GitHub" else "WebDAV")
     }
 
     private fun marked(config: Any?): Boolean = configType.isInstance(config) &&
-        contract.config(requireNotNull(config), "bucket") == WebDavSyncProtocol.BUCKET
+        contract.config(requireNotNull(config), "bucket") in setOf(WebDavSyncProtocol.BUCKET, GitHubSyncProtocol.BUCKET)
 
-    private fun transport(config: Any): WebDavSyncTransport {
+    private fun transport(config: Any): ShelfSyncTransport {
+        if (contract.config(config, "bucket") == GitHubSyncProtocol.BUCKET) {
+            val token = GitHubSyncProtocol.token(GitHubTokenCipher.decrypt(contract.config(config, "secretKey") as String))
+            return GitHubSyncTransport(contract.config(config, "endpoint") as String,
+                contract.config(config, "accessKey") as String, { url, method, body ->
+                    http.request(url, method, mapOf("Authorization" to "Bearer $token",
+                        "Accept" to "application/vnd.github+json", "X-GitHub-Api-Version" to "2022-11-28"),
+                        body?.let { http.stringBody(it.toString(), "application/json") })
+                }) { code ->
+                val message = when (code) {
+                    401 -> "GitHub Token 无效或已过期，请重新配置"
+                    403 -> "GitHub 权限不足或请求受限，请检查 Token 权限后稍后重试"
+                    404 -> "GitHub 仓库或同步对象不存在，请检查仓库及 Token 权限"
+                    412 -> "GitHub 同步版本已变化，请重试同步"
+                    429 -> "GitHub 请求受限，请稍后重试"
+                    else -> "GitHub 同步请求失败：HTTP $code"
+                }
+                throw contract.constructor("httpError").newInstance(code, message) as Throwable
+            }
+        }
         val username = contract.config(config, "accessKey") as String
         val password = contract.config(config, "secretKey") as String
         val url = contract.config(config, "endpoint") as String
@@ -195,7 +226,7 @@ internal class WebDavSyncHook(
         }
     }
 
-    private fun execute(name: String, remote: WebDavSyncTransport, args: Array<Any?>): Any? {
+    private fun execute(name: String, remote: ShelfSyncTransport, args: Array<Any?>): Any? {
         val key = args[0] as String
         return when (name) {
             "getContent" -> remote.get(key)?.let { response ->
@@ -262,7 +293,9 @@ internal class WebDavSyncHook(
                 (contract.method("preferenceGet").invoke(prefs, contract.preferenceKey("token")) as? String).orEmpty() == identity.token) {
                 "账号状态已变化，未保存同步配置"
             }
-            val scopeChanged = listOf("provider", "endpoint", "bucket", "prefix").any { name ->
+            val scopeKeys = listOf("provider", "endpoint", "bucket", "prefix") +
+                if (values["s3_sync_bucket"] == GitHubSyncProtocol.BUCKET) listOf("access_key") else emptyList()
+            val scopeChanged = scopeKeys.any { name ->
                 val keyName = "s3_sync_$name"
                 val key = contract.preferenceKey(keyName)
                 values.containsKey(keyName) && contract.method("preferenceGet").invoke(prefs, key) != values[keyName]
@@ -291,7 +324,7 @@ internal class WebDavSyncHook(
         }) { "WebDAV 同步配置回读不一致" }
     }
 
-    private fun showConfiguration() {
+    private fun showConfiguration(github: Boolean = false) {
         val activity = activityProvider() ?: return
         val identity = AccountHostRuntime.storageSnapshot(activity) ?: return toast("同步账号状态尚未就绪")
         val current = identity.session
@@ -303,7 +336,7 @@ internal class WebDavSyncHook(
                         !settingsProvider().canRunWebDavSync) {
                         configuring.set(false)
                     } else {
-                        runCatching { renderConfiguration(activity, identity, values) }
+                        runCatching { renderConfiguration(activity, identity, values, github) }
                             .onFailure { configuring.set(false); toast("打开同步设置失败") }
                     }
                 }
@@ -311,13 +344,17 @@ internal class WebDavSyncHook(
         }
     }
 
-    private fun renderConfiguration(activity: Activity, identity: AccountHostRuntime.Identity, values: Map<String, Any?>) {
+    private fun renderConfiguration(activity: Activity, identity: AccountHostRuntime.Identity, values: Map<String, Any?>, github: Boolean) {
         val current = identity.session
-        val connected = values["s3_sync_bucket"] == WebDavSyncProtocol.BUCKET
+        val providerName = if (github) "GitHub" else "WebDAV"
+        val bucket = if (github) GitHubSyncProtocol.BUCKET else WebDavSyncProtocol.BUCKET
+        val connected = values["s3_sync_bucket"] == bucket
         fun stored(key: String): String = if (connected) (values[key] as? String).orEmpty()
             .takeUnless { it == WebDavSyncProtocol.ANONYMOUS }.orEmpty() else ""
         val initial = WebDavSyncConfigurationPage.Credentials(stored("s3_sync_endpoint"),
-            stored("s3_sync_access_key"), stored("s3_sync_secret_key"))
+            stored("s3_sync_access_key"), if (github && connected)
+                runCatching { GitHubTokenCipher.decrypt(stored("s3_sync_secret_key")) }.getOrDefault("")
+            else stored("s3_sync_secret_key"))
         val busy = AtomicBoolean()
         val dismissed = AtomicBoolean()
         lateinit var page: WebDavSyncConfigurationPage
@@ -328,18 +365,28 @@ internal class WebDavSyncHook(
         }
         fun submit(draft: WebDavSyncConfigurationPage.Credentials) {
             if (busy.get() || dismissed.get()) return
-            val url = runCatching { valid(); WebDavSyncProtocol.baseUrl(draft.address) }
-                .getOrElse { page.error(it.message ?: "WebDAV 地址无效"); return }
-            if (draft.username.any { it == ':' || it == '\n' || it == '\r' }) {
+            val url = runCatching {
+                valid()
+                if (github) {
+                    GitHubSyncProtocol.branch(draft.username)
+                    GitHubSyncProtocol.token(draft.password)
+                    GitHubSyncProtocol.repository(draft.address)
+                } else WebDavSyncProtocol.baseUrl(draft.address)
+            }.getOrElse { page.error(it.message ?: "$providerName 配置无效"); return }
+            if (!github && draft.username.any { it == ':' || it == '\n' || it == '\r' }) {
                 page.error("用户名不能包含冒号或换行")
                 return
             }
             if (!busy.compareAndSet(false, true)) return
+            val secret = runCatching {
+                if (github) GitHubTokenCipher.encrypt(GitHubSyncProtocol.token(draft.password))
+                else draft.password.ifEmpty { WebDavSyncProtocol.ANONYMOUS }
+            }.getOrElse { busy.set(false); page.error("Token 无法加密，未保存配置"); return }
             val next = mapOf(
                 "s3_sync_provider" to "S3", "s3_sync_endpoint" to url,
-                "s3_sync_bucket" to WebDavSyncProtocol.BUCKET, "s3_sync_region" to "auto",
-                "s3_sync_access_key" to draft.username.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
-                "s3_sync_secret_key" to draft.password.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
+                "s3_sync_bucket" to bucket, "s3_sync_region" to "auto",
+                "s3_sync_access_key" to if (github) GitHubSyncProtocol.branch(draft.username) else draft.username.ifEmpty { WebDavSyncProtocol.ANONYMOUS },
+                "s3_sync_secret_key" to secret,
                 "s3_sync_prefix" to "reamicro", "s3_sync_cloud_config_enabled" to false,
             )
             page.verifying()
@@ -347,7 +394,7 @@ internal class WebDavSyncHook(
                 val writeStarted = AtomicBoolean()
                 val result = runCatching {
                     valid()
-                    val config = contract.newConfig(url, WebDavSyncProtocol.BUCKET, "auto",
+                    val config = contract.newConfig(url, bucket, "auto",
                         requireNotNull(next["s3_sync_access_key"]) as String,
                         requireNotNull(next["s3_sync_secret_key"]) as String, "reamicro")
                     transport(config).verify()
@@ -366,8 +413,8 @@ internal class WebDavSyncHook(
                     if (!dismissed.get() && AccountHostRuntime.isCurrent(identity, activity)) {
                         result.onSuccess {
                             page.dismiss()
-                            toast("WebDAV 已启用，返回书架即可使用原生同步")
-                        }.onFailure { page.error(it.message ?: "WebDAV 验证失败，原配置未修改") }
+                            toast("$providerName 已启用，返回书架即可使用原生同步")
+                        }.onFailure { page.error(it.message ?: "$providerName 验证失败，原配置未修改") }
                     }
                 }
             }
@@ -377,7 +424,7 @@ internal class WebDavSyncHook(
             configuring.set(false)
         }, configurationUi, {
             !dismissed.get() && AccountHostRuntime.isCurrent(identity, activity) && settingsProvider().canRunWebDavSync
-        })
+        }, github)
         if (!nativeRoutes.open(page)) {
             page.closeEmbedded()
             toast("同步页面尚未就绪，请重新进入同步设置")

@@ -847,7 +847,7 @@ internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPadd
         val rows = listOf(
             ToggleRow(
                 key = ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
-                title = "WebDAV 同步",
+                title = "WebDAV / GitHub 同步",
                 checked = snapshot.cloudSyncExtensionEnabled,
                 onChanged = { checked, _ ->
                     settings.setCloudSyncExtensionEnabled(checked)
