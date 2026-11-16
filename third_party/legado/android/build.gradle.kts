@@ -20,7 +20,7 @@ dependencies {
     api("org.mozilla:rhino:1.8.1")
     api("com.google.code.gson:gson:2.14.0")
     api("com.squareup.okhttp3:okhttp:5.5.0")
-    implementation("androidx.annotation:annotation:1.9.1")
+    implementation("androidx.annotation:annotation:1.11.0")
     implementation("androidx.collection:collection:1.6.0")
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("org.jsoup:jsoup:1.16.2")
