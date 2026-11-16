@@ -112,17 +112,23 @@ internal class ModuleUiKit(private val context: Context) {
         textView(
             label,
             14f,
-            palette.onPrimary,
+            when (role) {
+                Role.Primary -> palette.primaryText
+                Role.Neutral -> palette.neutralText
+                Role.Danger -> palette.destructiveText
+            },
         ).apply {
             gravity = Gravity.CENTER
 
             setPadding(px(16), 0, px(16), 0)
-            applyDialogActionStyle(this, context)
+            background = rounded(palette.pageBackground, 8f).apply {
+                setStroke((1.2f * dp).toInt(), palette.border)
+            }
             isClickable = true
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                px(48),
+                px(36),
             ).apply { rightMargin = px(8) }
         }
 

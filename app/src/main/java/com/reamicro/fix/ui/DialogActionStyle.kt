@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.dp
 import com.reamicro.fix.hook.EmbeddedHostUi
 import com.reamicro.fix.hook.ModuleDialogTheme
 
-/** 所有弹窗动作使用手动编辑预览按钮的实色、小圆角和最小高度。 */
+/** 阅微内的模块弹窗动作使用手动编辑预览按钮的实色、小圆角和最小高度。 */
 @Composable
 internal fun DialogActionButton(
     onClick: () -> Unit,
