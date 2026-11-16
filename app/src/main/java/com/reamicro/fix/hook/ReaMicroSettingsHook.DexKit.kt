@@ -45,6 +45,7 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     val colors = SettingsDialogColors(activity)
     val dialog = settingsDialog(activity)
     HostSettingsDialogs.useApplicationTheme(dialog)
+    HostSettingsDialogs.inheritSystemBars(dialog)
     val card = settingsDialogCard(activity, colors)
     val title = settingsDialogTitle(activity, if (scanning) "DexKit 自动扫描" else "DexKit 扫描结果", colors)
     if (scanning) {
@@ -88,20 +89,23 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     }
     if (!scanning) {
         val actions = mutableListOf<HostSettingsDialogs.Action>()
-        if (notice.restartRequired) {
-            actions += HostSettingsDialogs.Action("重启阅微") {
-                if (HostRestart.request(activity)) {
-                    dialog.dismiss()
-                    onClose?.invoke()
-                }
-            }
-        } else if (onRescan != null) {
+        if (onRescan != null) {
             actions += HostSettingsDialogs.Action("重新扫描") {
                 dialog.dismiss()
                 onRescan()
             }
         }
-        actions += HostSettingsDialogs.Action("关闭") {
+        if (report != null || onClose != null || notice.restartRequired) {
+            actions += HostSettingsDialogs.Action("重载") {
+                dialog.dismiss()
+                onClose?.invoke()
+                // 宿主弹窗的退出需要一个主线程队列回合，随后再让框架接管重载。
+                com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper()).post {
+                    com.reamicro.fix.reload.HostHotReload.request(activity)
+                }
+            }
+        }
+        if (report == null && onClose == null && !notice.restartRequired) actions += HostSettingsDialogs.Action("关闭") {
             dialog.dismiss()
             onClose?.invoke()
         }

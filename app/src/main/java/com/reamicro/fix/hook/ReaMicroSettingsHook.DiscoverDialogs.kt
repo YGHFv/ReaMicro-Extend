@@ -214,6 +214,7 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
                 )
             }
             val titleRow = LinearLayout(context).apply {
+                HostSettingsDialogs.markTitleRow(this)
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 addView(titleView)
@@ -227,6 +228,13 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
 
             val filterHost = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
             card.addView(filterHost)
+            var resetFilter: () -> Unit = {}
+            var applyFilter: () -> Unit = {}
+            // 操作放入宿主按钮区，避免正文按钮下方再叠加一层空按钮区。
+            HostSettingsDialogs.setActions(dialog, listOf(
+                HostSettingsDialogs.Action(DISCOVER_CONFIG_RESET) { resetFilter() },
+                HostSettingsDialogs.Action(DISCOVER_CONFIG_APPLY) { applyFilter() },
+            ))
 
             fun rebuild() {
                 val sourceId = DiscoverState.selection.sourceId
@@ -236,6 +244,8 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
                     append(DISCOVER_CONFIG_SOURCE_SUFFIX)
                 }
                 filterHost.removeAllViews()
+                resetFilter = {}
+                applyFilter = { dialog.dismiss() }
                 val filter = source?.filter
                 if (source == null || filter == null) {
                     filterHost.addView(settingsDialogHint(context, DISCOVER_CONFIG_NO_FILTER, colors))
@@ -263,25 +273,19 @@ internal fun ReaMicroSettingsHook.openDiscoverConfigDialog(activity: Activity) {
                             },
                         )
                     }
-                    filterHost.addView(
-                        discoverConfigApplyRow(
-                            context,
-                            colors,
-                            onReset = {
-                                working.clear()
-                                working.putAll(filter.defaultSelection())
-                                buildFilterSection()
-                            },
-                            onApply = {
-                                DiscoverState.applyFilterSelection(
-                                    sourceId,
-                                    working,
-                                    activityProvider()?.applicationContext,
-                                )
-                                dialog.dismiss()
-                            },
-                        ),
+                }
+                resetFilter = {
+                    working.clear()
+                    working.putAll(filter.defaultSelection())
+                    buildFilterSection()
+                }
+                applyFilter = {
+                    DiscoverState.applyFilterSelection(
+                        sourceId,
+                        working,
+                        activityProvider()?.applicationContext,
                     )
+                    dialog.dismiss()
                 }
                 buildFilterSection()
             }
@@ -347,22 +351,6 @@ private fun ReaMicroSettingsHook.discoverConfigGroupRow(
     })
     setOnClickListener { onClick() }
     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-}
-
-private fun ReaMicroSettingsHook.discoverConfigApplyRow(
-    context: Context,
-    colors: SettingsDialogColors,
-    onReset: () -> Unit,
-    onApply: () -> Unit,
-): LinearLayout {
-    val resetButton = discoverTextButton(context, DISCOVER_CONFIG_RESET, colors, onReset)
-    val applyButton = discoverTextButton(context, DISCOVER_CONFIG_APPLY, colors, onApply)
-    return settingsDialogButtonRow(context, listOf(resetButton, applyButton)).apply {
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = settingsDp(context, 6) }
-    }
 }
 
 private fun ReaMicroSettingsHook.openDiscoverFilterOptionDialog(
@@ -525,17 +513,6 @@ private fun ReaMicroSettingsHook.discoverDialogAction(
         textSize = 15f
         setTextColor(colors.title)
     })
-    setOnClickListener { onClick() }
-}
-
-private fun ReaMicroSettingsHook.discoverTextButton(
-    context: Context, title: String, colors: SettingsDialogColors, onClick: () -> Unit,
-): TextView = TextView(context).apply {
-    text = title
-    textSize = 14f
-    gravity = Gravity.CENTER
-    minimumHeight = settingsDp(context, 48)
-    setTextColor(colors.primaryText)
     setOnClickListener { onClick() }
 }
 

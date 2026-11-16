@@ -106,7 +106,7 @@ object HookRuntime {
                     featureBound = managementRegistration.get() != true, featureGate = featureRegistration.get()))
         }
 
-    /** Privacy decisions continue during generation changes, and honor the module master switch. */
+    /** 崩溃上报保护在代际切换和功能开关关闭期间始终生效。 */
     internal fun hookProcessGuardMethod(
         method: Executable,
         callback: HookCallback,
@@ -115,7 +115,7 @@ object HookRuntime {
     ): XposedInterface.HookHandle = ModuleResources.withRegistration {
         method.isAccessible = true
         check(id.isNotBlank()) { "A process guard requires a stable hook id" }
-        val interceptor = interceptor(callback, generationBound = false, featureBound = true)
+        val interceptor = interceptor(callback, generationBound = false, featureBound = false)
         if (previous != null) {
             // Old module versions did not assign ids; the caller validates their exact guard method.
             check(previous.executable == method && (previous.id == null || previous.id == id)) {

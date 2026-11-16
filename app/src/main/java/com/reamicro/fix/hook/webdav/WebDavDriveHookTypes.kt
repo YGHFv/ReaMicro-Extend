@@ -129,6 +129,7 @@ internal data class OnlineEpubDecor(
     val headerScope: OnlineEpubHeaderScope = OnlineEpubHeaderScope.Off,
 
     val transitionMarkup: String = "",
+    val illustrationMarkup: String = "",
 ) {
     fun headerHtml(isVolumePage: Boolean, isVolumeFirstChapter: Boolean): String {
         val href = headerImageHref ?: return ""

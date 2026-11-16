@@ -61,7 +61,14 @@ internal class ReaderThoughtSelectionEditor(
                 setContent { this@ReaderThoughtSelectionEditor.EditorContent() }
             }
             compose = view
-            setContentView(view)
+            val frame = android.widget.FrameLayout(context).apply {
+                addView(view, android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM,
+                ))
+                setOnClickListener { if (!saving) dismiss() }
+            }
+            view.isClickable = true
+            setContentView(frame)
             window?.apply {
                 decorView.setViewTreeLifecycleOwner(owner)
                 decorView.setViewTreeSavedStateRegistryOwner(owner)
@@ -75,7 +82,9 @@ internal class ReaderThoughtSelectionEditor(
             }
             setOnDismissListener { release() }
             super.show()
-            window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            window?.let { com.reamicro.fix.ui.DialogWindowStyle.apply(
+                it, activity.window, com.reamicro.fix.ui.DialogWindowStyle.SCRIM,
+            ) }
         } catch (e: Throwable) {
             if (isShowing) runCatching { dismiss() }.onFailure(e::addSuppressed)
             runCatching { release() }.onFailure(e::addSuppressed)

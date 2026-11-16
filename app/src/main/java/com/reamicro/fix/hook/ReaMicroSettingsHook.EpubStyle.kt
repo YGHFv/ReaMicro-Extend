@@ -146,7 +146,6 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                     headerScopeRow.addView(
                         settingsDialogChip(activity, scope.title, headerScope == scope, colors) {
                             headerScope = scope
-                            OnlineEpubStyleStore.setHeaderScope(onlineEpubStyleContext(), scope)
                             syncHeaderScopeRow.invoke()
                             syncPreview.invoke()
                         },
@@ -278,11 +277,20 @@ internal fun ReaMicroSettingsHook.openOnlineEpubStyleDialog(style: OnlineEpubSty
                 val next = edited()
                 saveOnlineEpubStyle(next)
                 OnlineEpubStyleStore.select(onlineEpubStyleContext(), next.kind, next.id)
+                if (next.kind == OnlineEpubStyleKind.Header) {
+                    OnlineEpubStyleStore.setHeaderScope(onlineEpubStyleContext(), headerScope)
+                }
                 bumpOnlineEpubStyleVersion()
                 showToast("已设为当前${next.kind.title}")
             }
             finishButton.setOnClickListener {
-                saveOnlineEpubStyle(edited())
+                val next = edited()
+                saveOnlineEpubStyle(next)
+                // 完成编辑时同时应用，避免自定义样式保存成功但下载仍使用旧样式。
+                OnlineEpubStyleStore.select(onlineEpubStyleContext(), next.kind, next.id)
+                if (next.kind == OnlineEpubStyleKind.Header) {
+                    OnlineEpubStyleStore.setHeaderScope(onlineEpubStyleContext(), headerScope)
+                }
                 bumpOnlineEpubStyleVersion()
                 dialog.dismiss()
             }
@@ -410,7 +418,7 @@ internal fun ReaMicroSettingsHook.onlineEpubStyleRowSubtitle(
     kind: OnlineEpubStyleKind,
 ): String {
     val name = settings.selected(kind)?.name.orEmpty().ifBlank { "未选择" }
-    return if (kind == OnlineEpubStyleKind.Header) "$name（仅保存，不写入成书）" else name
+    return if (kind == OnlineEpubStyleKind.Header) "$name（${settings.headerScope.title}）" else name
 }
 
 internal fun ReaMicroSettingsHook.exportOnlineEpubStyle(style: OnlineEpubStyle) {

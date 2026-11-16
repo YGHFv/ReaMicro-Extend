@@ -489,7 +489,8 @@ internal object HostBookUiQueries {
                     sheet.name in it.paramTypeNames && "boolean" in it.paramTypeNames }.one("$role content constructor")
                 val owner = requireNotNull(constructor.declaredClass)
                 val content = owner.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) &&
-                    it.paramTypeNames == List(3) { "java.lang.Object" } && it.returnTypeName == "java.lang.Object" }.one("$role sheet content")
+                    Modifier.isPublic(it.modifiers) && it.paramTypeNames == List(3) { "java.lang.Object" } &&
+                    it.returnTypeName == "java.lang.Object" }.one("$role sheet content")
                 val call = flow.calls(entry.descriptor).filter { it.descriptor == constructor.descriptor }.distinct().single()
                 val pickSlot = call.arguments.withIndex().filter { it.value == HostDexCalls.Parameter(1) }.single().index
                 val stateSlot = constructor.paramTypeNames.indexOf(sheet.name) + 1

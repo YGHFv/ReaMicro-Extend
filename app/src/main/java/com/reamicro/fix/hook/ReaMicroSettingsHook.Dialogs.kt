@@ -20,49 +20,11 @@ import android.widget.TextView
 import android.widget.Toast
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.ai.AiDictionaryPreset
-import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePreset
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors
-
-internal fun ReaMicroSettingsHook.openHookInstallReportDialog() {
-    val activity = activityProvider() ?: return
-    activity.runOnModuleUiThread {
-        runCatching {
-            if (openNestedInjectedRoute(InjectedRoute.ModuleDiagnostics)) return@runCatching
-            val colors = SettingsDialogColors(activity)
-            val dialog = settingsDialog(activity)
-            val card = settingsDialogCard(activity, colors)
-            card.addView(settingsDialogTitle(activity, "模块自检", colors))
-            card.addView(
-                settingsDialogChoiceRow(activity, HookInstallReport.summaryLine(), colors) {},
-            )
-            HookInstallReport.featureSummaries().forEach { line ->
-                card.addView(settingsDialogChoiceRow(activity, line, colors) {})
-            }
-            val failures = HookInstallReport.failureDetails()
-            if (failures.isNotEmpty()) {
-                card.addView(settingsDialogTitle(activity, "失败明细", colors))
-                failures.forEach { line ->
-                    card.addView(settingsDialogChoiceRow(activity, line, colors) {})
-                }
-            }
-            val actions = settingsDialogActions(activity)
-            actions.addView(
-                settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-                    setOnClickListener { dialog.dismiss() }
-                },
-                settingsDialogButtonParams(activity),
-            )
-            card.addView(actions)
-            showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity)
-        }.onFailure {
-            HookRuntime.log("$LOG_PREFIX hook install report dialog failed: ${it.stackTraceToString()}")
-        }
-    }
-}
 
 internal fun ReaMicroSettingsHook.openAccountDataDocumentPicker() {
     val activity = activityProvider() ?: return

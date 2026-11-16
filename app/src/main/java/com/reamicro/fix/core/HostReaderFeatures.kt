@@ -205,9 +205,10 @@ internal object HostReaderFeatures {
         check("clear" in result) { "Reader lifecycle clear missing" }
         optional("overlay") {
             val deps = anchor("SwipePagerDeps(getVirtualPage=").className
-            val overlay = save("overlayAction", find(MethodMatcher.create().returnType("void").paramCount(16, 17)).filter {
+            val overlay = save("overlayAction", find(MethodMatcher.create().returnType("void").paramCount(16, 18)).filter {
                 val p = it.paramTypeNames
-                deps in p.take(12) && p.drop(12).take(4) == listOf("int", "float", "float", "boolean") &&
+                val start = if (it.paramCount == 18) 13 else 12
+                deps in p.take(start) && p.drop(start).take(4) == listOf("int", "float", "float", "boolean") &&
                     Modifier.isStatic(it.modifiers)
             }.one("overlay completion action"))
             val coroutine = overlay.invokes.filter {
@@ -229,11 +230,14 @@ internal object HostReaderFeatures {
             val flows = anchor("ReaderPagerFlows(bookProgress=").className
             val actions = anchor("ReaderPagerActions(onJumpCompleted=").className
             val pagerDeps = anchor("ReaderPagerDeps(findVirtualPageForCfi=").className
-            val swipe = save("swipeEffects", find(MethodMatcher.create().paramCount(9).returnType("void")).filter {
+            val swipe = save("swipeEffects", find(MethodMatcher.create().paramCount(9, 11).returnType("void")).filter {
                 val p = it.paramTypeNames
-                p.subList(1, 6) == listOf(stateType, flows, actions, pagerDeps, deps) && p[7] == composer
+                p.filter { name -> name in listOf(stateType, flows, actions, pagerDeps, deps) } ==
+                    listOf(stateType, flows, actions, pagerDeps, deps) && p.takeLast(2) == listOf(composer, "int") &&
+                    (p.indexOf(deps) == p.size - 3 || p.size == 9)
             }.one("swipe effects"))
-            val pagerTypes = generateSequence(swipe.paramTypes[6]) { it.superClass }.map { it.name }.toSet()
+            if (swipe.paramTypeNames.indexOf(deps) == swipe.paramCount - 3) return@optional
+            val pagerTypes = generateSequence(swipe.paramTypes[swipe.paramCount - 3]) { it.superClass }.map { it.name }.toSet()
             val wrapper = find(MethodMatcher.create().paramCount(5).returnType("java.lang.Object")).filter {
                 val p = it.paramTypeNames
                 p[0] in pagerTypes && p[1] == "int" && p[2] == tweenType && p[4] == "int"
@@ -422,21 +426,26 @@ internal object HostReaderFeatures {
 
         optional("overlayAction", "overlayResume", "tween") {
             val action = methods.getValue("overlayAction")
-            check(action.parameterCount in 16..17)
-            shape("overlayAction", action.parameterCount, void, true).at(12 to int, 13 to float, 14 to float, 15 to boolean)
+            check(action.parameterCount in 16..18)
+            val start = if (action.parameterCount == 18) 13 else 12
+            shape("overlayAction", action.parameterCount, void, true).at(start to int, start + 1 to float, start + 2 to float, start + 3 to boolean)
             shape("overlayResume", 1, any, false).params(any)
             shape("tween", 4, static = true).also {
                 it.at(0 to int, 1 to int, 3 to int)
                 check(!it.returnType.isPrimitive && !it.parameterTypes[2].isPrimitive)
             }
         }
-        optional("swipeEffects", "swipeAnimate", "swipeFlingFactory", "swipeFling", "swipeLayout") {
+        if (methods["swipeEffects"]?.let { it.parameterCount == 10 } == true) {
+            shape("swipeEffects", 10, void, true).at(8 to composer, 9 to int)
+        } else optional("swipeEffects", "swipeAnimate", "swipeFlingFactory", "swipeFling", "swipeLayout") {
             val tween = methods.getValue("tween").returnType
-            val effects = shape("swipeEffects", 9, void, true).also { it.at(7 to composer, 8 to int) }
+            val effects = methods.getValue("swipeEffects")
+            check(effects.parameterCount in 9..11)
+            shape("swipeEffects", effects.parameterCount, void, true).at(effects.parameterCount - 2 to composer, effects.parameterCount - 1 to int)
             val animate = shape("swipeAnimate", 3, any, false).also { it.at(0 to int) }
             check(animate.parameterTypes[1].isAssignableFrom(tween))
             val factory = shape("swipeFlingFactory", 5, static = true).also { it.at(1 to tween, 2 to composer, 3 to int, 4 to int) }
-            check(factory.parameterTypes[0].isAssignableFrom(effects.parameterTypes[6]))
+            check(factory.parameterTypes[0].isAssignableFrom(effects.parameterTypes[effects.parameterCount - 3]))
             val fling = shape("swipeFling", 3, any, false).also { it.at(1 to float, 2 to animate.parameterTypes[2]) }
             check(factory.returnType == fling.declaringClass &&
                 fling.declaringClass.declaredFields.count { it.type == animate.parameterTypes[1] } == 1)

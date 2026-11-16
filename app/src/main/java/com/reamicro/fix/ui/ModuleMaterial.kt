@@ -31,6 +31,12 @@ internal fun useModuleGlass(): Boolean {
  */
 @Composable
 internal fun ModuleWindowPopupHost(content: @Composable () -> Unit) {
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(view) {
+        val window = (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        window?.let { DialogWindowStyle.apply(it) }
+        onDispose { }
+    }
     val capture = LocalModuleThemeConfig.current.needsSceneBackdrop(isRuntimeShaderSupported())
     val parentBackdrop = LocalModuleSceneBackdrop.current
     val bodyBackdrop = rememberLayerBackdrop()

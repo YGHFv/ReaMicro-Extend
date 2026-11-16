@@ -47,7 +47,7 @@ object LocalTaskMirror {
 
     private fun exchange(context: Context, operation: String, accountId: String?, controlPayload: String? = null,
                          onResult: (LocalTaskMirrorResult) -> Unit): Boolean {
-        val lease = com.reamicro.fix.reload.ModuleResources.lease() ?: return false
+        val lease = com.reamicro.fix.reload.ModuleResources.lease("local-task:$operation") ?: return false
         val app = context.applicationContext
         val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
         val completion = LocalTaskBridgeCompletion()

@@ -97,6 +97,8 @@ internal fun onlineCompletionDecorManifestItems(decor: OnlineEpubDecor): List<On
 internal fun migrateOnlineCompletionChapterStyle(
     original: String,
     decor: OnlineEpubDecor = OnlineEpubDecor(),
+    isVolumePage: Boolean = false,
+    isVolumeFirstChapter: Boolean = false,
 ): String {
     var result = original.replace(
         ONLINE_COMPLETION_INLINE_STYLE_REGEX,
@@ -136,6 +138,11 @@ internal fun migrateOnlineCompletionChapterStyle(
         markup = decor.transitionMarkup,
         imageHref = decor.dividerImageHref,
     )
+    result = OnlineBodyMarkup.migrateIllustrations(result, decor.illustrationMarkup)
+    result = OnlineBodyMarkup.migrateHeader(result, decor.headerHtml(isVolumePage, isVolumeFirstChapter))
+    if (result.contains("epub:type") && !result.contains("xmlns:epub=")) {
+        result = result.replaceFirst("<html ", "<html xmlns:epub=\"http://www.idpf.org/2007/ops\" ")
+    }
     return result
 }
 
@@ -170,7 +177,7 @@ internal fun chapterXhtml(
     val heading = chapterHeadingHtml(title)
     val header = decor.headerHtml(isVolumePage = false, isVolumeFirstChapter = isVolumeFirstChapter)
     return """<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
 <head><title>${title.xmlEscape()}</title><link rel="stylesheet" type="text/css" href="../Styles/default.css"/></head>
 <body>$header$heading
 $paragraphs
@@ -186,7 +193,7 @@ internal fun chapterParagraphHtml(
     OnlineChapterImageMarkup.markerUrl(line)?.let { url ->
         val fileName = imageHrefs[url]
         val src = if (fileName != null) "../Images/$fileName" else url
-        return OnlineBodyMarkup.illustration(src.xmlEscape())
+        return OnlineBodyMarkup.illustration(src.xmlEscape(), markup = decor.illustrationMarkup)
     }
     return OnlineBodyMarkup.paragraph(line.xmlEscape())
 }

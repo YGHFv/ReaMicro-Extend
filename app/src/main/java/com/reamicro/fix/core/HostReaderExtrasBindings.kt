@@ -77,7 +77,7 @@ internal object HostReaderExtrasBindings {
                 dynamic("method:rowCaller.", 1)
             }
             "virtualPageGuard" -> {
-                keys("class", "vm epub continuation loadContinuation unit"); keys("method", "window mapped load")
+                keys("class", "vm epub page continuation loadContinuation unit"); keys("method", "window mapped load")
                 keys("field", "pages spines unit"); keys("value", "window.epub window.continuation window.page mapped.epub mapped.continuation mapped.page")
                 dynamic("method:caller.", 1)
             }
@@ -160,7 +160,10 @@ internal object HostReaderExtrasBindings {
                     slot(key, "epub", s.type("epub")); slot(key, "continuation", continuation, true); slot(key, "page", int)
                     check(setOf(s.index("$key.epub"), s.index("$key.continuation"), s.index("$key.page")).size == 3)
                 }
-                val load = s.method("load"); check(load.declaringClass == vm && load.parameterCount == 2 && load.parameterTypes.first() == int && continuation.isAssignableFrom(load.parameterTypes.last()) && load.returnType == any && !Modifier.isStatic(load.modifiers))
+                val load = s.method("load"); check(load.declaringClass == vm &&
+                    (load.parameterCount == 2 || load.parameterTypes.take(3) == listOf(int, int, s.type("page"))) &&
+                    load.parameterTypes.first() == int && continuation.isAssignableFrom(load.parameterTypes.last()) &&
+                    load.returnType == any && !Modifier.isStatic(load.modifiers))
             }
             "importMetadata" -> {
                 val book = s.type("book"); val repository = s.type("repository"); val dao = s.type("dao"); val metadata = s.type("metadata")

@@ -14,12 +14,12 @@ data class OnlineEpubStyleSettings(
     fun byKind(kind: OnlineEpubStyleKind): List<OnlineEpubStyle> = styles.filter { it.kind == kind }
 
     fun selectedId(kind: OnlineEpubStyleKind): String =
-        selection[kind]?.takeIf { id -> styles.any { it.id == id } }
+        selection[kind]?.takeIf { id -> styles.any { it.id == id && it.kind == kind } }
             ?: OnlineEpubStyleDefaults.defaultStyleId(kind)
 
     fun selected(kind: OnlineEpubStyleKind): OnlineEpubStyle? {
         val id = selectedId(kind)
-        return styles.firstOrNull { it.id == id } ?: byKind(kind).firstOrNull()
+        return styles.firstOrNull { it.id == id && it.kind == kind } ?: byKind(kind).firstOrNull()
     }
 
     val headerEnabled: Boolean
@@ -121,6 +121,7 @@ object OnlineEpubStyleStore {
             .put("fontFamily", style.fontFamily)
             .put("embedFont", style.embedFont)
             .put("assetPath", style.assetPath)
+            .put("markup", style.markup)
             .put("maskAsset", style.maskAsset)
             .put("sampleWidth", style.sampleWidth)
             .put("sampleHeight", style.sampleHeight)
@@ -149,6 +150,9 @@ object OnlineEpubStyleStore {
             fontFamily = json.optString("fontFamily"),
             embedFont = json.optBoolean("embedFont", true),
             assetPath = json.optString("assetPath"),
+            // 兼容旧配置遗漏模板字段的内置样式；自定义模板按保存值恢复。
+            markup = if (json.has("markup")) json.optString("markup")
+                else OnlineEpubStyleLibrary.byId(id)?.markup.orEmpty(),
             maskAsset = json.optString("maskAsset"),
             sampleWidth = json.optInt("sampleWidth"),
             sampleHeight = json.optInt("sampleHeight"),

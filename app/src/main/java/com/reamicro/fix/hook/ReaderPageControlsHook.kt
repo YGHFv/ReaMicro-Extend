@@ -37,6 +37,7 @@ internal class ReaderPageControlsHook(
     private val readerPagers = WeakObjects()
     private val readerFlings = WeakObjects()
     private val originalFlingSpecs = ReaderAnimationOverrides()
+    private var nativeMotionMode = 4
     private val tweens = HashMap<Int, Any>()
     private val speedStates = HashMap<Int, Any>()
     private val availableModes = mutableSetOf<Int>()
@@ -61,10 +62,26 @@ internal class ReaderPageControlsHook(
         auto.nativeStateChanged = ::changed
         HookRuntime.withFeatureGate(animationEnabled) {
             if (installPart("overlay speed", ::installOverlaySpeed)) availableModes += 1
-            if (installPart("swipe speed", ::installSwipeSpeed)) availableModes += 0
-            availableModes += ReaderExtraMotionHook(symbols, ::speed).install()
+            if (symbols.optional("swipeAnimate") != null) {
+                if (installPart("swipe speed", ::installSwipeSpeed)) availableModes += 0
+            } else installPart("native swipe mode") {
+                hook("swipeEffects", object : HookCallback() {
+                    override fun before(param: Call) { nativeMotionMode = 0 }
+                })
+                val curl = requireNotNull(com.reamicro.fix.core.HostReaderPagerBindings.current)
+                val handle = HookRuntime.hookMethod(curl.method("curl.root"), object : HookCallback() {
+                    override fun before(param: Call) { nativeMotionMode = 4 }
+                })
+                installing?.add { handle.unhook() }
+                HookRuntime.deoptimize(curl.method("curl.root"))
+                HookRuntime.deoptimize(symbols["swipeEffects"])
+            }
+            val motion = ReaderExtraMotionHook(symbols, ::speed) { nativeMotionMode }.install()
+            availableModes += motion
+            if (symbols.optional("swipeAnimate") == null && 4 in motion) availableModes += 0
         }
         val restored = installPart("native swipe restoration") {
+            if (symbols.optional("swipeAnimate") == null) return@installPart
             val specField = symbols.field("swipeFlingSpec")
             hook("swipeFling", object : HookCallback() {
                 override fun before(param: Call) {
@@ -77,7 +94,7 @@ internal class ReaderPageControlsHook(
         }
         val deoptimized = installPart("deoptimization") {
             listOf("content", "overlayResume", "swipeLayout", "swipeFling").forEach { key ->
-                HookRuntime.deoptimize(symbols[key])
+                symbols.optional(key)?.let(HookRuntime::deoptimize)
             }
         }
         HookRuntime.log("ReaMicro reader page controls installed: native controls; speed modes=$availableModes")
@@ -173,7 +190,7 @@ internal class ReaderPageControlsHook(
 
     private fun installSwipeSpeed() {
         hook("swipeEffects", object : HookCallback() {
-            override fun before(param: Call) { param.args[6]?.let { readerPagers.add(it) } }
+            override fun before(param: Call) { param.args[param.args.size - 3]?.let { readerPagers.add(it) } }
         })
         hook("swipeAnimate", object : HookCallback() {
             override fun before(param: Call) {

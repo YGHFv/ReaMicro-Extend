@@ -112,7 +112,7 @@ internal object HostCrashReportBlocker {
         // Keep every successful guard and any unreplaced old guard on failure.
         // Removing them here would turn a registration error into permission to upload.
         failure?.let { throw IllegalStateException("Crash-report guards incomplete; existing guards retained", it) }
-        HookRuntime.logAlways("ReaMicro privacy: dynamic Sentry guards registered=${contract.guards.size}; upload switch retained; registration alone is not proof of protection")
+        HookRuntime.logAlways("ReaMicro privacy: dynamic Sentry guards registered=${contract.guards.size}; crash uploads permanently blocked; registration alone is not proof of protection")
     }
     private fun installSettingsBootstrap(packageName: String) {
         if (settingsBootstrapInstalled) return
@@ -124,7 +124,7 @@ internal object HostCrashReportBlocker {
                     val context = param.args.firstOrNull() as? Context ?: return
                     if (context.packageName != packageName) return
                     readPreferences(context)
-                    HookRuntime.logAlways("ReaMicro privacy: crash-upload allowed=${HostCrashUploadSettings.uploadsAllowed(preferences)}, blocking=${isBlockingEnabled()}; changes require host restart for complete SDK lifecycle")
+                    HookRuntime.logAlways("ReaMicro privacy: crash-upload allowed=false, blocking=${isBlockingEnabled()}")
                 }
             })) { "Framework did not install Application.attach settings bootstrap" }
             settingsBootstrapInstalled = true

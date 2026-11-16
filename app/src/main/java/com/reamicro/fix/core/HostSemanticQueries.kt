@@ -12,7 +12,7 @@ import org.luckypray.dexkit.result.MethodData
 internal object HostSemanticQueries {
     data class TypeRule(val id: String, val strings: List<String>, val stable: String = "")
     data class Relation(val id: String, val owner: String, val signatures: List<String>,
-        val static: Boolean, val strings: List<String>, val index: Int)
+        val static: Boolean, val strings: List<String>, val index: Int, val targetMethods: List<String> = emptyList())
     data class MemberRule(val id: String, val owner: String, val signatures: List<String>,
         val static: Boolean, val strings: List<String>, val types: List<String>,
         val stableCalls: List<String>, val callsOnly: Boolean = false)
@@ -55,7 +55,8 @@ internal object HostSemanticQueries {
                     matches(it, rule.signatures, rule.static, rule.strings)
                 }
                 candidates.mapNotNull { if (rule.index < 0) it.returnTypeName else it.paramTypeNames.getOrNull(rule.index) }
-                    .distinct().singleOrNull()?.takeIf { bridge.getClassData(it) != null }?.let { saveType(rule.id, it) }
+                    .filter { name -> bridge.getClassData(name)?.methods?.map { it.name }?.containsAll(rule.targetMethods) == true }
+                    .distinct().singleOrNull()?.let { saveType(rule.id, it) }
             }
         }
         return output

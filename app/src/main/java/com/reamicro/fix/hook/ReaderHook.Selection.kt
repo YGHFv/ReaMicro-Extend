@@ -349,16 +349,8 @@ internal fun ReaderHook.showDictionaryDialog(
         ))
     }
     dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-    dialog.setContentView(root)
     dialog.setCanceledOnTouchOutside(true)
-    dialog.show()
-    dialog.window?.apply {
-        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        setGravity(Gravity.BOTTOM)
-        decorView.setPadding(0, 0, 0, 0)
-        setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-    }
+    com.reamicro.fix.ui.DialogWindowStyle.show(dialog, activity, root, Gravity.BOTTOM)
     val handle = DictionaryDialogHandle(dialog, body, footerLabel, colors, initialPreset.id)
     footerLabel.setOnClickListener {
         showDictionaryPresetPicker(activity, handle) { preset ->
@@ -426,14 +418,6 @@ internal fun ReaderHook.showDictionaryPresetPicker(
         ))
     }
     dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-    dialog.setContentView(root)
     dialog.setCanceledOnTouchOutside(true)
-    dialog.show()
-    dialog.window?.apply {
-        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        setGravity(Gravity.BOTTOM)
-        decorView.setPadding(0, 0, 0, 0)
-        setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-    }
+    com.reamicro.fix.ui.DialogWindowStyle.show(dialog, activity, root, Gravity.BOTTOM)
 }

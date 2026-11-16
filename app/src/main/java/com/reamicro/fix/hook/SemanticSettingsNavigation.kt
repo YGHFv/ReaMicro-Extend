@@ -49,6 +49,11 @@ internal class SemanticSettingsNavigation(private val hook: ReaMicroSettingsHook
                         }
                     }
                 })
+                handles += HookRuntime.hookMethod(composition.method("navigationGraph"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable == null) hook.navigationPages.completePendingRestore(param.args.firstOrNull())
+                    }
+                })
                 handles += HookRuntime.hookMethod(settings.root, object : HookCallback() {
                     override fun before(param: Call) {
                         val scope = param.args.firstOrNull()?.takeIf(navigation.scope::isInstance) ?: return
@@ -112,7 +117,8 @@ internal class SemanticSettingsNavigation(private val hook: ReaMicroSettingsHook
                 })
                 listOf(settings.root, settings.builder, home.method("screen"), body, ui.method("aboutInvoke"), ui.method("aboutWrapper"), navigation.navigate, navigation.pop,
                     navigation.controllerPop, composition.method("rememberNavigation"),
-                    composition.method("navigationFactory"), composition.method("navigationRestore"))
+                    composition.method("navigationFactory"), composition.method("navigationRestore"),
+                    composition.method("navigationGraph"))
                     .forEach(HookRuntime::deoptimize)
             } catch (error: Throwable) {
                 handles.asReversed().forEach { handle ->

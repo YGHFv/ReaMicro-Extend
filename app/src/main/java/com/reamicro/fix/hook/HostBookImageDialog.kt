@@ -96,8 +96,7 @@ internal class HostBookImageDialog(
                 it.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             }
             super.show()
-            window?.setBackgroundDrawableResource(android.R.color.transparent)
-            window?.setDimAmount(0f)
+            window?.let { com.reamicro.fix.ui.DialogWindowStyle.apply(it, activity.window) }
         } catch (e: Throwable) {
             if (isShowing) runCatching { dismiss() }.onFailure(e::addSuppressed)
             runCatching { release() }.onFailure(e::addSuppressed)

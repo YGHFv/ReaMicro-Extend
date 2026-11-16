@@ -150,8 +150,9 @@ internal object HostHighlightDomQueries {
         }
         val parser = bodyField.writers.flatMap { it.invokes }.filter {
             Modifier.isStatic(it.modifiers) && it.returnTypeName == container.name &&
-                it.paramCount == 5 && it.paramTypeNames.first() == node.name &&
-                it.paramTypeNames[3] == "java.lang.String" && it.paramTypeNames.last() == "boolean"
+                it.paramCount in 5..6 && it.paramTypeNames.first() == node.name &&
+                it.paramTypeNames[3] == "java.lang.String" && it.paramTypeNames[4] == "boolean" &&
+                (it.paramCount == 5 || it.paramTypes.last()?.let { type -> type.modifiers and 0x4000 != 0 } == true)
         }.one("document parser")
         method("document.parse", parser)
         val parseNode = parser.invokes.filter { Modifier.isStatic(it.modifiers) &&

@@ -435,20 +435,8 @@ class ReaMicroHookEntry {
                 DexKitUpdateScan.onResume(activity)
             }
         }
-        attachReloadedActivity = { activity, resumed ->
-            attachContext(activity)
-            currentActivityResumed = resumed
-            if (resumed) {
-                webDavDriveHook.onHostActivityResumed(activity)
-                readerHook.onHostActivityResumed(activity)
-                readerAutoPage?.onHostActivityResumed(activity)
-                scheduleGlobalFontRecreate()
-                startForegroundHeartbeat()
-            }
-            bookshelfCompletion?.onHostStarted()
-            coverFade?.onHostStarted()
-            bookBackupScroll?.onHostStarted()
-        }
+        // 热重载保留 Activity，不会再次触发 onCreate，必须补齐同一套启动初始化。
+        attachReloadedActivity = attachStartedActivity
         HookInstallReport.install(ENTRY_FEATURE_ID, "mainActivityCreate") {
             val lifecycle = requireNotNull(com.reamicro.fix.core.HostIntegrationBindings.activity) {
                 "MainActivity lifecycle contract unavailable"

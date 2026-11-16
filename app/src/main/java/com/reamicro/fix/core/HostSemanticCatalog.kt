@@ -266,7 +266,7 @@ internal object HostSemanticCatalog {
         Relation("app.zhendong.reamicro.repository.storage.CloudStorageRepository", "app.zhendong.reamicro.ui.home.HomeViewModel", listOf("(L*;L*;L*;L*;L*;)V"), false, listOf("默认"), 2),
         Relation("com.fleeksoft.ksoup.nodes.TextNode", "app.zhendong.reamicro.data.epub.Epub", listOf("(L*;)L*;"), true, emptyList(), -1),
         Relation("com.fleeksoft.ksoup.parser.Parser", "com.fleeksoft.ksoup.nodes.Document", listOf("(Ljava/lang/String;Ljava/lang/String;L*;)V"), false, listOf("#root"), 2),
-        Relation("kotlin.coroutines.jvm.internal.SuspendLambda", "androidx.compose.foundation.pager.PagerState", listOf("(L*;IL*;)Ljava/lang/Object;"), true, emptyList(), 2),
+        Relation("kotlin.coroutines.jvm.internal.SuspendLambda", "androidx.compose.foundation.pager.PagerState", listOf("(L*;IL*;)Ljava/lang/Object;"), true, emptyList(), 2, listOf("getArity", "toString")),
     )
     private fun relations1(): List<Relation> = listOf(
         Relation("kotlinx.coroutines.CoroutineDispatcher", "app.zhendong.reamicro.data.epub.Epub", listOf("(IL*;L*;)Ljava/lang/Object;"), false, listOf("", " ", "File not found: ", "Spine index out of range: ", "call to 'resume' before 'invoke' with coroutine"), 1),
@@ -506,7 +506,7 @@ internal object HostSemanticCatalog {
     private fun methods8(): List<MemberRule> = listOf(
         MemberRule("app.zhendong.reamicro.ui.home.BookshelfScreenKt#BookshelfPage-NpZTi58", "app.zhendong.reamicro.ui.home.BookshelfScreenKt", listOf("(L*;L*;Ljava/util/List;L*;JLjava/lang/Integer;L*;L*;L*;L*;I)V"), true, listOf("默认"), emptyList(), emptyList()),
         MemberRule("app.zhendong.reamicro.ui.home.BookshelfScreenKt#BookshelfScreen-kWc7xho", "app.zhendong.reamicro.ui.home.BookshelfScreenKt", listOf("(L*;Ljava/lang/String;L*;Ljava/util/List;L*;JLjava/lang/Integer;L*;L*;L*;L*;L*;II)V"), true, listOf("书架"), emptyList(), emptyList()),
-        MemberRule("app.zhendong.reamicro.ui.home.BookshelfScreenKt#DataEmptyBox", "app.zhendong.reamicro.ui.home.BookshelfScreenKt", listOf("(L*;L*;I)V"), true, emptyList(), emptyList(), emptyList()),
+        MemberRule("app.zhendong.reamicro.ui.home.BookshelfScreenKt#DataEmptyBox", "app.zhendong.reamicro.ui.home.BookshelfScreenKt", listOf("(L*;L*;I)V"), true, emptyList(), listOf("kotlin.jvm.functions.Function0", "androidx.compose.runtime.Composer", "", ""), emptyList()),
         MemberRule("app.zhendong.reamicro.ui.home.BookshelfScreenKt#GridBookList-TN_CM5M", "app.zhendong.reamicro.ui.home.BookshelfScreenKt", listOf("(Ljava/util/List;L*;FZLjava/util/Set;L*;L*;I)V"), true, emptyList(), emptyList(), emptyList()),
         MemberRule("app.zhendong.reamicro.ui.home.BookshelfScreenKt#RowBookList--ukhzSk", "app.zhendong.reamicro.ui.home.BookshelfScreenKt", listOf("(Ljava/util/List;L*;FZLjava/util/Set;JL*;L*;I)V"), true, emptyList(), emptyList(), emptyList()),
         MemberRule("app.zhendong.reamicro.ui.home.HomeScreenKt#BookshelfSelectionBottomBar", "app.zhendong.reamicro.ui.home.HomeScreenKt", listOf("(L*;ZL*;L*;L*;L*;I)V"), true, emptyList(), listOf("", "", "kotlin.jvm.functions.Function0", "kotlin.jvm.functions.Function0", "kotlin.jvm.functions.Function0", "androidx.compose.runtime.Composer", "", ""), emptyList()),
@@ -703,10 +703,10 @@ internal object HostSemanticCatalog {
         MemberRule("org.epub.html.EpubCFIRange#contains", "org.epub.html.EpubCFIRange", listOf("(Ljava/lang/Comparable;)Z"), false, emptyList(), emptyList(), emptyList()),
         MemberRule("org.epub.html.EpubCFIRange#toString", "org.epub.html.EpubCFIRange", listOf("()Ljava/lang/String;"), false, listOf(" - ", "[", "]"), emptyList(), emptyList()),
         MemberRule("org.epub.html.HtmlDocument#getBody", "org.epub.html.HtmlDocument", listOf("()L*;"), false, listOf("body"), emptyList(), emptyList()),
-        MemberRule("org.epub.html.HtmlDocument#isFullScreen", "org.epub.html.HtmlDocument", listOf("()Z"), false, listOf("duokan-page-fullscreen"), emptyList(), emptyList()),
+        MemberRule("org.epub.html.HtmlDocument#isFullScreen", "org.epub.html.HtmlDocument", listOf("()Z"), false, emptyList(), emptyList(), emptyList()),
         MemberRule("org.epub.html.ImagePlaceholder#equals", "org.epub.html.ImagePlaceholder", listOf("(Ljava/lang/Object;)Z"), false, emptyList(), emptyList(), emptyList()),
         MemberRule("org.epub.html.ImagePlaceholder#hashCode", "org.epub.html.ImagePlaceholder", listOf("()I"), false, emptyList(), emptyList(), emptyList()),
-        MemberRule("org.epub.html.node.BodyDom#parseBody", "org.epub.html.node.BodyDom", listOf("(L*;L*;L*;Ljava/lang/String;Z)L*;"), true, listOf("", " ", ".", "after", "before", "first-letter", "li"), emptyList(), emptyList()),
+        MemberRule("org.epub.html.node.BodyDom#parseBody", "org.epub.html.node.BodyDom", listOf("(L*;L*;L*;Ljava/lang/String;Z)L*;", "(L*;L*;L*;Ljava/lang/String;ZL*;)L*;"), true, listOf("", " ", ".", "after", "before", "first-letter", "li"), emptyList(), emptyList()),
         MemberRule("org.epub.html.node.ContainerDom#append", "org.epub.html.node.ContainerDom", listOf("(L*;)V"), false, listOf("body", "path", "ruby"), emptyList(), emptyList()),
         MemberRule("org.epub.html.node.ContainerDom#equals", "org.epub.html.node.ContainerDom", listOf("(Ljava/lang/Object;)Z"), false, emptyList(), emptyList(), emptyList()),
         MemberRule("org.epub.html.node.ContainerDom#onMeasure", "org.epub.html.node.ContainerDom", listOf("(L*;Ljava/util/concurrent/atomic/AtomicReference;)V"), false, listOf("body", "html", "svg"), emptyList(), emptyList()),
@@ -761,7 +761,7 @@ internal object HostSemanticCatalog {
     )
     private fun methods19(): List<MemberRule> = listOf(
         MemberRule("org.epub.ui.ContentKt#CommentSpacerHitTarget", "org.epub.ui.ContentKt", listOf("(L*;L*;I)V"), true, emptyList(), emptyList(), emptyList()),
-        MemberRule("org.epub.ui.ContentKt#Content", "org.epub.ui.ContentKt", listOf("(L*;L*;L*;II)V"), true, listOf("#", "#inline-decoration", "#text-shadow", "-", "-end-", "androidx.compose.foundation.text.inlineContent", "dialogue", "role-name"), emptyList(), emptyList()),
+        MemberRule("org.epub.ui.ContentKt#Content", "org.epub.ui.ContentKt", listOf("(L*;L*;L*;II)V", "(L*;L*;FL*;II)V"), true, listOf("#", "-", "-end-", "androidx.compose.foundation.text.inlineContent", "dialogue"), emptyList(), emptyList()),
         MemberRule("org.epub.ui.ContentKt#Emphasis-1Gcb2xc", "org.epub.ui.ContentKt", listOf("(L*;Ljava/util/List;JL*;I)V"), true, emptyList(), emptyList(), emptyList()),
         MemberRule("org.epub.ui.ContentKt#InlineBackgroundOffsetContent-1Gcb2xc", "org.epub.ui.ContentKt", listOf("(L*;L*;JL*;I)V"), true, emptyList(), emptyList(), emptyList()),
         MemberRule("org.epub.ui.ContentKt#NoteTailIcon-iJQMabo", "org.epub.ui.ContentKt", listOf("(L*;JL*;L*;I)V"), true, emptyList(), emptyList(), emptyList()),

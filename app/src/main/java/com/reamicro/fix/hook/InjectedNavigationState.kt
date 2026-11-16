@@ -67,7 +67,11 @@ internal class InjectedNavigationState(private val hook: ReaMicroSettingsHook) {
         capture(scope)
         val controller = HostNavigation.controller(scope)
         val entries = entries(controller)?.takeIf { it.isNotEmpty() } ?: return false
-        if (nativeSnapshot != null || restoredController.get() != null) return false
+        if (nativeSnapshot != null || restoredController.get() != null) {
+            HookRuntime.logAlways("ReaMicro module navigation deferred: snapshot=${nativeSnapshot != null} " +
+                "restored=${restoredController.get() != null} savedPages=${saved.size} entries=${entries.size}")
+            return false
+        }
         check(pendingPage == null) { "Native settings navigation is already in progress" }
         val pending = PendingPage(target, entries.mapNotNull(ui::navigationEntryId).toSet())
         pendingPage = pending
@@ -98,6 +102,12 @@ internal class InjectedNavigationState(private val hook: ReaMicroSettingsHook) {
         if (current() != InjectedRoute.FontLibrary) hook.clearPendingDeleteFontSelection()
         finishRestore(controller, entries)
         if (nativeSnapshot == null && restoredController.get() == null) save(entries)
+    }
+
+    fun completePendingRestore(controller: Any?) {
+        if (controller == null || controller !== hook.currentSettingsNavController ||
+            (nativeSnapshot == null && restoredController.get() == null)) return
+        entries(controller)?.let { finishRestore(controller, it) }
     }
 
     fun prepareReload(target: Activity) {
@@ -200,12 +210,17 @@ internal class InjectedNavigationState(private val hook: ReaMicroSettingsHook) {
     }
 
     private fun finishRestore(controller: Any, entries: List<Any>) {
-        if (restoredController.get() !== controller || entries.isEmpty()) return
+        if (entries.isEmpty() || (nativeSnapshot == null && restoredController.get() == null)) return
         val ids = entries.mapNotNull(ui::navigationEntryId).toSet()
-        if (saved.any { it.id !in ids }) return
+        if (requireNotNull(HostCompositionBindings.current).navigationRestorePending(controller)) return
+        if (restoredController.get() == null && saved.any { it.id !in ids }) return
+        // 宿主 rememberSaveable 也能自行恢复返回栈；按实际条目确认后接回当前控制器，
+        // 队列消费后旧条目可能已被用户弹出，不能继续等待它们回到返回栈。
+        nativeSnapshot = null
         saved = emptyList()
         restoredController.clear()
         save(entries)
+        HookRuntime.logAlways("ReaMicro module navigation restored: entries=${entries.size}")
     }
 
     private fun entries(controller: Any): List<Any>? =

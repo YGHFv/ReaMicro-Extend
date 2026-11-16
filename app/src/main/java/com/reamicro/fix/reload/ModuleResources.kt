@@ -23,6 +23,7 @@ object ModuleResources {
     private val executors = ArrayList<ExecutorService>()
     private val cleanups = ArrayList<() -> Unit>()
     private val blockers = ArrayList<() -> String?>()
+    private val leaseOwners = java.util.concurrent.ConcurrentHashMap<Any, String>()
     val accepting: Boolean get() = !injected || gate.state == ReloadGate.State.ACTIVE
 
     internal fun enterHook(): Boolean = !injected || gate.enter()
@@ -177,11 +178,18 @@ object ModuleResources {
         synchronized(blockers) { blockers += reason }
     }
 
-    fun lease(): AutoCloseable? {
+    fun lease(owner: String = "callback"): AutoCloseable? {
         if (!injected) return AutoCloseable { }
         if (!gate.enter()) return null
+        val key = Any()
+        leaseOwners[key] = "${Thread.currentThread().name}:$owner"
         val closed = java.util.concurrent.atomic.AtomicBoolean()
-        return AutoCloseable { if (closed.compareAndSet(false, true)) gate.leave() }
+        return AutoCloseable {
+            if (closed.compareAndSet(false, true)) {
+                leaseOwners.remove(key)
+                gate.leave()
+            }
+        }
     }
 
     fun thread(action: Runnable): Thread = thread(action, "ReaMicroTask")
@@ -197,7 +205,7 @@ object ModuleResources {
         @Synchronized override fun start() {
             synchronized(gate) {
                 if (state != State.NEW) throw IllegalThreadStateException()
-                admission = lease() ?: throw RejectedExecutionException("Module generation is retiring")
+                admission = lease("thread:$name") ?: throw RejectedExecutionException("Module generation is retiring")
                 threads.add(this)
                 try { super.start() } catch (error: Throwable) {
                     admission?.close()
@@ -244,7 +252,11 @@ object ModuleResources {
 
     internal fun busySummary(): String {
         val pools = synchronized(executors) { executors.filterIsInstance<ThreadPoolExecutor>() }
-        return "tasks=${gate.activeTasks} activeWorkers=${pools.sumOf { it.activeCount }} queued=${pools.sumOf { it.queue.size }}"
+        val leases = leaseOwners.values.take(6).joinToString(" | ")
+        val running = threads.snapshot().filter { it is GenerationThread && it.isAlive }
+            .take(6).joinToString(" | ") { "${it.name}:${it.state}" }
+        return "tasks=${gate.activeTasks} activeWorkers=${pools.sumOf { it.activeCount }} queued=${pools.sumOf { it.queue.size }}" +
+            " leases=[$leases] threads=[$running]"
     }
 
     internal fun retireOnMain(): ResourceRetirement {

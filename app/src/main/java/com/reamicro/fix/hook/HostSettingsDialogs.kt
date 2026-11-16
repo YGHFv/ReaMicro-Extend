@@ -32,6 +32,7 @@ internal object HostSettingsDialogs {
     data class Action(val title: String, val onClick: () -> Unit)
 
     private object TitleTag
+    private object TitleRowTag
     private object CardTag
     private val parents = WeakHashMap<Activity, WeakReference<Any>>()
     private val applicationThemeContents = WeakHashMap<Any, Boolean>()
@@ -42,6 +43,7 @@ internal object HostSettingsDialogs {
     private val sentences = ThreadLocal<ArrayDeque<NativeDialog>>()
 
     fun markTitle(view: TextView) { view.tag = TitleTag }
+    fun markTitleRow(view: ViewGroup) { view.tag = TitleRowTag }
     fun markCard(view: View) { view.tag = CardTag }
 
     fun install(hook: ReaMicroSettingsHook): Boolean {
@@ -80,6 +82,15 @@ internal object HostSettingsDialogs {
                         val owner = sentences.get()?.peekLast() ?: return
                         when (param.args.getOrNull(0)) {
                             "句子查询模板" -> {
+                                owner.titleContent?.let { content ->
+                                    val composer = requireNotNull(param.args[textComposerSlot])
+                                    val modifier = param.args.getOrNull(1) ?: ui.value("modifier")
+                                    HostAndroidViews(hook.classLoader).render(
+                                        ui.function(ui.type("function1")) { content }, modifier, composer,
+                                    )
+                                    param.result = null
+                                    return
+                                }
                                 param.args[0] = owner.titleText
                                 owner.titleStyle?.let { role ->
                                     val typography = requireNotNull(HostTypographyBindings.current)
@@ -155,6 +166,34 @@ internal object HostSettingsDialogs {
                         val window = param.thisObject ?: return
                         val dismiss = param.args.getOrNull(0) ?: return
                         HostDialogCancellation.bindWindow(window, dismiss)
+                        (window as? Dialog)?.window?.let { actual ->
+                            hook.activityProvider()?.let { inheritScanSystemBars(actual, it) }
+                        }
+                    }
+                })
+                // 宿主在每次重组时重新写入窗口参数，必须在该入口后统一覆盖系统栏与遮罩。
+                val updateWindow = native.type("window").declaredMethods.single {
+                    it.returnType == Void.TYPE && it.parameterTypes.toList() ==
+                        native.constructor("window").parameterTypes.take(2) +
+                        native.constructor("window").parameterTypes[3]
+                }
+                handles += HookRuntime.hookMethod(updateWindow, object : HookCallback() {
+                    override fun after(param: Call) {
+                        val dialog = param.thisObject as? Dialog ?: return
+                        val activity = hook.activityProvider() ?: return
+                        dialog.window?.let { inheritScanSystemBars(it, activity) }
+                    }
+                })
+                HookRuntime.deoptimize(updateWindow)
+                handles += HookRuntime.hookMethod(Dialog::class.java.getDeclaredMethod("show"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        val dialog = param.thisObject as? Dialog ?: return
+                        // 模块 Material 弹窗和底部工作表另有内容遮罩，仅统一窗口边界。
+                        val name = dialog.javaClass.name
+                        if (dialog.javaClass.classLoader !== HostSettingsDialogs::class.java.classLoader ||
+                            !(name.endsWith(".DialogWrapper") || name.endsWith(".ModalBottomSheetDialog"))) return
+                        val activity = hook.activityProvider() ?: return
+                        dialog.window?.let { com.reamicro.fix.ui.DialogWindowStyle.apply(it, activity.window) }
                     }
                 })
                 handles += HookRuntime.hookMethod(native.method("windowTouch"), object : HookCallback() {
@@ -235,6 +274,11 @@ internal object HostSettingsDialogs {
         dialog.applicationTheme = true
     }
 
+    fun inheritSystemBars(dialog: Dialog) {
+        check(dialog is NativeDialog && !dialog.isShowing)
+        dialog.inheritSystemBars = true
+    }
+
     fun setActions(dialog: Dialog, actions: List<Action>) {
         check(dialog is NativeDialog && !dialog.isShowing)
         dialog.actions = actions.toList()
@@ -308,8 +352,10 @@ internal object HostSettingsDialogs {
         }
     }
 
-    private fun prepareContent(view: View): String? {
-        var title: String? = null
+    private data class PreparedTitle(val text: String, val content: View? = null)
+
+    private fun prepareContent(view: View): PreparedTitle? {
+        var title: PreparedTitle? = null
         fun visit(current: View) {
             if (current.tag === CardTag) {
                 current.background = null
@@ -317,8 +363,17 @@ internal object HostSettingsDialogs {
             }
             if (current !is ViewGroup) return
             for (child in (0 until current.childCount).map(current::getChildAt)) {
-                if (title == null && child is TextView && child.tag === TitleTag) {
-                    title = child.text.toString()
+                if (title == null && child is ViewGroup && child.tag === TitleRowTag) {
+                    // 带操作入口的标题必须整行移入宿主标题区，不能只提取左侧文字。
+                    val label = (0 until child.childCount).map(child::getChildAt)
+                        .filterIsInstance<TextView>().first { it.tag === TitleTag }
+                    title = PreparedTitle(label.text.toString(), child)
+                    current.removeView(child)
+                    child.layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                } else if (title == null && child is TextView && child.tag === TitleTag) {
+                    title = PreparedTitle(child.text.toString())
                     current.removeView(child)
                 } else visit(child)
             }
@@ -333,9 +388,11 @@ internal object HostSettingsDialogs {
     ) : Dialog(owner) {
         var titleText = "提示"; private set
         var titleStyle: String? = null
+        var titleContent: View? = null; private set
         var form: View? = null; private set
         var actions: List<Action> = emptyList()
         var applicationTheme = false
+        var inheritSystemBars = false
         var actionSlot = 0
         var renderingActions = false
         private var root: ViewGroup? = null
@@ -363,6 +420,7 @@ internal object HostSettingsDialogs {
         }
         private val formListener = object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(view: View) {
+                renderedWindow()?.let { inheritScanSystemBars(it, owner) }
                 val decor = view.rootView
                 if (nativeDecor !== decor) {
                     nativeDecor?.removeOnAttachStateChangeListener(nativeWindowListener)
@@ -389,7 +447,9 @@ internal object HostSettingsDialogs {
             .firstOrNull { it.decorView.isAttachedToWindow }
 
         fun prepare(content: View, dismissOnThemeChange: Boolean) {
-            titleText = prepareContent(content) ?: titleText
+            val title = prepareContent(content)
+            titleText = title?.text ?: titleText
+            titleContent = title?.content
             form = LimitedBody(owner, content)
             dismissForConfiguration = dismissOnThemeChange
         }
@@ -569,6 +629,7 @@ internal object HostSettingsDialogs {
                 release { (mount.parent as? ViewGroup)?.removeView(mount) }
             }
             root = null
+            titleContent = null
             actions = emptyList()
             cancellation.release()
             synchronized(dialogs) { dialogs -= this }

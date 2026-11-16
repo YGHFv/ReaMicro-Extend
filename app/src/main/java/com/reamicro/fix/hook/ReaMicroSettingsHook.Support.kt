@@ -914,11 +914,7 @@ internal fun ReaMicroSettingsHook.showExportProgress(activity: Activity, title: 
                     false
                 }
             }
-            dialog.window?.let { window ->
-                window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                window.setDimAmount(0.18f)
-                window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            }
+            dialog.window?.let { inheritScanSystemBars(it, activity) }
             dialog.show()
             dialog.window?.setLayout(
                 ViewGroup.LayoutParams.MATCH_PARENT,

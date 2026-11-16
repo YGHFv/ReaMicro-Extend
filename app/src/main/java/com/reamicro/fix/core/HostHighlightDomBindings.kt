@@ -102,8 +102,9 @@ internal object HostHighlightDomBindings {
         check(c.method("document.body").let { !Modifier.isStatic(it.modifiers) && it.declaringClass == c.type("document") &&
             it.parameterCount == 0 && it.returnType == c.type("container") })
         check(c.method("document.parse").let { Modifier.isStatic(it.modifiers) && it.returnType == c.type("container") &&
-            it.parameterCount == 5 && it.parameterTypes.first() == c.type("sourceNode") &&
-            it.parameterTypes[3] == String::class.java && it.parameterTypes.last() == java.lang.Boolean.TYPE })
+            it.parameterCount in 5..6 && it.parameterTypes.first() == c.type("sourceNode") &&
+            it.parameterTypes[3] == String::class.java && it.parameterTypes[4] == java.lang.Boolean.TYPE &&
+            (it.parameterCount == 5 || it.parameterTypes[5].isEnum) })
         check(v.getValue("value:document.callers").toInt() in 1..512)
         c.documentCallers()
         return c

@@ -163,7 +163,7 @@ internal object HostSyncBindings {
         } == 1)
         check(m.method("providerChoices").let {
             Modifier.isStatic(it.modifiers) && it.returnType == Void.TYPE &&
-                it.parameterTypes.count { parameter -> parameter == function0 } == 1 &&
+                it.parameterTypes.count { parameter -> parameter == function0 } in 1..2 &&
                 it.parameterTypes.count { parameter -> parameter == composer } == 1
         })
         check(m.type("configurationPreset").isEnum)

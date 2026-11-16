@@ -145,7 +145,14 @@ internal object HostSyncQueries {
         val function0 = type("function0", known("kotlin.jvm.functions.Function0"))
         val composer = type("composer", known("androidx.compose.runtime.Composer"))
         val other = method("otherProvider", choices.invokes.filter { it.paramTypeNames == listOf(function0.name, composer.name, "int") &&
-            it.returnTypeName == "void" && Modifier.isStatic(it.modifiers) && it.usingStrings.isEmpty() }.one("other S3 provider row"))
+            it.returnTypeName == "void" && Modifier.isStatic(it.modifiers) && it.usingStrings.isEmpty() &&
+            // 其他 S3 行使用现场构造的回调，付费提示行直接接收配置页的 Function0 参数。
+            calls.calls(choices.descriptor).filter { call -> call.descriptor == it.descriptor }.none { call ->
+                (call.arguments.firstOrNull() as? HostDexCalls.Parameter)?.let { argument ->
+                    choices.paramTypeNames.getOrNull(argument.index) == function0.name
+                } == true
+            }
+        }.one("other S3 provider row"))
         out.putAll(HostS3ConfigurationQueries.query(bridge, apk, config.name, composer.name, function0.name, choices.descriptor, other.descriptor))
         check(operations.map { it.descriptor }.toSet() == HostSyncBindings.OPERATIONS.map { out.getValue("method:$it") }.toSet())
         return out

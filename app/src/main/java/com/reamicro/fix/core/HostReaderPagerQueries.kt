@@ -37,19 +37,48 @@ internal object HostReaderPagerQueries {
             .usingEqStrings("SwipePagerDeps(getVirtualPage="))).filter { it.paramCount == 0 && it.returnTypeName == "java.lang.String" }
             .one("swipe dependencies").declaredClass)
         put("class:swipeDeps", swipeDeps.descriptor)
-        val prefix = listOf(receiver.name, model.name, flows.name, actions.name, deps.name, swipeDeps.name)
-        val effects = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().returnType("void").paramCount(9, 12)))
-            .filter { Modifier.isStatic(it.modifiers) && it.paramTypeNames.take(6) == prefix &&
+        val effects = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().returnType("void").paramCount(9, 13)))
+            .filter { Modifier.isStatic(it.modifiers) &&
+                it.paramTypeNames.filter { p -> p in listOf(receiver.name, model.name, flows.name, actions.name, deps.name, swipeDeps.name) } ==
+                    listOf(receiver.name, model.name, flows.name, actions.name, deps.name, swipeDeps.name) &&
                 it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") }
-        for ((role, suffix) in listOf("swipe" to emptyList(), "overlay" to listOf("int", "boolean", function1.name, function2.name),
+        for ((role, suffix) in listOf("swipe" to emptyList(), "overlay" to listOf("int", "boolean", function1.name, function1.name, function2.name),
             "static" to listOf("int", function1.name, function1.name, function0.name))) {
             val effect = method(role, effects.filter {
-                if (role == "swipe") it.paramCount == 9 && it.paramTypes[6].isA(pager)
-                else it.paramTypeNames.drop(6).dropLast(2) == suffix
+                val tail = it.paramTypeNames.drop(it.paramTypeNames.indexOf(swipeDeps.name) + 1).dropLast(2)
+                if (role == "swipe") tail.isEmpty() || (tail.size == 1 && it.paramTypes[it.paramCount - 3].isA(pager))
+                else tail == suffix || (role == "overlay" && tail == listOf("int", "boolean", function1.name, function2.name))
             }.one("$role effects"))
             index("$role.owner", effect.paramTypeNames.indices.single { effect.paramTypeNames[it] == receiver.name })
             index("$role.model", effect.paramTypeNames.indices.single { effect.paramTypeNames[it] == model.name })
-            index("$role.current", effect.paramTypeNames.indices.single {
+            val modern = role == "swipe" && effect.paramTypeNames.indexOf(swipeDeps.name) == effect.paramCount - 3
+            if (modern) {
+                put("value:swipe.native", "true")
+                index("swipe.current", -1)
+                val render = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
+                    .paramCount(12).returnType("void"))).filter {
+                    it.paramCount == 12 && it.paramTypeNames.take(9) ==
+                        listOf("int", "int", "boolean", "int", function1.name,
+                            function2.name, function2.name, function2.name, function0.name) &&
+                        it.paramTypeNames.takeLast(2) == listOf(composer.name, "int")
+                }.one("native swipe render")
+                val callback = render.callers.filter { Modifier.isPublic(it.modifiers) &&
+                    !Modifier.isStatic(it.modifiers) && it.paramTypeNames == List(2) { "java.lang.Object" } &&
+                    it.declaredClass?.methods?.any { ctor -> ctor.isConstructor &&
+                        ctor.paramTypeNames.containsAll(listOf(receiver.name, model.name, swipeDeps.name)) } == true }
+                    .one("native swipe content")
+                val ctor = callback.declaredClass!!.methods.filter { it.isConstructor &&
+                    it.paramTypeNames.containsAll(listOf(receiver.name, model.name, swipeDeps.name)) }
+                    .one("native swipe content capture")
+                method("swipe.content", callback)
+                method("swipe.render", render)
+                for ((key, cls) in listOf("owner" to receiver, "model" to model)) {
+                    val slot = ctor.paramTypeNames.indices.single { ctor.paramTypeNames[it] == cls.name }
+                    put("field:swipe.content.$key", flow.writes(ctor.descriptor).single {
+                        it.receiver == HostDexCalls.Parameter(0) && it.value == HostDexCalls.Parameter(slot + 1)
+                    }.field)
+                }
+            } else index("$role.current", effect.paramTypeNames.indices.single {
                 if (role == "swipe") effect.paramTypes[it].isA(pager)
                 else it < effect.paramCount - 2 && effect.paramTypeNames[it] == "int"
             })

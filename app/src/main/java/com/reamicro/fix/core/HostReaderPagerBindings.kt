@@ -47,13 +47,27 @@ internal object HostReaderPagerBindings {
             check(Modifier.isStatic(m.modifiers) && m.returnType == Void.TYPE &&
                 m.parameterTypes.takeLast(2) == listOf(s.type("composer"), int))
             argument(role, "owner", s.type("receiver")); argument(role, "model", s.type("model"))
-            val slot = s.index("$role.current"); check(slot in m.parameterTypes.indices)
+            val slot = s.index("$role.current")
+            if (role == "swipe" && values["value:swipe.native"] == "true") {
+                check(slot == -1)
+                check(s.method("swipe.render").parameterTypes.take(4) ==
+                    listOf(int, int, java.lang.Boolean.TYPE, int))
+                for ((key, type) in listOf("owner" to "receiver", "model" to "model")) check(
+                    s.field("swipe.content.$key").let { !Modifier.isStatic(it.modifiers) &&
+                        it.declaringClass == s.method("swipe.content").declaringClass &&
+                        it.type.isAssignableFrom(s.type(type)) })
+            } else {
+            check(slot in m.parameterTypes.indices)
             if (role == "swipe") check(s.type("pager").isAssignableFrom(m.parameterTypes[slot])) else check(m.parameterTypes[slot] == int)
             check(setOf(s.index("$role.owner"), s.index("$role.model"), slot).size == 3)
+            }
             val prefix = listOf("receiver", "model", "flows", "actions", "deps", "swipeDeps").map(s::type)
-            check(m.parameterTypes.take(6) == prefix)
-            if (role == "overlay") check(m.parameterTypes.drop(6).dropLast(2) == listOf(int, java.lang.Boolean.TYPE, s.type("function1"), s.type("function2")))
-            if (role == "static") check(m.parameterTypes.drop(6).dropLast(2) == listOf(int, s.type("function1"), s.type("function1"), s.type("function0")))
+            check(m.parameterTypes.filter { it in prefix } == prefix)
+            val tail = m.parameterTypes.drop(m.parameterTypes.indexOf(s.type("swipeDeps")) + 1).dropLast(2)
+            if (role == "overlay") check(tail in listOf(
+                listOf(int, java.lang.Boolean.TYPE, s.type("function1"), s.type("function2")),
+                listOf(int, java.lang.Boolean.TYPE, s.type("function1"), s.type("function1"), s.type("function2"))))
+            if (role == "static") check(tail == listOf(int, s.type("function1"), s.type("function1"), s.type("function0")))
         }
         instance("current", "pager", int); instance("scrolling", "pager", java.lang.Boolean.TYPE)
         for (role in listOf("progress", "bookProgress")) check(s.field("model.$role").let {

@@ -214,7 +214,8 @@ internal val ONLINE_COMPLETION_PROGRESS_CHAPTER_REGEX =
 internal val ONLINE_COMPLETION_FAILED_COUNT_REGEX = Regex("失败\\s*(\\d+)\\s*章")
 internal val ONLINE_COMPLETION_CHAPTER_FILE_REGEX = Regex("""chapter_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
 internal val ONLINE_COMPLETION_VOLUME_FILE_REGEX = Regex("""volume_(\d+)\.xhtml""", RegexOption.IGNORE_CASE)
-internal val ONLINE_DIVIDER_LINE_REGEX = Regex("""^[=_~*·•…⋯・◆◇■□●○※＊\-‐‑‒–—―]{2,}$""")
+// 英文省略号须由至少三个句点独占一行，避免把小数、正文或路径识别为分割线。
+internal val ONLINE_DIVIDER_LINE_REGEX = Regex("""^(?:\.{3,}|[=_~*·•…⋯・◆◇■□●○※＊\-‐‑‒–—―]{2,})$""")
 internal val ONLINE_COMPLETION_INLINE_STYLE_REGEX =
     Regex("""<style\s+type=["']text/css["']>[\s\S]*?</style>""", RegexOption.IGNORE_CASE)
 internal val ONLINE_COMPLETION_ESCAPED_ENTITY_REGEX = Regex(

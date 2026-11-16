@@ -27,9 +27,12 @@ internal object DexKitUpdateScan {
     }
     private var resumed = WeakReference<Activity>(null)
     private var dialog: Dialog? = null
+    private var displayedSession: Session? = null
+    private var displayedFinished = false
     private var session: Session? = null
     private var attempted: HostScanUpdateStamp? = null
     private var checking = false
+    private var startupRunning = false
     private val stateListeners = LinkedHashSet<() -> Unit>()
 
     init {
@@ -58,6 +61,58 @@ internal object DexKitUpdateScan {
         var report: HostAutoScanner.Report? = null,
         var error: String? = null,
     )
+
+    /** 在启动查询开始时检查更新，首个页面恢复前台即可提示，不再重复强制扫描。 */
+    fun beginStartup(context: Context) {
+        startupRunning = true
+        checking = true
+        worker.execute {
+            val result = runCatching {
+                val installation = readInstallation(context)
+                val previous = HostScanUpdateStamp.decode(
+                    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(COMPLETED, null))
+                installation to previous
+            }
+            main.post {
+                result.onSuccess { (installation, previous) ->
+                    if (installation.stamp.needsScan(previous, attempted)) {
+                        session = Session(installation, installation.stamp.changeReason(previous))
+                        attempted = installation.stamp
+                        showSession()
+                    }
+                }.onFailure { HookRuntime.logError("ReaMicro startup update check failed", it) }
+            }
+        }
+    }
+
+    fun onStartupResume(activity: Activity) {
+        resumed = WeakReference(activity)
+        if (startupRunning || session != null) showSession()
+    }
+
+    fun finishStartup(context: Context, report: HostAutoScanner.Report?, failure: Throwable? = null) {
+        worker.execute {
+            val result = runCatching {
+                if (failure != null) throw failure
+                check(report?.functionalityComplete == true) {
+                    report?.runtimeFailures?.firstOrNull() ?: "启动扫描未完成"
+                }
+                recordStartupValidation(context)
+            }
+            main.post {
+                val wasBusy = isBusy()
+                startupRunning = false
+                checking = false
+                session?.takeUnless { it.manual }?.let {
+                    it.report = report
+                    it.error = result.exceptionOrNull()?.message
+                    it.finished = true
+                }
+                notifyBusyChanged(wasBusy)
+                showSession()
+            }
+        }
+    }
 
     fun onResume(activity: Activity) {
         val wasBusy = isBusy()
@@ -117,7 +172,7 @@ internal object DexKitUpdateScan {
 
     fun onDestroyed(activity: Activity) = onPause(activity)
 
-    /** Manual scans share the lifecycle/session owner, so rotation and backgrounding cannot lose the result. */
+    /** 手动扫描共享生命周期和会话，旋转或切换到后台不会丢失结果。 */
     fun requestManualScan(activity: Activity): Boolean {
         if (checking || isBusy()) return false
         resumed = WeakReference(activity)
@@ -173,6 +228,9 @@ internal object DexKitUpdateScan {
         }
     }
     fun isBusy(): Boolean = session?.finished == false
+
+    /** 启动首帧门禁只允许独立扫描窗口先显示，手动扫描不影响宿主页绘制。 */
+    fun isStartupDialogShowing(): Boolean = dialog?.isShowing == true && session?.manual == false
 
     fun addStateListener(listener: () -> Unit) {
         stateListeners += listener
@@ -230,34 +288,61 @@ internal object DexKitUpdateScan {
 
     private fun showSession(): Boolean {
         val activity = liveActivity() ?: return false
-        val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return false
         val current = session ?: return false
-        dismissDialog()
-        return runCatching {
-            dialog = hook.showDexKitUpdateDialog(
-                activity, current.reason, current.finished, current.report, current.error,
-            ) {
-                if (session === current && current.finished) {
-                    val prefs = activity.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                    if (HostScanUpdateStamp.decode(prefs.getString(PENDING, null)) == current.installation.stamp) {
-                        prefs.edit().remove(PENDING).remove(PENDING_REASON).apply()
-                    }
-                    session = null
-                    dismissDialog()
-                    HookRuntime.logAlways("ReaMicro DexKit startup result acknowledged")
+        // 查询陆续就绪和页面恢复会重复请求展示；同一次扫描只在完成时切换窗口。
+        if (dialog?.isShowing == true && displayedSession === current &&
+            displayedFinished == current.finished) return true
+        val hook = ReaMicroSettingsHook.activeInstanceOrNull()
+        val nativeReady = hook != null && com.reamicro.fix.core.HostDialogBindings.current != null &&
+            com.reamicro.fix.core.HostUiBindings.current != null
+        val onClose = {
+            if (session === current && current.finished) {
+                val prefs = activity.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                if (HostScanUpdateStamp.decode(prefs.getString(PENDING, null)) == current.installation.stamp) {
+                    prefs.edit().remove(PENDING).remove(PENDING_REASON).apply()
                 }
+                session = null
+                dismissDialog()
+                HookRuntime.logAlways("ReaMicro DexKit startup result acknowledged")
             }
-            HookRuntime.logAlways("ReaMicro DexKit result dialog shown: finished=${current.finished}")
-            true
-        }.getOrElse {
-            HookRuntime.logError("ReaMicro DexKit update dialog failed", it)
-            false
         }
+        fun fallback(): Dialog = showStartupScanProgress(activity,
+            if (current.finished) listOfNotNull(current.error, current.report?.summary())
+                .joinToString("\n").ifBlank { "扫描未完成，请重载后重试" } else null) {
+            if (session === current && current.finished) {
+                onClose()
+                main.post { com.reamicro.fix.reload.HostHotReload.request(activity) }
+            }
+        }
+        val replacement = runCatching {
+            // 扫描中保持独立标题行，避免宿主提取标题后把右上角进度圈挪到内容区。
+            if (!current.finished || !nativeReady || hook == null) return@runCatching fallback()
+            hook.showDexKitUpdateDialog(
+                activity, current.reason, current.finished, current.report, current.error,
+                onClose,
+            )
+        }.recoverCatching {
+            HookRuntime.logError("ReaMicro DexKit update dialog failed", it)
+            fallback()
+        }.getOrElse {
+            // 新窗口未能显示时保留旧窗口，不让扫描过程或结果无提示地消失。
+            HookRuntime.logError("ReaMicro DexKit fallback dialog failed", it)
+            return false
+        }
+        val previous = dialog
+        dialog = replacement
+        displayedSession = current
+        displayedFinished = current.finished
+        runCatching { previous?.dismiss() }
+        HookRuntime.logAlways("ReaMicro DexKit result dialog shown: finished=${current.finished}")
+        return true
     }
 
     private fun dismissDialog() {
         val previous = dialog
         dialog = null
+        displayedSession = null
+        displayedFinished = false
         runCatching { previous?.dismiss() }
     }
 

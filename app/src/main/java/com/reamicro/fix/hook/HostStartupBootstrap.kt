@@ -27,8 +27,10 @@ internal class HostStartupBootstrap(
     private var current = WeakReference<Activity>(null)
     private val created = WeakHashMap<Activity, Boolean>()
     private val attached = WeakHashMap<Activity, Boolean>()
+    private val drawGates = WeakHashMap<Activity, HostStartupDrawGate>()
     private var resumed = false
     private var ready = false
+    private var startupFailed = false
     private var startedAt = 0L
     private var bootstrapHook: io.github.libxposed.api.XposedInterface.HookHandle? = null
 
@@ -62,11 +64,14 @@ internal class HostStartupBootstrap(
             current.clear()
             created.clear()
             attached.clear()
+            drawGates.values.toList().forEach(HostStartupDrawGate::destroy)
+            drawGates.clear()
         }
     }
 
     private fun start(install: () -> Unit) {
         startedAt = SystemClock.elapsedRealtime()
+        application?.let(DexKitUpdateScan::beginStartup)
         val task = HostStartupTask(
             background = { action ->
                 ModuleResources.backgroundThread("ReaMicro-Host-Bootstrap", true, action)
@@ -86,10 +91,8 @@ internal class HostStartupBootstrap(
                 }
                 check(missingUi.isEmpty()) { "Startup UI bindings unavailable: ${missingUi.joinToString()}" }
                 val context = application
-                if (report?.functionalityComplete == true) {
-                    if (context != null) runCatching { DexKitUpdateScan.recordStartupValidation(context) }
-                        .onFailure { HookRuntime.logError("ReaMicro startup validation stamp was not saved", it) }
-                } else {
+                if (context != null) DexKitUpdateScan.finishStartup(context, report)
+                if (report?.functionalityComplete != true) {
                     // Optional bindings already fail independently in their feature installers.
                     // Keep the working settings/diagnostics page reachable without writing a
                     // misleading "complete" validation stamp.
@@ -108,8 +111,12 @@ internal class HostStartupBootstrap(
                     "durationMs=${SystemClock.elapsedRealtime() - startedAt} ${HookInstallReport.summaryLine()}")
             },
             failed = { error ->
+                startupFailed = true
+                application?.let { DexKitUpdateScan.finishStartup(it,
+                    com.reamicro.fix.core.HostAutoScanner.snapshot(), error) }
                 HookInstallReport.record("Entry", "BackgroundBootstrap", false, error)
                 HookRuntime.logError("ReaMicro startup background installation failed", error)
+                releaseDrawGates()
             },
         )
         ModuleResources.blockWhile { if (!task.finished) "宿主动态绑定仍在初始化" else null }
@@ -136,36 +143,49 @@ internal class HostStartupBootstrap(
             if (created[activity] == true) HostCompositionReload.refresh(activity)
             attached[activity] = true
             HookInstallReport.record("Entry", "StartupComposition", true)
+            drawGates[activity]?.close()
+            HookRuntime.logAlways("ReaMicro startup first frame ready pid=${android.os.Process.myPid()}")
         }.onFailure {
             attached.remove(activity)
             HookInstallReport.record("Entry", "StartupComposition", false, it)
             HookRuntime.logError("ReaMicro startup page attachment deferred until next resume", it)
+            drawGates[activity]?.close()
         }
+    }
+
+    private fun releaseDrawGates() {
+        drawGates.values.toList().forEach(HostStartupDrawGate::destroy)
+        drawGates.clear()
     }
 
     override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
         observe(activity, false)
+        if (isHost(activity)) created[activity] = !ready
     }
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
         if (!isHost(activity)) return
         observe(activity, false)
-        created[activity] = !ready
+        if (!created.containsKey(activity)) created[activity] = !ready
+        if (!startupFailed) drawGates.getOrPut(activity) { HostStartupDrawGate(activity) }
         // Application dispatches this while onCreate is still on the stack.
         main.post { attach(activity) }
     }
     override fun onActivityResumed(activity: Activity) {
         observe(activity, true)
+        if (isHost(activity)) DexKitUpdateScan.onStartupResume(activity)
         attach(activity)
     }
     override fun onActivityPaused(activity: Activity) {
         if (current.get() === activity) {
             resumed = false
+            DexKitUpdateScan.onPause(activity)
             entry.observeStartupActivity(activity, false)
         }
     }
     override fun onActivityDestroyed(activity: Activity) {
         created.remove(activity)
         attached.remove(activity)
+        drawGates.remove(activity)?.destroy()
         if (current.get() === activity) current.clear()
     }
     override fun onActivityStarted(activity: Activity) = Unit

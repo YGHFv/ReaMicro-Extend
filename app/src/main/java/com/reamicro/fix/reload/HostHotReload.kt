@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
+import android.view.ViewTreeObserver
 import android.widget.Toast
 import com.reamicro.fix.xposed.HookRuntime
 
@@ -19,7 +20,7 @@ object HostHotReload {
 
     fun request(activity: Activity) {
         if (activity.isDestroyed || activity.isFinishing || pending) return
-        val callbackLease = ModuleResources.lease() ?: return
+        val callbackLease = ModuleResources.lease("hot-reload-wake") ?: return
         pending = true
         val serial = ++requestSerial
         val context = activity.applicationContext
@@ -57,12 +58,58 @@ object HostHotReload {
     }
 
     private fun submit(activity: Activity) {
+        if (activity.hasWindowFocus()) {
+            submitFocused(activity)
+            return
+        }
+        // Compose 弹窗注销与窗口焦点恢复不在同一队列回合，等焦点事件后再提交。
+        val decor = activity.window.decorView
+        val observer = decor.viewTreeObserver
+        val lease = ModuleResources.lease("hot-reload-focus")
+        if (lease == null || activity.isDestroyed || activity.isFinishing || !observer.isAlive) {
+            lease?.close()
+            pending = false
+            toast(activity, "阅微页面已退出，未提交热重载")
+            return
+        }
+        var waiting = true
+        lateinit var listener: ViewTreeObserver.OnWindowFocusChangeListener
+        lateinit var timeout: Runnable
+        fun release() {
+            if (!waiting) return
+            waiting = false
+            if (observer.isAlive) observer.removeOnWindowFocusChangeListener(listener)
+            main.removeCallbacks(timeout)
+            lease.close()
+        }
+        listener = ViewTreeObserver.OnWindowFocusChangeListener { focused ->
+            if (focused && waiting) {
+                release()
+                main.post { submitFocused(activity) }
+            }
+        }
+        timeout = Runnable {
+            if (waiting) {
+                release()
+                pending = false
+                toast(activity, "阅微窗口尚未恢复前台，请返回阅微后重试")
+            }
+        }
+        observer.addOnWindowFocusChangeListener(listener)
+        main.postDelayed(timeout, 2_000)
+        if (activity.hasWindowFocus()) listener.onWindowFocusChanged(true)
+    }
+
+    private fun submitFocused(activity: Activity) {
         // 原地重载由框架异步执行，不再启动等待 Activity，也不在宿主保留跨代 Binder 回调。
         runCatching {
-            check(!activity.isFinishing && !activity.isDestroyed && activity.hasWindowFocus())
+            check(!activity.isFinishing && !activity.isDestroyed && activity.hasWindowFocus()) {
+                "阅微窗口已离开前台"
+            }
             val response = activity.contentResolver.call(uri, HotReloadContract.REQUEST, null,
                 Bundle().apply { putBoolean(HotReloadContract.IN_PLACE, true) })
             requireNotNull(response?.getString(HotReloadContract.ID))
+            HookRuntime.logAlways("ReaMicro API102 request submitted pid=${android.os.Process.myPid()}")
         }.onFailure {
             HookRuntime.logError("ReaMicro API102 request failed", it)
             toast(activity, "无法提交热重载，未退出阅微")

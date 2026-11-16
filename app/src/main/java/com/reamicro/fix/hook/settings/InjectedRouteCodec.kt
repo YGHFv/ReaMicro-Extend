@@ -19,7 +19,6 @@ internal object InjectedRouteCodec {
         "profile" to InjectedRoute.ProfileBackgroundSettings,
         "cloud" to InjectedRoute.CloudCompletionSettings,
         "account" to InjectedRoute.AccountCompletionSettings,
-        "edit" to InjectedRoute.EditCompletionSettings,
         "api" to InjectedRoute.ApiServerSettings,
         "cloud-tasks" to InjectedRoute.CloudAutomationSettings,
         "local-tasks" to InjectedRoute.LocalAutomationSettings,
@@ -36,7 +35,6 @@ internal object InjectedRouteCodec {
         "fonts" to InjectedRoute.FontSettings,
         "font-library" to InjectedRoute.FontLibrary,
         "about" to InjectedRoute.AboutCompletion,
-        "module-diagnostics" to InjectedRoute.ModuleDiagnostics,
         "discover" to InjectedRoute.Discover,
     )
 
@@ -75,6 +73,9 @@ internal object InjectedRouteCodec {
 
     fun decode(data: Bundle): InjectedRoute? {
         val page = data.getString("page") ?: return null
+        // 已移除的编辑页面在旧状态恢复时转到保留文件编辑入口的阅读补全。
+        if (page == "edit") return InjectedRoute.ReaderCompletionSettings
+        if (page == "module-diagnostics") return InjectedRoute.AboutCompletion
         pages[page]?.let { return it }
         val key = data.getString("book").orEmpty()
         val title = data.getString("title").orEmpty()

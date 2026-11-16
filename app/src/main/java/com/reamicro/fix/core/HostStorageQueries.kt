@@ -241,11 +241,15 @@ internal object HostStorageQueries {
 
             val uriSql = "SELECT * FROM books WHERE uid=? AND uri=? AND created > 0 LIMIT 1"
             val sqlBody = anchor(uriSql).filter { it.paramTypeNames == listOf("java.lang.Object") &&
-                it.returnTypeName == "java.lang.Object" && !Modifier.isStatic(it.modifiers) }.one("library URI SQL")
+                it.returnTypeName == "java.lang.Object" && Modifier.isPublic(it.modifiers) &&
+                !Modifier.isStatic(it.modifiers) }.one("library URI SQL")
             val sqlOwner = requireNotNull(sqlBody.declaredClass)
-            val sqlCtor = sqlOwner.methods.filter { it.isConstructor && it.paramTypeNames == listOf("long", "java.lang.String", "byte") }
+            val sqlCtor = sqlOwner.methods.filter { it.isConstructor &&
+                it.paramTypeNames.sorted() == listOf("long", "java.lang.String", "byte").sorted() }
                 .one("library URI SQL closure")
-            val sqlTagField = fieldFromParameter(sqlCtor, 2)
+            val sqlTagSlot = sqlCtor.paramTypeNames.indexOf("byte")
+            val sqlTextSlot = sqlCtor.paramTypeNames.indexOf("java.lang.String")
+            val sqlTagField = fieldFromParameter(sqlCtor, sqlTagSlot)
             val nativeCandidates = shelf.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) &&
                 it.paramTypeNames == listOf("java.lang.String") && it.returnType?.isA(nativeFlow) == true }
             val liveUri = nativeCandidates.filter { candidate ->
@@ -263,8 +267,8 @@ internal object HostStorageQueries {
                         call.arguments[2] == HostDexCalls.Parameter(0) && call.arguments[3] == HostDexCalls.Parameter(1) &&
                             code.branchContains(body.descriptor, tagField, tag.value.toInt(), sqlCtor.descriptor) &&
                             sqlCalls.all { sql ->
-                                val sqlTag = sql.arguments[3] as? HostDexCalls.Literal
-                                sql.arguments[2] == HostDexCalls.Field(textField) && sqlTag != null &&
+                                val sqlTag = sql.arguments[sqlTagSlot + 1] as? HostDexCalls.Literal
+                                sql.arguments[sqlTextSlot + 1] == HostDexCalls.Field(textField) && sqlTag != null &&
                                     code.branchString(sqlBody.descriptor, sqlTagField, sqlTag.value.toInt(), uriSql)
                             }
                     }

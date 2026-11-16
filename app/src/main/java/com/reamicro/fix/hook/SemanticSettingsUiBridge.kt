@@ -9,6 +9,7 @@ import com.reamicro.fix.core.HostReaderFeatures
 import com.reamicro.fix.core.HostRestart
 import com.reamicro.fix.core.HostSettingsFeatures
 import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.hook.settings.InjectedRoute
 import com.reamicro.fix.settings.ModuleSettingsSnapshot
 import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
@@ -71,17 +72,13 @@ internal class SemanticSettingsUiBridge(private val hook: ReaMicroSettingsHook) 
 
     /** Uses the existing platform dialog controls while the full host Compose screen ABI is unavailable. */
     internal fun openSettings(): Unit = page("补全计划") { card, colors, current ->
-        toggle(card, colors, "补全计划", { it.moduleEnabled }) { hook.changeModuleEnabled(it) { openSettings() } }
-        if (!hook.settings.snapshot().moduleEnabled) return@page
         card.addView(hook.settingsDialogStatus(current.context,
-            "设置保存到当前宿主；具体可用功能可在模块自检中查看。", colors))
+            "设置保存到当前宿主；可用功能由 DexKit 扫描确认。", colors))
         action(card, colors, "阅读") { readerSettings() }
         action(card, colors, "书架与关联") { librarySettings() }
         action(card, colors, "同步与下载") { cloudSettings() }
-        action(card, colors, "屏幕方向") { rotationSettings() }
         action(card, colors, "账户与编辑") { accountSettings() }
         action(card, colors, "AI 与词典") { aiSettings() }
-        action(card, colors, "模块自检") { hook.openHookInstallReportDialog() }
         action(card, colors, "DexKit 扫描") { hook.openDexKitScanDialog() }
         action(card, colors, "日志与其他设置") { diagnosticSettings() }
     }
@@ -136,8 +133,7 @@ internal class SemanticSettingsUiBridge(private val hook: ReaMicroSettingsHook) 
     }
 
     private fun accountSettings(): Unit = page("账户与编辑") { card, colors, _ ->
-        toggle(card, colors, "账户导出", { it.accountExportEnabled }, hook.settings::setAccountExportEnabled)
-        toggle(card, colors, "账户缓存清理", { it.accountCacheCleanupEnabled }, hook.settings::setAccountCacheCleanupEnabled)
+        toggle(card, colors, "账号数据导出", { it.accountExportEnabled }, hook.settings::setAccountExportEnabled)
         toggle(card, colors, "文件编辑", { it.editFileEnabled }, hook.settings::setEditFileEnabled)
     }
 
@@ -167,10 +163,9 @@ internal class SemanticSettingsUiBridge(private val hook: ReaMicroSettingsHook) 
     }
 
     private fun diagnosticSettings(): Unit = page("日志与其他设置") { card, colors, _ ->
-        toggle(card, colors, "崩溃上传", { it.hostCrashUploadEnabled }) { checked ->
-            check(hook.settings.setHostCrashUploadEnabled(checked)) { "保存失败" }
-            toast("已保存，重启阅微后生效")
-        }
+        action(card, colors, "自动任务") { hook.openNestedInjectedRoute(InjectedRoute.LocalAutomationSettings) }
+        action(card, colors, "旋转补全") { rotationSettings() }
+        toggle(card, colors, "缓存清理", { it.accountCacheCleanupEnabled }, hook.settings::setAccountCacheCleanupEnabled)
         toggle(card, colors, "简洁日志", { it.conciseLogEnabled }, hook.settings::setConciseLogEnabled)
         toggle(card, colors, "高亮日志", { it.readerHighlightPerformanceLogEnabled }, hook.settings::setReaderHighlightPerformanceLogEnabled)
         action(card, colors, "导出模块日志") { hook.exportModuleLog() }
@@ -183,7 +178,7 @@ internal class SemanticSettingsUiBridge(private val hook: ReaMicroSettingsHook) 
             if (!ModuleResources.accepting || activity.isFinishing || activity.isDestroyed) return@runOnUiThread
             runCatching {
                 dialog.get()?.dismiss()
-                val current = Dialog(activity)
+                val current = hook.settingsDialog(activity)
                 dialog = WeakReference(current)
                 val colors = hook.SettingsDialogColors(activity)
                 val card = hook.settingsDialogCard(activity, colors)

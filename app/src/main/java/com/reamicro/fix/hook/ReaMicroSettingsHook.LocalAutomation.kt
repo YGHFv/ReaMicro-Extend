@@ -184,7 +184,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationRecordsDialog() {
                 pending -> "正在读取模块任务记录…"
                 failure != null -> "模块记录暂未确认，先显示本机记录：$failure"
                 merged.isEmpty() && !moduleReachable ->
-                    "暂无记录。后台记录需要模块被唤醒过一次后才能读取（可先用模块自检里的截图确认权限）。"
+                    "暂无记录。后台记录需要模块被唤醒过一次后才能读取。"
                 merged.isEmpty() -> "暂无执行记录。任务执行后会在这里留下结果。"
                 !moduleReachable ->
                     "共 ${merged.size} 条（含前台记录）。模块未启动，后台执行记录暂不可读——这不代表后台没执行。"

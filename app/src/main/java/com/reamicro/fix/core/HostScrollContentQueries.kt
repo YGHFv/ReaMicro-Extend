@@ -42,6 +42,9 @@ internal object HostScrollContentQueries {
             it.paramTypeNames == List(2) { "java.lang.Object" } && it.returnTypeName == "java.lang.Object" }.one("render capture invocation"))
         for (key in listOf("id", "node", "style", "constraints", "styleSheets", "dir", "isFullScreen"))
             put("field:scroll.element.$key", base.getValue("field:org.epub.element.model.EpubElement#$key"))
+        if (known("org.epub.html.node.BodyDom", "parseBody").paramCount == 6) {
+            put("field:scroll.element.imagePageMode", base.getValue("field:org.epub.element.model.EpubElement#imagePageMode"))
+        }
         val cfi = requireNotNull(bridge.getFieldData(getValue("field:scroll.element.id"))).type
         val endpoint = requireNotNull(bridge.getClassData(base.getValue("class:org.epub.ui.SelectionPosition")))
         method("resolve", controller.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) &&

@@ -15,7 +15,8 @@ internal object OnlineUpdateStyleFingerprint {
     fun of(settings: OnlineEpubStyleSettings): String {
         val selected = OnlineEpubStyleKind.entries.mapNotNull(settings::selected)
         val inputs = buildString {
-            append("style-inputs-v1\n").append(settings.headerScope.name).append('\n')
+            // 样式渲染修复后，下次更新仅同步本地资源，不重新下载已有章节。
+            append("style-inputs-v4\n").append(settings.headerScope.name).append('\n')
             selected.forEach { style ->
                 append(style).append('\n')
                 listOf(style.assetPath, style.fontFamily)

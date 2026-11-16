@@ -10,7 +10,7 @@ import java.lang.reflect.Member
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
-/** Replace the root Composition while retaining the Activity and its original host callback. */
+/** 保留 Activity 和宿主原始回调，重新创建根 Composition。 */
 internal object HostCompositionReload {
     private val host get() = requireNotNull(HostCompositionBindings.current) { "宿主原地热重载绑定尚未就绪" }
     private fun root(activity: Activity): View {
@@ -42,12 +42,39 @@ internal object HostCompositionReload {
             navigation, callbackActivity)
     }
 
-    /** Re-enter current content after late hook installation, retaining navigation and ViewModels. */
+    /** 后台安装完成后释放旧页面的跳过状态，按已保存导航重新进入全部可见内容。 */
     fun refresh(activity: Activity) {
         val state = capture(activity)
+        var detached = false
+        try {
+            detach(state) { detached = true }
+            restore(state)
+        } catch (error: Throwable) {
+            if (detached) try {
+                // dispose 后移除 View 也可能失败，仍附着的旧根页面同样需要替换。
+                restore(state)
+            } catch (restoreError: Throwable) {
+                if (restoreError !== error) error.addSuppressed(restoreError)
+            }
+            throw error
+        }
+    }
+
+    /** 已运行过的宿主根回调可能内联导航调用，解除内联后再创建新页面。 */
+    fun prepareCallbacks() {
         val api = host
-        val content = api.constructor("wrapper").newInstance(state[2], state[3], state[1])
-        api.method("setContent").invoke(root(activity), content)
+        val composer = requireNotNull(com.reamicro.fix.core.HostUiBindings.current).composerClass
+        val methods = listOf(api.type("callback"), api.type("wrapper")).flatMap { type ->
+            type.declaredMethods.filter { method ->
+                !Modifier.isStatic(method.modifiers) && method.parameterTypes.let { parameters ->
+                    parameters.size == 2 &&
+                        parameters[0] in listOf(Any::class.java, composer) &&
+                        parameters[1] in listOf(Any::class.java, Integer.TYPE)
+                }
+            }
+        }
+        check(methods.isNotEmpty()) { "宿主根回调入口缺失" }
+        methods.forEach(com.reamicro.fix.xposed.HookRuntime::deoptimize)
     }
 
     fun detach(state: Array<Any>, beforeMutation: () -> Unit) {

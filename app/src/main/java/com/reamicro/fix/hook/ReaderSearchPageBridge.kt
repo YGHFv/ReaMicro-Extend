@@ -25,6 +25,7 @@ internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
     private class PlatformScope(val curl: CurlScope, val nativeVersion: Int)
     private val curlScopes = ThreadLocal<ArrayDeque<CurlScope>>()
     private val platformScopes = ThreadLocal<ArrayDeque<PlatformScope>>()
+    private val swipeScopes = ThreadLocal<ArrayDeque<CurlScope>>()
     private val restarts = Collections.synchronizedMap(WeakHashMap<Any, CurlCapture>())
     private val curlVisualVersion = ReaderSearchVisualVersion()
 
@@ -53,10 +54,37 @@ internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
                 handles += HookRuntime.hookMethod(symbols.method(role), object : HookCallback() {
                     override fun before(param: Call) {
                         val args = param.args ?: return
-                        bind(args[symbols.index("$role.owner")], args[symbols.index("$role.current")], kind,
+                        val index = symbols.index("$role.current")
+                        bind(args[symbols.index("$role.owner")], args.getOrNull(index), kind,
                             args[symbols.index("$role.model")])
                     }
                 })
+            }
+            if (symbols.values["value:swipe.native"] == "true") {
+                handles += HookRuntime.hookMethod(symbols.method("swipe.content"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val closure = param.thisObject ?: return
+                        val current = scope(symbols.field("swipe.content.owner").get(closure),
+                            symbols.field("swipe.content.model").get(closure)) ?: return
+                        if (reader.currentSearchPagerMode?.let { it != 0 } == true) return
+                        val stack = swipeScopes.get() ?: ArrayDeque<CurlScope>().also(swipeScopes::set)
+                        stack.addLast(current)
+                        param.setObjectExtra("reamicro.pager.swipe", current)
+                    }
+                    override fun after(param: Call) {
+                        val current = param.getObjectExtra("reamicro.pager.swipe") ?: return
+                        val stack = swipeScopes.get() ?: return
+                        check(stack.pollLast() === current)
+                        if (stack.isEmpty()) swipeScopes.remove()
+                    }
+                })
+                handles += HookRuntime.hookMethod(symbols.method("swipe.render"), object : HookCallback() {
+                    override fun before(param: Call) {
+                        val current = swipeScopes.get()?.peekLast() ?: return
+                        bind(current.owner, param.args[0], 0, current.model)
+                    }
+                })
+                listOf("swipe.content", "swipe.render").forEach { HookRuntime.deoptimize(symbols.method(it)) }
             }
             handles += HookRuntime.hookMethod(symbols.method("curl.root"), object : HookCallback() {
                 override fun before(param: Call) {
@@ -124,7 +152,7 @@ internal class ReaderSearchPageBridge(private val reader: ReaderHook) {
             HookRuntime.deoptimize(symbols.method(role))
         ModuleResources.cleanup {
             owner.clear(); pagerState.clear(); pagerModel.clear(); staticPage = null; mode = null
-            curlScopes.remove(); platformScopes.remove(); restarts.clear()
+            curlScopes.remove(); platformScopes.remove(); swipeScopes.remove(); restarts.clear()
         }
     }
     private fun bind(vm: Any?, current: Any?, kind: Int, model: Any?) {

@@ -203,9 +203,7 @@ class XposedModuleSettings(
     fun setReaderPageAnimationEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, enabled)
     fun setHomeDefaultPageEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, enabled)
     fun setOnlineDiscoverEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, enabled)
-    fun setBookImageSelectionEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, enabled)
     fun setBookLocalExportEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED, enabled)
-    fun setBookBackupScrollEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, enabled)
     fun setAccountPreferenceRestoreEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED, enabled)
     fun setAccountSwitchEntryEnabled(enabled: Boolean) = putBoolean(ModuleSettings.KEY_ACCOUNT_SWITCH_ENTRY_ENABLED, enabled)
 
@@ -236,13 +234,6 @@ class XposedModuleSettings(
 
     fun setReaderHighlightPerformanceLogEnabled(enabled: Boolean) {
         putBoolean(ModuleSettings.KEY_READER_HIGHLIGHT_PERFORMANCE_LOG_ENABLED, enabled)
-    }
-
-    fun setHostCrashUploadEnabled(enabled: Boolean): Boolean {
-        val saved = HostCrashUploadSettings.save(prefs(), enabled)
-        snapshotCache.clear()
-        if (!saved) HookRuntime.logError("ReaMicro privacy: failed to persist crash-upload switch")
-        return saved
     }
 
     fun setConciseLogEnabled(enabled: Boolean) {
@@ -875,9 +866,10 @@ class XposedModuleSettings(
             readerPageAnimationEnabled = prefs.getBoolean(ModuleSettings.KEY_READER_PAGE_ANIMATION_ENABLED, true),
             homeDefaultPageEnabled = prefs.getBoolean(ModuleSettings.KEY_HOME_DEFAULT_PAGE_ENABLED, true),
             onlineDiscoverEnabled = prefs.getBoolean(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, true),
-            bookImageSelectionEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, true),
+            // 编辑补全页面已移除，这两项固定启用，不再读取旧开关。
+            bookImageSelectionEnabled = true,
             bookLocalExportEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_LOCAL_EXPORT_ENABLED, true),
-            bookBackupScrollEnabled = prefs.getBoolean(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, true),
+            bookBackupScrollEnabled = true,
             accountPreferenceRestoreEnabled = prefs.getBoolean(ModuleSettings.KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED, true),
             accountSwitchEntryEnabled = prefs.getBoolean(ModuleSettings.KEY_ACCOUNT_SWITCH_ENTRY_ENABLED, true),
             readerOverwriteCheckEnabled = readerOverwriteCheckEnabled,

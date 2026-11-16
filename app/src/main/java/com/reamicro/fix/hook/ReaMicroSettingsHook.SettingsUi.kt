@@ -178,7 +178,6 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(requestedRoute: I
             InjectedRoute.ProfileBackgroundSettings -> renderProfileBackgroundSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AccountCompletionSettings -> renderAccountCompletionSettingsContent(innerPaddings, innerComposer)
-            InjectedRoute.EditCompletionSettings -> renderEditCompletionSettingsContent(innerPaddings, innerComposer)
             is InjectedRoute.BookStructure -> Unit
             InjectedRoute.ApiServerSettings -> renderApiServerSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudAutomationSettings -> renderCloudAutomationSettingsContent(innerPaddings, innerComposer)
@@ -199,7 +198,6 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(requestedRoute: I
             is InjectedRoute.FontPicker -> renderFontPickerContent(currentRoute.target, innerPaddings, innerComposer)
             InjectedRoute.FontLibrary -> renderFontLibraryContent(innerPaddings, innerComposer)
             InjectedRoute.AboutCompletion -> renderAboutCompletionContent(innerPaddings, innerComposer)
-            InjectedRoute.ModuleDiagnostics -> renderModuleDiagnosticsContent(innerPaddings, innerComposer)
             InjectedRoute.Discover -> renderDiscoverContent(innerPaddings, innerComposer)
         }
         targetUnit()
@@ -263,22 +261,8 @@ internal fun ReaMicroSettingsHook.invokeAppTopBar(
 internal fun ReaMicroSettingsHook.appTopBarMethod(): Method =
     requireNotNull(com.reamicro.fix.core.HostUiBindings.current).method("topBar")
 internal fun ReaMicroSettingsHook.renderHostModuleSettingsContent(innerPaddings: Any, composer: Any) {
-    val enabledState = rememberBooleanState(composer, settings.snapshot().moduleEnabled)
-    stateValue(enabledState)
     val listContent = functionProxy("ModuleSettingsList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-        val snapshot = settings.snapshot()
-        addLazyItem(lazyListScope, 0x524d5340) { inner ->
-            renderHostSettingsCard(listOf(ToggleRow(
-                key = ModuleSettings.KEY_MODULE_ENABLED, title = "补全计划",
-                checked = snapshot.moduleEnabled, checkedProvider = { settings.snapshot().moduleEnabled },
-                syncWithSnapshot = true,
-                onChanged = { checked, _ ->
-                    changeModuleEnabled(checked) { actual -> setStateValue(enabledState, actual) }
-                },
-            )), inner)
-        }
-        if (!snapshot.moduleEnabled) return@functionProxy targetUnit()
         com.reamicro.fix.core.ModuleFeatureCatalog.features.forEachIndexed { index, feature ->
             val route = moduleFeatureRoute(feature.id)
             addLazyItem(lazyListScope, 0x524d5341 + index, itemKey = "reamicro-feature-${feature.id}") { itemComposer ->
@@ -303,9 +287,7 @@ internal fun moduleFeatureRoute(id: String): InjectedRoute = when (id) {
     "font" -> InjectedRoute.FontSettings
     "reader" -> InjectedRoute.ReaderCompletionSettings
     "background" -> InjectedRoute.ProfileBackgroundSettings
-    "rotation" -> InjectedRoute.RotationCompletionSettings
     "account" -> InjectedRoute.AccountCompletionSettings
-    "edit" -> InjectedRoute.EditCompletionSettings
     "api" -> InjectedRoute.AiConfigSettings
     "about" -> InjectedRoute.AboutCompletion
     else -> error("Unregistered module feature $id")
@@ -317,33 +299,12 @@ internal fun ReaMicroSettingsHook.renderAccountCompletionSettingsContent(innerPa
         val snapshot = settings.snapshot()
         addLazyItem(scope, 0x524d4143) { inner ->
             renderHostSettingsCard(listOf(
-                ToggleRow(ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED, "账号导出", snapshot.accountExportEnabled,
+                ToggleRow(ModuleSettings.KEY_ACCOUNT_EXPORT_ENABLED, "账号数据导出", snapshot.accountExportEnabled,
                     onChanged = { checked, _ -> settings.setAccountExportEnabled(checked); checked }),
-                ToggleRow(ModuleSettings.KEY_ACCOUNT_CACHE_CLEANUP_ENABLED, "启动缓存清理", snapshot.accountCacheCleanupEnabled,
-                    onChanged = { checked, _ -> settings.setAccountCacheCleanupEnabled(checked); checked }),
                 ToggleRow(ModuleSettings.KEY_ACCOUNT_PREFERENCE_RESTORE_ENABLED, "账号偏好同步", snapshot.accountPreferenceRestoreEnabled,
                     onChanged = { checked, _ -> settings.setAccountPreferenceRestoreEnabled(checked); checked }),
                 ToggleRow(ModuleSettings.KEY_ACCOUNT_SWITCH_ENTRY_ENABLED, "账号切换入口", snapshot.accountSwitchEntryEnabled,
                     onChanged = { checked, _ -> settings.setAccountSwitchEntryEnabled(checked); checked }),
-            ), inner)
-        }
-        targetUnit()
-    }
-    renderHostLazyColumn(innerPaddings, content, composer)
-}
-
-internal fun ReaMicroSettingsHook.renderEditCompletionSettingsContent(innerPaddings: Any, composer: Any) {
-    val content = functionProxy("EditCompletionList", FUNCTION1_CLASS) { args ->
-        val scope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
-        val snapshot = settings.snapshot()
-        addLazyItem(scope, 0x524d4544) { inner ->
-            renderHostSettingsCard(listOf(
-                ToggleRow(ModuleSettings.KEY_EDIT_FILE_ENABLED, "文件编辑", snapshot.editFileEnabled,
-                    onChanged = { checked, _ -> settings.setEditFileEnabled(checked); checked }),
-                ToggleRow(ModuleSettings.KEY_BOOK_IMAGE_SELECTION_ENABLED, "封面与横幅选择", snapshot.bookImageSelectionEnabled,
-                    onChanged = { checked, _ -> settings.setBookImageSelectionEnabled(checked); checked }),
-                ToggleRow(ModuleSettings.KEY_BOOK_BACKUP_SCROLL_ENABLED, "备份页面滚动", snapshot.bookBackupScrollEnabled,
-                    onChanged = { checked, _ -> settings.setBookBackupScrollEnabled(checked); checked }),
             ), inner)
         }
         targetUnit()
@@ -623,23 +584,6 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         val snapshot = settings.snapshot()
         val toggleRows = listOf(
             ToggleRow(
-                key = ModuleSettings.KEY_HOST_CRASH_UPLOAD_ENABLED,
-                title = "崩溃上传",
-                checked = snapshot.hostCrashUploadEnabled,
-                checkedProvider = { settings.snapshot().hostCrashUploadEnabled },
-                syncWithSnapshot = true,
-                onChanged = { checked, _ ->
-                    val saved = settings.setHostCrashUploadEnabled(checked)
-                    activityProvider()?.let { activity ->
-                        val message = if (!saved) "保存失败，开关未更改"
-                        else if (checked) "已开启，重启宿主生效"
-                        else "已关闭，重启宿主生效"
-                        android.widget.Toast.makeText(activity, message, android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                    settings.snapshot().hostCrashUploadEnabled
-                },
-            ),
-            ToggleRow(
                 key = ModuleSettings.KEY_CONCISE_LOG_ENABLED,
                 title = "\u7b80\u6d01\u65e5\u5fd7",
                 checked = snapshot.conciseLogEnabled,
@@ -692,10 +636,10 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         )
         val actionRows = debugRows + localAutomationRow + listOf(
             ActionRow(
-                key = "about_completion_hook_report",
-                title = "\u6a21\u5757\u81ea\u68c0",
-                subtitle = HookInstallReport.summaryLine(),
-                onClick = { openHookInstallReportDialog() },
+                key = "about_completion_rotation",
+                title = "旋转补全",
+                subtitle = "自动旋转、方向锁定和反向旋转",
+                onClick = { openNestedInjectedRoute(InjectedRoute.RotationCompletionSettings) },
             ),
             ActionRow(
                 key = "about_completion_dexkit",
@@ -705,12 +649,6 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
                     else -> com.reamicro.fix.core.HostAutoScanner.snapshot()?.summary() ?: "等待首次扫描"
                 },
                 onClick = { openDexKitScanDialog() },
-            ),
-            ActionRow(
-                key = "about_completion_hot_reload",
-                title = "API102 热重载",
-                subtitle = "原地装载模块代码，不退出阅微、不重建 Activity",
-                onClick = { activityProvider()?.let(com.reamicro.fix.reload.HostHotReload::request) },
             ),
             ActionRow(
                 key = "about_completion_export_log",
@@ -1554,7 +1492,7 @@ internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: 
         composableLambda(row.key.hashCode() xor ACTION_SUPPORTING_KEY_MASK, FUNCTION2_CLASS) { args ->
             val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
 
-            renderHostSupportingText(subtitle, innerComposer, row.singleLineSubtitle)
+            renderHostSupportingText(subtitle, innerComposer, singleLine = true)
             targetUnit()
         }
     }
@@ -1644,9 +1582,10 @@ internal fun ReaMicroSettingsHook.renderHostSupportingText(text: String, compose
         color = runCatching { colorScheme(composer).longMethod("getOnSurfaceVariant") }
             .getOrElse { colorScheme(composer).longMethod("getOnBackground") },
         style = typography(composer).method0("getBodyMedium"),
+        overflow = if (singleLine) 2 else 0,
         maxLines = if (singleLine) 1 else 0,
         minLines = if (singleLine) 1 else 0,
-        defaultMask = if (singleLine) TEXT_SINGLE_LINE_MASK else TEXT_DEFAULT_MASK,
+        defaultMask = if (singleLine) TEXT_SINGLE_LINE_MASK and 4096.inv() else TEXT_DEFAULT_MASK,
     )
 }
 

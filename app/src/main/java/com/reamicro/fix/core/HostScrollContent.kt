@@ -30,7 +30,9 @@ internal object HostScrollContent {
         val box = c.constructor("scroll.box").newInstance(width, width, emptyList<Any>())
         val root = if (structured) {
             val builder = requireNotNull(c.method("scroll.builder").invoke(id))
-            requireNotNull(c.method("body.parse").invoke(null, source, builder, property("styleSheets"), property("dir"), property("isFullScreen")))
+            c.parseBody(source, builder, property("styleSheets"), property("dir") as String,
+                property("isFullScreen") as Boolean,
+                if ("class:imageMode" in c.values) property("imagePageMode") else null)
                 .also { c.method("scroll.measureContainer").invoke(it, box) }
         } else {
             val container = c.constructor("scroll.container").newInstance(source, id, style)
@@ -71,6 +73,7 @@ internal object HostScrollContent {
         for ((key, type) in listOf("id" to c.type("cfi"), "node" to c.type("element"), "style" to c.type("style"),
             "constraints" to c.type("scroll.constraints"), "styleSheets" to c.type("sheets"), "dir" to String::class.java, "isFullScreen" to bool))
             field("scroll.element.$key", "scroll.element", type)
+        if ("class:imageMode" in c.values) field("scroll.element.imagePageMode", "scroll.element", c.type("imageMode"))
         field("scroll.constraints.maxWidth", "scroll.constraints", float)
         field("scroll.constraints.margin", "scroll.constraints", c.type("scroll.margin"))
         for (key in listOf("left", "top", "right", "bottom")) field("scroll.margin.$key", "scroll.margin", float)

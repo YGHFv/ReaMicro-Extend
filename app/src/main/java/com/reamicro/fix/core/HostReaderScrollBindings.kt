@@ -38,7 +38,7 @@ internal object HostReaderScrollBindings {
         val s = Contract(values, HostRuntimeBindings.Members(values, loader))
         check(s.index("captures") in 1..8 && s.type("receiver").isAssignableFrom(s.type("vm")))
         fun field(role: String, owner: String, expected: Class<*>) = check(s.field(role).let {
-            !Modifier.isStatic(it.modifiers) && it.declaringClass == s.type(owner) && it.type == expected
+            !Modifier.isStatic(it.modifiers) && it.declaringClass == s.type(owner) && it.type.isAssignableFrom(expected)
         })
         fun instance(role: String, owner: String, result: Class<*>, params: List<Class<*>> = emptyList()) = check(s.method(role).let {
             !Modifier.isStatic(it.modifiers) && it.declaringClass == s.type(owner) && it.returnType == result && it.parameterTypes.toList() == params

@@ -79,7 +79,10 @@ internal fun ReaMicroSettingsHook.hookExternalSourceImportIntent() {
 }
 
 internal fun ReaMicroSettingsHook.hookModuleSettingsIntent() {
-    HookRuntime.hookAllMethods(Activity::class.java, "onNewIntent", object : HookCallback() {
+    // 热重载后宿主已编译的 super 调用可能绕过 Activity 基类，直接观察实际入口。
+    val activityClass = requireNotNull(com.reamicro.fix.core.HostIntegrationBindings.activity).type("activity")
+    val method = activityClass.getDeclaredMethod("onNewIntent", Intent::class.java)
+    HookRuntime.hookMethod(method, object : HookCallback() {
         override fun after(param: Call) {
             val activity = param.thisObject as? Activity ?: return
             if (!com.reamicro.fix.core.HostPackages.contains(activity.packageName)) return
@@ -87,4 +90,5 @@ internal fun ReaMicroSettingsHook.hookModuleSettingsIntent() {
             consumeModuleSettingsIntent(activity, intent)
         }
     })
+    HookRuntime.deoptimize(method)
 }

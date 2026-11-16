@@ -14,6 +14,7 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         (bindings.required("sheets.rules", bindings.required("document.sheets", document)) as List<*>).toList(),
         bindings.required("document.directory", document) as String,
         bindings.method("document.fullScreen").invoke(document) as Boolean, bindings.rootStyle(), slices,
+        bindings.imageMode(document),
     )
     fun bindReadingDocument(document: Any, controller: Any) {
         val nodes = bindings.required("selection.nodes", controller) as Map<*, *>

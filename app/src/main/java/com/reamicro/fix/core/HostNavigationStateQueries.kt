@@ -85,6 +85,13 @@ internal object HostNavigationStateQueries {
             Modifier.isStatic(it.modifiers) && it.returnTypeName == controller.name &&
                 it.paramTypeNames == listOf("android.content.Context")
         }, "controller factory")
+        val state = requireNotNull(bridge.getFieldData(ui.getValue("field:navigationState"))).type
+        val pending = flow.writes(restore.descriptor).mapNotNull { bridge.getFieldData(it.field) }
+            .filter { it.declaredClass?.descriptor == state.descriptor &&
+                it.type.descriptor == "[Landroid/os/Bundle;" }.distinctBy { it.descriptor }.single()
+        val graph = one(pending.writers.filter { Modifier.isStatic(it.modifiers) &&
+            it.returnTypeName == "void" && it.paramTypeNames.firstOrNull() == controller.name &&
+            it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") }, "pending stack consumption")
         fun arguments(call: HostDexCalls.Call): String {
             val constructor = method(call.descriptor)
             check(call.arguments.size == constructor.paramCount + 1)
@@ -105,6 +112,8 @@ internal object HostNavigationStateQueries {
             "method:navigationFactory" to factory.descriptor,
             "method:navigationSave" to save.descriptor,
             "method:navigationRestore" to restore.descriptor,
+            "method:navigationGraph" to graph.descriptor,
+            "field:navigationPending" to pending.descriptor,
             "constructor:navigationSave" to saveConstruction.descriptor,
             "constructor:navigationRestore" to restoreConstruction.descriptor,
             "value:navigationSaveArguments" to arguments(saveConstruction),

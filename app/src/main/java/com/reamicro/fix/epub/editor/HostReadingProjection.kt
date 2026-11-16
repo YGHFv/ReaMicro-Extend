@@ -6,6 +6,7 @@ internal data class SelectionRenderedSlice(val start: SelectionCfiPoint, val tex
 internal class HostReadingContext(
     val document: Any, val builder: Any, val rules: List<*>, val directory: String,
     val fullScreen: Boolean, val rootStyle: Any, val slices: List<SelectionRenderedSlice>,
+    val imageMode: Any?,
 )
 
 internal class HostReadingProjection(
@@ -26,8 +27,7 @@ internal class HostReadingProjection(
         val builder = requireNotNull(bindings.method("builder.copy").invoke(context.builder))
         val bodyStep = bindings.method("node.step").invoke(null, body)
         bindings.field("builder.body").set(builder, bodyStep)
-        val rendered = requireNotNull(bindings.method("body.parse").invoke(null, body, builder, sheets,
-            context.directory, context.fullScreen))
+        val rendered = bindings.parseBody(body, builder, sheets, context.directory, context.fullScreen, context.imageMode)
         val entityCache = hashMapOf<String, String>()
         fun range(node: Any) = host.sourceRange(node)
         val text = StringBuilder()

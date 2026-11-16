@@ -10,6 +10,7 @@ import androidx.core.view.ViewCompat
 
 internal fun configureEpubEdgeToEdgeWindow(window: Window?, background: Int, dark: Boolean) {
     window ?: return
+    com.reamicro.fix.ui.DialogWindowStyle.apply(window, background = background)
     window.apply {
         setBackgroundDrawable(ColorDrawable(background))
         setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
@@ -18,9 +19,6 @@ internal fun configureEpubEdgeToEdgeWindow(window: Window?, background: Int, dar
         addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)
         if (Build.VERSION.SDK_INT >= 28) {
-            attributes = attributes.apply {
-                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
             navigationBarDividerColor = Color.TRANSPARENT
         }
         WindowCompat.setDecorFitsSystemWindows(this, false)

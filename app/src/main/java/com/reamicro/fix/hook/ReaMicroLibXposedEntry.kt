@@ -81,11 +81,10 @@ class ReaMicroLibXposedEntry : XposedModule() {
     }
 
     override fun onHotReloading(param: HotReloadingParam): Boolean {
-        // APK replacement has no module extras. Both automatic and explicit requests use
-        // the same retirement path; only a user-requested in-place reload requires focus.
+        // 拒绝旧桥接进程尚未结束的升级重试；框架自动更新已由 module.prop 关闭。
+        if (param.extras?.getBoolean(HotReloadContract.PACKAGE_UPGRADE) == true) return false
         return HostGeneration.prepare(
-            param.extras?.getBoolean(HotReloadContract.IN_PLACE) == true &&
-                param.extras?.getBoolean(HotReloadContract.PACKAGE_UPGRADE) != true,
+            param.extras?.getBoolean(HotReloadContract.IN_PLACE) == true,
             param::setSavedInstanceState,
         )
     }
@@ -100,6 +99,7 @@ class ReaMicroLibXposedEntry : XposedModule() {
         val composition = (state.getOrNull(3) as? Array<*>)?.takeIf { it.isNotEmpty() }
         // Version 92 handed off a foreground-only composition without this fifth value.
         val resumed = state.getOrNull(4) as? Boolean ?: (composition != null)
+        var scanStarted = false
         try {
             val version = com.reamicro.fix.core.HostSupportedVersions.inspect(
                 application, application.applicationInfo.sourceDir,
@@ -133,23 +133,30 @@ class ReaMicroLibXposedEntry : XposedModule() {
             }
             oldHookError?.let { throw it }
             val prepared = android.os.SystemClock.elapsedRealtime()
+            DexKitUpdateScan.beginStartup(application)
+            scanStarted = true
             installPackage(packageName, loader, application.applicationInfo)
             HostGeneration.attach(application, loader)
             HostCrashReportBlocker.attachExistingApplication(application)
             if (composition != null) HostGeneration.onMain {
                 val activity = composition[0] as android.app.Activity
                 HostGeneration.adopt(activity, resumed)
+                if (resumed) DexKitUpdateScan.onStartupResume(activity)
                 hookEntry.attachAfterHotReload(activity, resumed)
                 com.reamicro.fix.reload.HostCompositionReload.restore(composition)
             }
             check(com.reamicro.fix.core.HookInstallReport.failures().isEmpty()) {
                 "New generation hook installation incomplete: ${com.reamicro.fix.core.HookInstallReport.failures()}"
             }
+            DexKitUpdateScan.finishStartup(application, com.reamicro.fix.core.HostAutoScanner.snapshot())
             HookRuntime.logAlways("ReaMicro API102 new generation ready pid=${android.os.Process.myPid()} " +
                 "oldHooks=${param.oldHookHandles.size} ${com.reamicro.fix.core.HookInstallReport.summaryLine()} " +
                 "prepareMs=${prepared - started} installMs=${android.os.SystemClock.elapsedRealtime() - prepared} " +
                 "activity=${composition?.getOrNull(0)?.let(System::identityHashCode)} resumed=$resumed")
         } catch (error: Throwable) {
+            if (scanStarted) runCatching {
+                DexKitUpdateScan.finishStartup(application, com.reamicro.fix.core.HostAutoScanner.snapshot(), error)
+            }.onFailure { if (it !== error) error.addSuppressed(it) }
             if (composition != null) try {
                 HostGeneration.onMain { com.reamicro.fix.reload.HostCompositionReload.restoreIfMissing(composition) }
             } catch (restoreError: Throwable) {
@@ -188,6 +195,9 @@ class ReaMicroLibXposedEntry : XposedModule() {
             "symbols=${com.reamicro.fix.core.HostSymbols.summary()}, " +
             "api=${getApiVersion()}, framework=$frameworkName $frameworkVersion($frameworkVersionCode)")
         hookEntry.handleLoadedPackage(packageName, classLoader)
+        com.reamicro.fix.core.HookInstallReport.install("Entry", "RootCompositionCallbacks") {
+            com.reamicro.fix.reload.HostCompositionReload.prepareCallbacks()
+        }
         com.reamicro.fix.core.HostAutoScanner.markInstalled()
     }
 }

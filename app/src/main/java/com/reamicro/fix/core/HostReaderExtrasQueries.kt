@@ -179,7 +179,10 @@ internal object HostReaderExtrasQueries {
             out.field("pages", pages)
             out.field("spines", window.usingFields.map { it.field }.filter { it.declaredClassName == vm.name &&
                 it.typeName == "java.util.LinkedHashMap" && it.descriptor != pages }.distinctBy { it.descriptor }.single().descriptor)
-            val load = window.callers.filter { it.className == vm.name && it.paramCount == 2 && it.paramTypeNames.first() == "int" &&
+            val page = out.type("page", known("app.zhendong.reamicro.data.epub.EpubPage"))
+            val load = window.callers.filter { it.className == vm.name &&
+                (it.paramCount == 2 || it.paramTypeNames.take(3) == listOf("int", "int", page.name)) &&
+                it.paramTypeNames.first() == "int" && isContinuation(it.paramTypes.last()) &&
                 it.usingStrings.contains("epub") }.one("outer virtual page loader")
             out.method("load", load)
             val loadContinuation = load.invokes.filter { it.isConstructor && it.paramCount == 2 && it.paramTypeNames.first() == vm.name &&

@@ -158,7 +158,20 @@ internal object HostEpubSourceQueries {
             nativeDocument.fields.single { !Modifier.isStatic(it.modifiers) && it.typeName == expected.name }.descriptor)
         put("field:document.directory", nativeDocument.fields.single { !Modifier.isStatic(it.modifiers) &&
             Modifier.isFinal(it.modifiers) && it.typeName == "java.lang.String" }.descriptor)
-        known("document.fullScreen", "org.epub.html.HtmlDocument", "isFullScreen")
+        val fullScreen = known("document.fullScreen", "org.epub.html.HtmlDocument", "isFullScreen")
+        if (parseBody.paramCount == 6) {
+            // 新版将全屏图片细分为普通、整页和左右跨页；源投影必须沿用原文档的模式。
+            val mode = parseBody.paramTypes.last()
+            check(mode.modifiers and 0x4000 != 0)
+            put("class:imageMode", mode.descriptor)
+            val converter = fullScreen.invokes.filter { Modifier.isStatic(it.modifiers) &&
+                it.paramTypeNames == listOf("java.lang.String") && it.returnTypeName == mode.name }.one("image page mode")
+            method("imageMode", converter)
+            val source = flow.calls(fullScreen.descriptor).filter { it.descriptor == converter.descriptor }
+                .mapNotNull { it.arguments.singleOrNull() as? HostDexCalls.Field }.distinct().single()
+            check(nativeDocument.fields.any { it.descriptor == source.descriptor && it.typeName == "java.lang.String" })
+            put("field:document.imageModeSource", source.descriptor)
+        }
         val build = method("builder.build", builder.methods.filter { !Modifier.isStatic(it.modifiers) && it.paramCount == 0 &&
             it.returnTypeName == cfi.name }.one("builder result"))
         val buildCall = flow.calls(build.descriptor).single { it.descriptor == cfiCtor.descriptor }

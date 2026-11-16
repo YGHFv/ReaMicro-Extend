@@ -42,6 +42,7 @@ import com.reamicro.fix.online.download.writeOnlineCompletionTextAtomically
 import com.reamicro.fix.online.download.onlineCompletionChapterIndexJson
 import com.reamicro.fix.online.download.onlineCompletionFailedChaptersJson
 import com.reamicro.fix.online.download.onlineCompletionChapterFile
+import com.reamicro.fix.online.download.onlineCompletionChapterIndexFile
 import com.reamicro.fix.logging.logWebDav
 
 internal fun WebDavDriveHook.cacheOnlineChapterImages(target: OnlineDownloadTarget, chapter: OnlineDownloadedChapter) {
@@ -385,6 +386,7 @@ internal fun WebDavDriveHook.resolveOnlineCompletionDecor(
         headerImageHref = headerHref,
         headerScope = settings.headerScope,
         transitionMarkup = settings.selected(OnlineEpubStyleKind.Transition)?.markup.orEmpty(),
+        illustrationMarkup = settings.selected(OnlineEpubStyleKind.Illustration)?.markup.orEmpty(),
     )
 }
 
@@ -425,6 +427,11 @@ internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(
     }
     val textDir = File(root, "OEBPS/Text")
     val decor = onlineCompletionBookDirDecor(root)
+    val index = onlineCompletionChapterIndexFile(root).takeIf { it.isFile }
+        ?.readText(Charsets.UTF_8)?.let(OnlineOnDemandMetadataCodec::decode)
+    val firstChapterHrefs = index?.chapters.orEmpty().filterIndexed { position, chapter ->
+        position == 0 || chapter.volumeTitle != index!!.chapters[position - 1].volumeTitle
+    }.map { it.href }.toSet()
     textDir.listFiles()
         ?.filter {
             ONLINE_COMPLETION_CHAPTER_FILE_REGEX.matches(it.name) ||
@@ -433,7 +440,9 @@ internal fun WebDavDriveHook.syncOnlineCompletionDefaultStyle(
         ?.forEach { chapterFile ->
             checkCurrent()
             val original = chapterFile.readText(Charsets.UTF_8)
-            val migrated = migrateOnlineCompletionChapterStyle(original, decor)
+            val migrated = migrateOnlineCompletionChapterStyle(original, decor,
+                isVolumePage = ONLINE_COMPLETION_VOLUME_FILE_REGEX.matches(chapterFile.name),
+                isVolumeFirstChapter = "Text/${chapterFile.name}" in firstChapterHrefs)
             if (migrated != original) {
                 writeOnlineCompletionTextAtomically(chapterFile, migrated, commit = commit, checkCurrent = checkCurrent)
                 changed = true

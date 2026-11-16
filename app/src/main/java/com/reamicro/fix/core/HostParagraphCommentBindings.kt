@@ -37,9 +37,12 @@ internal object HostParagraphCommentBindings {
             })
         }
         fun image(id: String, size: Float, annotation: String): Any {
-            val args = arrayOfNulls<Any>(HostParagraphCommentQueries.imageProperties.size)
-            for (name in HostParagraphCommentQueries.imageProperties) args[number("image.$name")] = when (name) {
+            val properties = HostParagraphCommentQueries.imageProperties(values)
+            val args = arrayOfNulls<Any>(properties.size)
+            for (name in properties) args[number("image.$name")] = when (name) {
                 "id" -> id; "path", "name" -> "#comment"; "width", "height" -> size; "x", "y" -> 0f
+                // 批注图标始终按普通行内图片处理，不能继承整页或跨页图片模式。
+                "imagePageMode" -> type("imageMode").enumConstants.single { (it as Enum<*>).name == "Normal" }
                 "preserveAspectRatio" -> false; "commentAnnotation" -> annotation; else -> ""
             }
             return constructor("image").newInstance(*args)
@@ -70,10 +73,11 @@ internal object HostParagraphCommentBindings {
     }
     private fun restore(values: Map<String, String>, loader: ClassLoader): Contract {
         val s = Contract(values, HostRuntimeBindings.Members(values, loader))
+        val imageProperties = HostParagraphCommentQueries.imageProperties(values)
         val required = listOf("class:dom", "class:image", "class:comment", "class:style", "class:cfi", "class:placeholder", "class:font", "class:range",
             "constructor:image", "constructor:placeholder", "method:cfiText", "method:decode", "method:unescape", "method:fontNumber", "method:unit",
             "field:dom.location", "field:dom.style", "field:dom.images", "field:dom.placeholders", "field:style.font", "field:placeholder.align",
-            "value:placeholder.align", "value:placeholder.alignIndex") + HostParagraphCommentQueries.imageProperties.flatMap { listOf("field:image.$it", "value:image.$it") } +
+            "value:placeholder.align", "value:placeholder.alignIndex") + imageProperties.flatMap { listOf("field:image.$it", "value:image.$it") } +
             HostParagraphCommentQueries.commentProperties.map { "field:comment.$it" }
         check(values.keys.containsAll(required))
         for ((role, owner, type) in listOf(Triple("dom.location", "dom", s.type("cfi")), Triple("dom.style", "dom", s.type("style")),
@@ -82,10 +86,17 @@ internal object HostParagraphCommentBindings {
         }
         check(s.field("dom.images") != s.field("dom.placeholders"))
         val image = s.constructor("image")
-        check(image.declaringClass == s.type("image") && image.parameterCount == HostParagraphCommentQueries.imageProperties.size)
-        check(HostParagraphCommentQueries.imageProperties.map { s.number("image.$it") }.toSet() == image.parameterTypes.indices.toSet())
-        for (name in HostParagraphCommentQueries.imageProperties) {
-            val type = when (name) { "width", "height", "x", "y" -> java.lang.Float.TYPE; "preserveAspectRatio" -> java.lang.Boolean.TYPE; else -> String::class.java }
+        check(image.declaringClass == s.type("image") && image.parameterCount == imageProperties.size)
+        check(imageProperties.map { s.number("image.$it") }.toSet() == image.parameterTypes.indices.toSet())
+        for (name in imageProperties) {
+            val type = when (name) {
+                "width", "height", "x", "y" -> java.lang.Float.TYPE
+                "preserveAspectRatio" -> java.lang.Boolean.TYPE
+                "imagePageMode" -> s.type("imageMode").also { mode ->
+                    check(mode.isEnum && mode.enumConstants.count { (it as Enum<*>).name == "Normal" } == 1)
+                }
+                else -> String::class.java
+            }
             val field = s.field("image.$name")
             check(field.declaringClass == s.type("image") && !Modifier.isStatic(field.modifiers) && field.type == type && image.parameterTypes[s.number("image.$name")] == type)
         }

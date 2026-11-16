@@ -220,7 +220,6 @@ internal sealed class InjectedRoute(val title: String) {
     object ProfileBackgroundSettings : InjectedRoute("\u4e3b\u9875\u8865\u5168")
     object CloudCompletionSettings : InjectedRoute("\u4e91\u76d8\u8865\u5168")
     object AccountCompletionSettings : InjectedRoute("账号补全")
-    object EditCompletionSettings : InjectedRoute("编辑补全")
     data class BookStructure(val uid: Long, val bookId: Long, val uuid: String, val bookTitle: String, val pageKey: String) : InjectedRoute("图书结构")
     object ApiServerSettings : InjectedRoute("\u0041\u0050\u0049 \u670d\u52a1\u5668\u8bbe\u7f6e")
     object CloudAutomationSettings : InjectedRoute("\u4e91\u7aef\u4efb\u52a1")
@@ -241,7 +240,6 @@ internal sealed class InjectedRoute(val title: String) {
     data class FontPicker(val target: FontPickerTarget) : InjectedRoute(target.title)
     object FontLibrary : InjectedRoute(FONT_LIBRARY_TITLE)
     object AboutCompletion : InjectedRoute(ABOUT_COMPLETION_TITLE)
-    object ModuleDiagnostics : InjectedRoute("模块自检")
 
     object Discover : InjectedRoute(DISCOVER_TITLE)
 }

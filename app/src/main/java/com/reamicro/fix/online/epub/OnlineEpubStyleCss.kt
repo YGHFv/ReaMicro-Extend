@@ -98,7 +98,7 @@ internal object OnlineEpubStyleCss {
 
             blocks.toMutableList().also {
                 it[index] = it[index].copy(
-                    declarations = listOf(declaration, it[index].declarations).filter(String::isNotBlank).joinToString("\n"),
+                    declarations = listOf(it[index].declarations, declaration).filter(String::isNotBlank).joinToString("\n"),
                 )
             }
         } else {
@@ -166,7 +166,7 @@ internal object OnlineEpubStyleCss {
         }
 
 
-        h1.te-chapter-title, h1.te-volume-title {
+        .te-chapter-title, .te-volume-title {
             font-size: 1.17em;
             font-weight: bold;
         }

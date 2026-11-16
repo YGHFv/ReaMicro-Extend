@@ -32,6 +32,10 @@ internal object HostCompositionBindings {
         fun field(role: String) = members.field(role)
         fun method(role: String) = members.method(role)
         fun constructor(role: String) = members.constructor(role)
+        fun navigationRestorePending(controller: Any): Boolean {
+            val state = requireNotNull(HostUiBindings.current).field("navigationState").get(controller)
+            return field("navigationPending").get(state) != null
+        }
         private fun arguments(role: String, context: Context?): Array<Any> {
             val arguments = values.getValue("value:${role}Arguments").split(',')
             return constructor(role).parameterTypes.mapIndexed { index, type ->
@@ -64,8 +68,8 @@ internal object HostCompositionBindings {
         val keys = listOf("activity", "root", "wrapper", "callback", "function2", "controller").map { "class:$it" } +
             listOf("root", "wrapper", "navigationSave", "navigationRestore").map { "constructor:$it" } +
             listOf("setContent", "dispose", "stateGet", "rememberNavigation", "navigationFactory",
-                "navigationSave", "navigationRestore").map { "method:$it" } +
-            listOf("state", "callbackActivity", "navCache", "key", "tracked", "callback").map { "field:$it" } +
+                "navigationSave", "navigationRestore", "navigationGraph").map { "method:$it" } +
+            listOf("state", "callbackActivity", "navCache", "key", "tracked", "callback", "navigationPending").map { "field:$it" } +
             listOf("navigationSaveArguments", "navigationRestoreArguments").map { "value:$it" }
         check(values.keys == keys.toSet()) { "Incomplete composition reload contract" }
         val s = Contract(HostRuntimeBindings.Members(values, loader), values)
@@ -99,6 +103,12 @@ internal object HostCompositionBindings {
             Modifier.isStatic(it.modifiers) && it.parameterTypes.toList() == listOf(Context::class.java) &&
                 it.returnType == s.type("controller")
         })
+        val ui = requireNotNull(HostUiBindings.current)
+        check(s.field("navigationPending").let { !Modifier.isStatic(it.modifiers) &&
+            it.declaringClass == ui.field("navigationState").type && it.type == Array<Bundle>::class.java })
+        check(s.method("navigationGraph").let { Modifier.isStatic(it.modifiers) &&
+            it.returnType == Void.TYPE && it.parameterTypes.firstOrNull() == s.type("controller") &&
+            it.parameterTypes.takeLast(2) == listOf(ui.composerClass, Integer.TYPE) })
         for (role in listOf("navigationSave", "navigationRestore")) {
             val constructor = s.constructor(role)
             val method = s.method(role)

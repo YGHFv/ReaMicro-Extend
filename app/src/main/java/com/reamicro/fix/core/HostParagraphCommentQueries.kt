@@ -8,6 +8,8 @@ import org.luckypray.dexkit.result.MethodData
 
 internal object HostParagraphCommentQueries {
     val imageProperties = "id path name width height x y viewBox fill preserveAspectRatio commentAnnotation".split(' ')
+    fun imageProperties(values: Map<String, String>): List<String> =
+        imageProperties + if ("field:image.imagePageMode" in values) listOf("imagePageMode") else emptyList()
     val commentProperties = "plainText imagePath href sourcePath prefix backRefId anchorFontSizeSp".split(' ')
     private fun List<MethodData>.one(role: String) = distinctBy { it.descriptor }.singleOrNull()
         ?: error("Paragraph comment $role is missing or ambiguous")
@@ -28,6 +30,8 @@ internal object HostParagraphCommentQueries {
         put("field:dom.location", dom.fields.single { !Modifier.isStatic(it.modifiers) && it.typeName == cfi.name }.descriptor)
         put("field:dom.style", base.getValue("field:org.epub.html.node.ContentDom#style"))
         val records = HostRecordQueries.query(apk, mapOf("class:image" to image.descriptor, "class:comment" to comment.descriptor))
+        val imageProperties = imageProperties + if ("field:org.epub.html.ImagePlaceholder#imagePageMode" in base)
+            listOf("imagePageMode") else emptyList()
         for ((role, properties) in listOf("image" to imageProperties, "comment" to commentProperties))
             for (name in properties) put("field:$role.$name", records.getValue("field:$role#$name"))
         val flow = HostDexCalls(apk)
@@ -39,6 +43,11 @@ internal object HostParagraphCommentQueries {
                 } }
         }.one("image constructor")
         put("constructor:image", imageConstructor.descriptor)
+        if ("imagePageMode" in imageProperties) {
+            val mode = requireNotNull(bridge.getFieldData(getValue("field:image.imagePageMode"))).type
+            check(mode.modifiers and 0x4000 != 0)
+            put("class:imageMode", mode.descriptor)
+        }
         val writes = flow.writes(imageConstructor.descriptor)
         for (name in imageProperties) {
             val parameter = writes.filter { it.receiver == HostDexCalls.Parameter(0) && it.field == getValue("field:image.$name") }

@@ -191,16 +191,7 @@ internal class ModuleUiKit(private val context: Context) {
                 actions.forEach { (label, onClick) -> addView(button(label, onClick = onClick)) }
             })
         }
-        dialog.setContentView(card)
-        dialog.setOnShowListener {
-
-            dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
-            dialog.window?.setLayout(
-                (metrics.widthPixels * 0.9f).toInt(),
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-        }
-        dialog.show()
+        DialogWindowStyle.show(dialog, DialogWindowStyle.activity(context), card, widthFraction = .9f)
         return dialog
     }
 
@@ -389,12 +380,7 @@ internal class ModuleUiKit(private val context: Context) {
                 addView(button("取消", onClick = { dialog.dismiss() }))
             },
         )
-        dialog.setContentView(card)
-        dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
-            dialog.window?.setLayout((metrics.widthPixels * 0.9f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-        dialog.show()
+        DialogWindowStyle.show(dialog, DialogWindowStyle.activity(context), card, widthFraction = .9f)
         return dialog
     }
 
@@ -502,12 +488,7 @@ internal class ModuleUiKit(private val context: Context) {
                 addView(button("取消", onClick = { dialog.dismiss() }))
             },
         )
-        dialog.setContentView(card)
-        dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
-            dialog.window?.setLayout((metrics.widthPixels * 0.9f).toInt(), ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-        dialog.show()
+        DialogWindowStyle.show(dialog, DialogWindowStyle.activity(context), card, widthFraction = .9f)
         return dialog
     }
 

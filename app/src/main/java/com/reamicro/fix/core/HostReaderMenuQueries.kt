@@ -113,7 +113,9 @@ internal object HostReaderMenuQueries {
         val vector = requireNotNull(icon.paramTypes[0])
         out["class:vector"] = vector.descriptor
         out["field:vectorName"] = vector.fields.filter { !Modifier.isStatic(it.modifiers) && it.typeName == "java.lang.String" }.single().descriptor
-        body.callers.filter { it.isMethod }.distinctBy { it.descriptor }.forEachIndexed { i, m -> method("caller.$i", m) }
+        // 新版通过函数接口调用合并回调，直接调用者可能为空；创建菜单的入口同样需要去优化。
+        (body.callers + body.declaredClass!!.methods.filter { it.isConstructor }.flatMap { it.callers })
+            .filter { it.isMethod }.distinctBy { it.descriptor }.forEachIndexed { i, m -> method("caller.$i", m) }
         return out
     }
 }

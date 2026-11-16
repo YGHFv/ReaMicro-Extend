@@ -17,6 +17,7 @@ import java.util.ArrayDeque
 internal class ReaderExtraMotionHook(
     private val symbols: HostReaderFeatures.Symbols,
     private val speed: (Int) -> Float,
+    private val nativeMode: () -> Int = { 4 },
 ) {
     private val readerLists = WeakIdentityMap<Unit>()
     private val readerFlings = WeakIdentityMap<Unit>()
@@ -187,7 +188,7 @@ internal class ReaderExtraMotionHook(
                     return // Zero means follow the finger; never coerce it to one millisecond.
                 }
                 if (frame.kind == DISPATCH && value == 120) {
-                    val nextFactor = factor(4)
+                    val nextFactor = factor(nativeMode())
                     // The host cancels this old callback only at the next ACTION_UP. At a slow
                     // speed it could otherwise restore zero halfway through a new click.
                     if (current.active && (current.factor != 1f || nextFactor != 1f)) {

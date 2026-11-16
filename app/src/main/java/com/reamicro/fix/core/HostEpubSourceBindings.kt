@@ -31,6 +31,15 @@ internal object HostEpubSourceBindings {
         fun index(role: String) = values.getValue("value:$role").toInt()
         fun value(role: String, target: Any): Any? = field(role).get(target)
         fun required(role: String, target: Any): Any = requireNotNull(value(role, target)) { "Missing EPUB $role" }
+        fun imageMode(document: Any): Any? = if ("class:imageMode" in values)
+            method("imageMode").invoke(null, value("document.imageModeSource", document)) else null
+        fun parseBody(node: Any, builder: Any, sheets: Any, directory: String, fullScreen: Boolean, imageMode: Any?): Any {
+            val args = listOf(node, builder, sheets, directory, fullScreen) +
+                if (method("body.parse").parameterCount == 6) listOf(requireNotNull(imageMode).also {
+                    require(type("imageMode").isInstance(it)) { "图片分页模式与宿主不匹配" }
+                }) else emptyList()
+            return requireNotNull(method("body.parse").invoke(null, *args.toTypedArray()))
+        }
         fun parse(source: String, baseUri: String): Any {
             val tree = constructor("htmlTree").newInstance()
             val parser = constructor("parser").newInstance(tree)
@@ -170,10 +179,16 @@ internal object HostEpubSourceBindings {
         field("document.builder", "document", c.type("builder")); field("document.sheets", "document", c.type("sheets"))
         field("document.directory", "document", string); field("sheets.rules", "sheets", List::class.java)
         check(c.constructor("sheets").let { it.declaringClass == c.type("sheets") && it.parameterTypes.toList() == listOf(List::class.java) })
+        val imageModes = if ("class:imageMode" in c.values) listOf(c.type("imageMode")) else emptyList()
         check(c.method("body.parse").let { Modifier.isStatic(it.modifiers) && it.parameterTypes.toList() ==
-            listOf(c.type("node"), c.type("builder"), c.type("sheets"), string, bool) &&
+            listOf(c.type("node"), c.type("builder"), c.type("sheets"), string, bool) + imageModes &&
             it.returnType == c.type("container") })
         method("document.fullScreen", c.type("document"), emptyList(), bool)
+        if (imageModes.isNotEmpty()) {
+            check(c.type("imageMode").isEnum)
+            field("document.imageModeSource", "document", string)
+            method("imageMode", c.method("imageMode").declaringClass, listOf(string), c.type("imageMode"), true)
+        }
         method("builder.build", c.type("builder"), emptyList(), c.type("cfi"))
         method("builder.copy", c.type("builder"), emptyList(), c.type("builder"))
         check(c.field("builder.body").let { !Modifier.isStatic(it.modifiers) && it.declaringClass == c.type("builder") &&

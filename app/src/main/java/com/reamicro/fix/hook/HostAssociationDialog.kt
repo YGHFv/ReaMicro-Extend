@@ -79,8 +79,7 @@ internal class HostAssociationDialog(
             configurationRegistered = true
             window?.let { WindowCompat.setDecorFitsSystemWindows(it, false) }
             super.show()
-            window?.setBackgroundDrawableResource(android.R.color.transparent)
-            window?.setDimAmount(0f)
+            window?.let { com.reamicro.fix.ui.DialogWindowStyle.apply(it, activity.window) }
         } catch (error: Throwable) {
             runCatching { release() }.onFailure(error::addSuppressed)
             throw error
