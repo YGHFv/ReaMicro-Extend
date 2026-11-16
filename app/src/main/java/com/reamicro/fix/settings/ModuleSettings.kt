@@ -51,7 +51,11 @@ object ModuleSettings {
     const val KEY_API_DEBUG_UNLOCKED = "api_debug_unlocked"
     const val KEY_CLOUD_ENABLED = "cloud_enabled"
     const val KEY_CLOUD_WEBDAV_ENABLED = "cloud_webdav_enabled"
+    // 旧共享开关继续作为 WebDAV 的存储键，GitHub 首次读取时继承旧值。
     const val KEY_CLOUD_SYNC_EXTENSION_ENABLED = "cloud_sync_extension_enabled"
+    const val KEY_CLOUD_GITHUB_SYNC_ENABLED = "cloud_github_sync_enabled"
+    const val KEY_SYNC_BOOK_LIMIT_ENABLED = "sync_book_limit_enabled"
+    const val KEY_SYNC_BOOK_LIMIT = "sync_book_limit"
     const val KEY_CLOUD_LOCAL_LIBRARY_ENABLED = "cloud_local_library_enabled"
     const val KEY_CLOUD_EXTENDED_DISPLAY_ENABLED = "cloud_extended_display_enabled"
     const val KEY_CLOUD_DOWNLOAD_CANCEL_ENABLED = "cloud_download_cancel_enabled"
@@ -109,6 +113,8 @@ object ModuleSettings {
     const val DEFAULT_CLOUD_ENABLED = true
     const val DEFAULT_CLOUD_WEBDAV_ENABLED = true
     const val DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED = false
+    const val DEFAULT_SYNC_BOOK_LIMIT = 100
+    const val MAX_SYNC_BOOK_LIMIT = 100000
     const val DEFAULT_API_DEBUG_UNLOCKED = false
     const val DEFAULT_CLOUD_LOCAL_LIBRARY_ENABLED = true
     const val DEFAULT_CLOUD_EXTENDED_DISPLAY_ENABLED = false
@@ -253,6 +259,9 @@ data class ModuleSettingsSnapshot(
     val cloudEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_ENABLED,
     val cloudWebDavEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_WEBDAV_ENABLED,
     val cloudSyncExtensionEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED,
+    val cloudGitHubSyncEnabled: Boolean = cloudSyncExtensionEnabled,
+    val syncBookLimitEnabled: Boolean = false,
+    val syncBookLimit: Int = ModuleSettings.DEFAULT_SYNC_BOOK_LIMIT,
     val cloudLocalLibraryEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_LOCAL_LIBRARY_ENABLED,
     val cloudExtendedDisplayEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_EXTENDED_DISPLAY_ENABLED,
     val cloudDownloadCancelEnabled: Boolean = ModuleSettings.DEFAULT_CLOUD_DOWNLOAD_CANCEL_ENABLED,
@@ -350,6 +359,12 @@ data class ModuleSettingsSnapshot(
 
     val canRunWebDavSync: Boolean
         get() = moduleEnabled && cloudSyncExtensionEnabled
+
+    val canRunGitHubSync: Boolean
+        get() = moduleEnabled && cloudGitHubSyncEnabled
+
+    val hasShelfSync: Boolean
+        get() = cloudSyncExtensionEnabled || cloudGitHubSyncEnabled
 
     val canRunLocalLibraryCloud: Boolean
         get() = moduleEnabled && cloudLocalLibraryEnabled

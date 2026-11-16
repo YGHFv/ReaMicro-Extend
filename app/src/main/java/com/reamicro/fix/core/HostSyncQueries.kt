@@ -31,6 +31,29 @@ internal object HostSyncQueries {
         fun known(logical: String): ClassData = requireNotNull(bridge.getClassData(
             base["class:$logical"] ?: HostSymbols.resolveClass(logical))) { "Missing queried class: $logical" }
         val config = type("config", requireNotNull(anchor(bridge, "S3SyncConfig(provider=").one("sync config").declaredClass))
+        val revision = type("retentionRevision", requireNotNull(anchor(bridge, "S3SyncRevision(timestamp=")
+            .one("sync revision").declaredClass))
+        val revisionProperties = HostRecordQueries.query(apk, mapOf("class:retentionRevision" to revision.descriptor))
+        for (name in listOf("timestamp", "counter", "deviceId"))
+            out["field:retentionRevision.$name"] = revisionProperties.getValue("field:retentionRevision#$name")
+        method("retentionEquals", revision.methods.filter { it.name == "equals" &&
+            it.paramTypeNames == listOf("java.lang.Object") && it.returnTypeName == "boolean" }.one("sync revision equality"))
+        val planner = method("retentionPlanner", anchor(bridge, "S3 queue: local=").one("sync planner"))
+        method("retentionComparison", planner.invokes.filter { candidate ->
+            Modifier.isStatic(candidate.modifiers) && candidate.paramTypeNames == List(2) { "java.lang.Object" } &&
+                candidate.returnTypeName == "boolean" && candidate.invokes.any {
+                    it.declaredClassName == "java.lang.Object" && it.name == "equals"
+                }
+        }.one("sync nullable revision comparison"))
+        val baselineBook = type("retentionBaselineBook", requireNotNull(anchor(bridge, "S3SyncBaselineBook(uuid=")
+            .one("sync baseline book").declaredClass))
+        val baselineProperties = HostRecordQueries.query(apk, mapOf("class:retentionBaselineBook" to baselineBook.descriptor))
+        for (name in listOf("uuid", "remoteRevision"))
+            out["field:retentionBaselineBook.$name"] = baselineProperties.getValue("field:retentionBaselineBook#$name")
+        baselineBook.methods.filter { it.isConstructor }.forEachIndexed { index, member ->
+            method("retentionBaselineBook$index", member)
+        }
+        out["value:retentionBaselineConstructors"] = baselineBook.methods.count { it.isConstructor }.toString()
         val calls = HostDexCalls(apk)
         val configConstructor = method("config", config.methods.filter {
             it.isConstructor && it.paramCount == 7 && it.paramTypes[0]?.let { p -> (p.modifiers and 0x4000) != 0 } == true &&

@@ -8,6 +8,7 @@ import com.reamicro.fix.cloud.webdav.CleartextScope
 import com.reamicro.fix.cloud.webdav.WebDavSyncProtocol
 import com.reamicro.fix.cloud.webdav.WebDavSyncTransport
 import com.reamicro.fix.cloud.webdav.ShelfSyncTransport
+import com.reamicro.fix.cloud.webdav.ShelfSyncRetention
 import com.reamicro.fix.cloud.github.GitHubSyncProtocol
 import com.reamicro.fix.cloud.github.GitHubSyncTransport
 import com.reamicro.fix.cloud.github.GitHubTokenCipher
@@ -33,6 +34,9 @@ internal class WebDavSyncHook(
     private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
     private val worker = com.reamicro.fix.reload.ModuleResources.pool(1) { Thread(it, "ReaMicroWebDavSync").apply { isDaemon = true } }
     private val configuring = AtomicBoolean()
+    @Volatile private var retiredState: ShelfSyncRetiredState? = null
+    private var retentionScope: List<Any?>? = null
+    private val baselineRevisionOwners = arrayListOf<Pair<java.lang.ref.WeakReference<Any>, String>>()
     private val handles = arrayListOf<XposedInterface.HookHandle>()
     private val nativeRoutes = HostWebDavConfigurationRoute(loader, activityProvider)
     private val configurationUi by lazy { HostWebDavConfigurationUi(loader) }
@@ -59,6 +63,7 @@ internal class WebDavSyncHook(
         }
         try {
             configurationUi.install(::hook)
+            hookRetentionGuard()
             hookTransport()
             hookLocalConfigSave()
             // 关闭扩展后暂停标记配置，不能落回 AWS 签名并把 WebDAV 密码发给别的服务。
@@ -66,7 +71,7 @@ internal class WebDavSyncHook(
                 override fun before(param: Call) {
                     val config = param.thisObject
                     if (!marked(config)) return
-                    if (!settingsProvider().canRunWebDavSync) param.result = false
+                    if (!enabled(requireNotNull(config))) param.result = false
                     // GitHub 默认分支允许留空，不能沿用原生 S3 对 Access Key 的非空检查。
                     else if (contract.config(requireNotNull(config), "bucket") == GitHubSyncProtocol.BUCKET)
                         param.result = (contract.config(config, "endpoint") as String).isNotBlank() &&
@@ -96,9 +101,11 @@ internal class WebDavSyncHook(
                 // 总是保持该组的位置；开关只改变组内容，避免后续原生槽位错位。
                 nativeUi.instance("startGroup", composer, 0x524D5753)
                 try {
-                    if (settingsProvider().canRunWebDavSync) {
+                    if (enabled(false)) {
                         renderEntry(composer)
                         configurationUi.entryGap(composer)
+                    }
+                    if (enabled(true)) {
                         renderEntry(composer, true)
                         configurationUi.entryGap(composer)
                     }
@@ -118,6 +125,77 @@ internal class WebDavSyncHook(
 
     private fun marked(config: Any?): Boolean = configType.isInstance(config) &&
         contract.config(requireNotNull(config), "bucket") in setOf(WebDavSyncProtocol.BUCKET, GitHubSyncProtocol.BUCKET)
+
+    private fun enabled(github: Boolean): Boolean =
+        if (github) settingsProvider().canRunGitHubSync else settingsProvider().canRunWebDavSync
+
+    private fun enabled(config: Any): Boolean =
+        enabled(contract.config(config, "bucket") == GitHubSyncProtocol.BUCKET)
+
+    private fun hookRetentionGuard() {
+        val equality = contract.method("retentionEquals")
+        val planner = contract.method("retentionPlanner")
+        val comparison = contract.method("retentionComparison")
+        repeat(contract.number("retentionBaselineConstructors")) { index ->
+            hook(contract.constructor("retentionBaselineBook$index"), object : HookCallback() {
+                override fun after(param: Call) {
+                    val book = param.thisObject ?: return
+                    val revision = contract.field("retentionBaselineBook.remoteRevision").get(book) ?: return
+                    val uuid = contract.field("retentionBaselineBook.uuid").get(book) as String
+                    synchronized(baselineRevisionOwners) {
+                        baselineRevisionOwners.removeAll { it.first.get() == null }
+                        baselineRevisionOwners += java.lang.ref.WeakReference(revision) to uuid
+                    }
+                }
+            })
+            HookRuntime.deoptimize(contract.constructor("retentionBaselineBook$index"))
+        }
+        hook(equality, object : HookCallback() {
+            override fun before(param: Call) {
+                if (param.args[0] != null) return
+                val state = retiredState ?: return
+                if (!AccountHostRuntime.isCurrent(state.identity, activityProvider())) return
+                val value = param.thisObject ?: return
+                val uuid = synchronized(baselineRevisionOwners) {
+                    baselineRevisionOwners.lastOrNull { it.first.get() === value }?.second
+                } ?: return
+                val revision = Triple(contract.field("retentionRevision.timestamp").getLong(value),
+                    contract.field("retentionRevision.counter").getLong(value),
+                    contract.field("retentionRevision.deviceId").get(value) as String)
+                if (revision !in state.revisions[uuid].orEmpty()) return
+                // 只放行规划器的基线/缺失比较；不干预远端发布时的修订冲突校验。
+                val frames = Thread.currentThread().stackTrace
+                val comparisonIndex = frames.indexOfFirst {
+                    it.className == comparison.declaringClass.name && it.methodName == comparison.name
+                }
+                val caller = frames.getOrNull(comparisonIndex + 1)
+                if (comparisonIndex >= 0 && caller?.className == planner.declaringClass.name &&
+                    caller.methodName == planner.name) param.result = true
+            }
+        })
+        HookRuntime.deoptimize(equality)
+        HookRuntime.deoptimize(comparison)
+        HookRuntime.deoptimize(planner)
+    }
+
+    private fun retentionTransport(config: Any): ShelfSyncTransport {
+        val snapshot = settingsProvider()
+        val identity = AccountHostRuntime.storageSnapshot(activityProvider())
+            ?: error("同步账号状态尚未就绪")
+        val scope = listOf(identity.accountId) + listOf("bucket", "endpoint", "prefix", "accessKey").map {
+            contract.config(config, it)
+        }
+        if (retentionScope != scope) {
+            retiredState = null
+            retentionScope = scope
+        }
+        val remote = transport(config)
+        return ShelfSyncRetention(remote, if (snapshot.syncBookLimitEnabled) snapshot.syncBookLimit else null) { records ->
+            check(AccountHostRuntime.isCurrent(identity, activityProvider())) { "同步账号状态已变化" }
+            retiredState = ShelfSyncRetiredState(identity, records.groupBy(ShelfSyncRetention::uuid)
+                .mapValues { (_, books) -> books.map(ShelfSyncRetention::revision).toSet() })
+        }
+    }
 
     private fun transport(config: Any): ShelfSyncTransport {
         if (contract.config(config, "bucket") == GitHubSyncProtocol.BUCKET) {
@@ -191,7 +269,7 @@ internal class WebDavSyncHook(
                     check(current === identity.session && AccountHostRuntime.isCurrent(identity, activityProvider())) {
                         "账号状态已变化，未保存同步配置"
                     }
-                    check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
+                    check(enabled(config)) { "此同步开关已关闭" }
                     val names = mapOf("provider" to "provider", "endpoint" to "endpoint", "bucket" to "bucket",
                         "region" to "region", "access_key" to "accessKey", "secret_key" to "secretKey", "prefix" to "prefix")
                     val values = names.map { (key, property) ->
@@ -213,12 +291,16 @@ internal class WebDavSyncHook(
                 override fun before(param: Call) {
                     val target = param.thisObject ?: return
                     val config = contract.field("transportConfig").get(target) ?: return
-                    if (!marked(config)) return
+                    if (!marked(config)) {
+                        retiredState = null
+                        retentionScope = null
+                        return
+                    }
                     val args = param.args.clone()
                     // 使用宿主协程恢复协议，不在主线程执行同步网络请求。
                     suspendOperation(param) {
-                        check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
-                        execute(operation, transport(config), args)
+                        check(enabled(config)) { "此同步开关已关闭" }
+                        execute(operation, retentionTransport(config), args)
                     }
                 }
             })
@@ -333,7 +415,7 @@ internal class WebDavSyncHook(
             runCatching { nativeValues(current) }.onSuccess { values ->
                 main.post {
                     if (activity.isFinishing || activity.isDestroyed || !AccountHostRuntime.isCurrent(identity, activity) ||
-                        !settingsProvider().canRunWebDavSync) {
+                        !enabled(github)) {
                         configuring.set(false)
                     } else {
                         runCatching { renderConfiguration(activity, identity, values, github) }
@@ -361,7 +443,7 @@ internal class WebDavSyncHook(
         fun valid() {
             check(!dismissed.get()) { "配置已取消，未保存" }
             check(AccountHostRuntime.isCurrent(identity, activity)) { "账号已切换，未保存" }
-            check(settingsProvider().canRunWebDavSync) { "同步扩展已关闭" }
+            check(enabled(github)) { "此同步开关已关闭" }
         }
         fun submit(draft: WebDavSyncConfigurationPage.Credentials) {
             if (busy.get() || dismissed.get()) return
@@ -423,7 +505,7 @@ internal class WebDavSyncHook(
             dismissed.set(true)
             configuring.set(false)
         }, configurationUi, {
-            !dismissed.get() && AccountHostRuntime.isCurrent(identity, activity) && settingsProvider().canRunWebDavSync
+            !dismissed.get() && AccountHostRuntime.isCurrent(identity, activity) && enabled(github)
         }, github)
         if (!nativeRoutes.open(page)) {
             page.closeEmbedded()
@@ -441,3 +523,8 @@ internal class WebDavSyncHook(
             "s3_sync_baseline_cbor", "s3_sync_pending_deletions")
     }
 }
+
+internal class ShelfSyncRetiredState(
+    val identity: AccountHostRuntime.Identity,
+    val revisions: Map<String, Set<Triple<Long, Long, String>>>,
+)

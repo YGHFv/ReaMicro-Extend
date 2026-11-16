@@ -18,6 +18,7 @@ internal object InjectedRouteCodec {
         "highlight-color" to InjectedRoute.ReaderHighlightColorPicker,
         "profile" to InjectedRoute.ProfileBackgroundSettings,
         "cloud" to InjectedRoute.CloudCompletionSettings,
+        "sync-config" to InjectedRoute.SyncConfigurationSettings,
         "account" to InjectedRoute.AccountCompletionSettings,
         "api" to InjectedRoute.ApiServerSettings,
         "cloud-tasks" to InjectedRoute.CloudAutomationSettings,

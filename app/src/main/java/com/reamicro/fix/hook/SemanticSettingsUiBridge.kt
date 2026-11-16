@@ -109,11 +109,35 @@ internal class SemanticSettingsUiBridge(private val hook: ReaMicroSettingsHook) 
     }
 
     private fun cloudSettings(): Unit = page("同步与下载") { card, colors, _ ->
-        toggle(card, colors, "WebDAV", { it.cloudWebDavEnabled }, hook.settings::setCloudWebDavEnabled)
-        toggle(card, colors, "同步扩展", { it.cloudSyncExtensionEnabled }, hook.settings::setCloudSyncExtensionEnabled)
+        if (hook.settings.snapshot().hasShelfSync) {
+            action(card, colors, "同步配置") { syncSettings() }
+        }
+        toggle(card, colors, "WebDAV 同步", { it.cloudSyncExtensionEnabled }) {
+            hook.settings.setCloudSyncExtensionEnabled(it)
+            cloudSettings()
+        }
+        toggle(card, colors, "GitHub 同步", { it.cloudGitHubSyncEnabled }) {
+            hook.settings.setCloudGitHubSyncEnabled(it)
+            cloudSettings()
+        }
+        toggle(card, colors, "WebDAV 云盘", { it.cloudWebDavEnabled }, hook.settings::setCloudWebDavEnabled)
         toggle(card, colors, "本地书库", { it.cloudLocalLibraryEnabled }, hook.settings::setCloudLocalLibraryEnabled)
         toggle(card, colors, "扩展显示", { it.cloudExtendedDisplayEnabled }, hook.settings::setCloudExtendedDisplayEnabled)
         toggle(card, colors, "下载取消", { it.cloudDownloadCancelEnabled }, hook.settings::setCloudDownloadCancelEnabled)
+    }
+
+    private fun syncSettings(): Unit = page("同步配置") { card, colors, _ ->
+        toggle(card, colors, "同步图书限制", { it.syncBookLimitEnabled }) {
+            hook.settings.setSyncBookLimitEnabled(it)
+            syncSettings()
+        }
+        if (hook.settings.snapshot().syncBookLimitEnabled) {
+            action(card, colors, "同步图书数量 · ${hook.settings.snapshot().syncBookLimit} 本") {
+                hook.openSyncBookLimitDialog { syncSettings() }
+            }
+        }
+        card.addView(hook.settingsDialogStatus(card.context,
+            "超过数量时移除远端最长时间未变更的图书，保留本机图书；下次同步时生效。", colors))
     }
 
     private fun rotationSettings(): Unit = page("屏幕方向") { card, colors, _ ->

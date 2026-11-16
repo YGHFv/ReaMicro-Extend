@@ -177,6 +177,7 @@ internal fun ReaMicroSettingsHook.renderInjectedSettingsScreen(requestedRoute: I
             InjectedRoute.ReaderHighlightColorPicker -> renderReaderHighlightColorPickerContent(innerPaddings, innerComposer)
             InjectedRoute.ProfileBackgroundSettings -> renderProfileBackgroundSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.CloudCompletionSettings -> renderCloudCompletionSettingsContent(innerPaddings, innerComposer)
+            InjectedRoute.SyncConfigurationSettings -> renderSyncConfigurationSettingsContent(innerPaddings, innerComposer)
             InjectedRoute.AccountCompletionSettings -> renderAccountCompletionSettingsContent(innerPaddings, innerComposer)
             is InjectedRoute.BookStructure -> Unit
             InjectedRoute.ApiServerSettings -> renderApiServerSettingsContent(innerPaddings, innerComposer)
@@ -843,14 +844,36 @@ internal fun ReaMicroSettingsHook.renderReaderSheetNavigationBackHandler(compose
 internal fun ReaMicroSettingsHook.renderCloudCompletionSettingsContent(innerPaddings: Any, composer: Any) {
     val listContent = functionProxy("CloudCompletionList", FUNCTION1_CLASS) { args ->
         val lazyListScope = args?.getOrNull(0) ?: return@functionProxy targetUnit()
+        syncSettingsVersionValue()
         val snapshot = settings.snapshot()
+        if (snapshot.hasShelfSync) {
+            addLazyItem(lazyListScope, 0x524d5350) { itemComposer ->
+                renderHostActionCard(listOf(ActionRow(
+                    key = "shelf_sync_configuration",
+                    title = "同步配置",
+                    subtitle = syncConfigurationSubtitle(),
+                    onClick = { openNestedInjectedRoute(InjectedRoute.SyncConfigurationSettings) },
+                )), itemComposer)
+            }
+        }
         val rows = listOf(
             ToggleRow(
                 key = ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
-                title = "WebDAV / GitHub 同步",
+                title = "WebDAV 同步",
                 checked = snapshot.cloudSyncExtensionEnabled,
                 onChanged = { checked, _ ->
                     settings.setCloudSyncExtensionEnabled(checked)
+                    bumpSyncSettingsVersion()
+                    checked
+                },
+            ),
+            ToggleRow(
+                key = ModuleSettings.KEY_CLOUD_GITHUB_SYNC_ENABLED,
+                title = "GitHub 同步",
+                checked = snapshot.cloudGitHubSyncEnabled,
+                onChanged = { checked, _ ->
+                    settings.setCloudGitHubSyncEnabled(checked)
+                    bumpSyncSettingsVersion()
                     checked
                 },
             ),

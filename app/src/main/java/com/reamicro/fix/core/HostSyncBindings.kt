@@ -65,6 +65,18 @@ internal object HostSyncBindings {
             "transportConfig saveSession datastore".split(' ').forEach { add("field:$it") }
             CONFIG_PROPERTIES.forEach { add("field:config.$it"); add("value:config.$it") }
             addAll(HostS3ConfigurationQueries.REQUIRED)
+            add("class:retentionRevision")
+            add("method:retentionEquals")
+            add("method:retentionPlanner")
+            add("method:retentionComparison")
+            for (name in listOf("timestamp", "counter", "deviceId")) add("field:retentionRevision.$name")
+            add("class:retentionBaselineBook")
+            add("field:retentionBaselineBook.uuid")
+            add("field:retentionBaselineBook.remoteRevision")
+            add("value:retentionBaselineConstructors")
+            val count = values["value:retentionBaselineConstructors"]?.toIntOrNull() ?: 0
+            check(count in 1..4)
+            repeat(count) { add("constructor:retentionBaselineBook$it") }
         }
         check(values.keys == required) { "Incomplete sync contract: missing=${required - values.keys}, extra=${values.keys - required}" }
         val m = Contract(HostRuntimeBindings.Members(values, loader), values)
@@ -73,6 +85,20 @@ internal object HostSyncBindings {
         val int = java.lang.Integer.TYPE
         val long = java.lang.Long.TYPE
         val config = m.type("config")
+        val revision = m.type("retentionRevision")
+        check(m.method("retentionEquals").let { it.declaringClass == revision &&
+            it.parameterTypes.toList() == listOf(any) && it.returnType == java.lang.Boolean.TYPE })
+        for ((name, expected) in mapOf("timestamp" to long, "counter" to long, "deviceId" to string))
+            check(m.field("retentionRevision.$name").let { it.declaringClass == revision && it.type == expected &&
+                !Modifier.isStatic(it.modifiers) })
+        check(m.method("retentionPlanner").let { it.returnType == any && it.parameterTypes.toList() == listOf(any) })
+        check(m.method("retentionComparison").let { Modifier.isStatic(it.modifiers) &&
+            it.parameterTypes.toList() == listOf(any, any) && it.returnType == java.lang.Boolean.TYPE })
+        check(m.field("retentionBaselineBook.uuid").type == string &&
+            m.field("retentionBaselineBook.remoteRevision").type == revision)
+        repeat(m.number("retentionBaselineConstructors")) {
+            check(m.constructor("retentionBaselineBook$it").declaringClass == m.type("retentionBaselineBook"))
+        }
         val provider = m.type("provider")
         val continuation = m.type("continuation")
         val transport = m.type("transport")

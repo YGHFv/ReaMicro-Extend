@@ -282,7 +282,25 @@ class XposedModuleSettings(
     }
 
     fun setCloudSyncExtensionEnabled(enabled: Boolean) {
+        // 先冻结 GitHub 的继承值，避免修改 WebDAV 时连带改变另一开关。
+        val store = prefs()
+        if (store != null && !store.contains(ModuleSettings.KEY_CLOUD_GITHUB_SYNC_ENABLED)) {
+            store.edit().putBoolean(ModuleSettings.KEY_CLOUD_GITHUB_SYNC_ENABLED,
+                store.getBoolean(ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
+                    ModuleSettings.DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED)).commit()
+        }
         putBoolean(ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED, enabled)
+    }
+
+    fun setCloudGitHubSyncEnabled(enabled: Boolean) =
+        putBoolean(ModuleSettings.KEY_CLOUD_GITHUB_SYNC_ENABLED, enabled)
+
+    fun setSyncBookLimitEnabled(enabled: Boolean) =
+        putBoolean(ModuleSettings.KEY_SYNC_BOOK_LIMIT_ENABLED, enabled)
+
+    fun setSyncBookLimit(value: Int) {
+        require(value in 1..ModuleSettings.MAX_SYNC_BOOK_LIMIT) { "同步图书数量超出范围" }
+        putInt(ModuleSettings.KEY_SYNC_BOOK_LIMIT, value)
     }
 
     fun setCloudLocalLibraryEnabled(enabled: Boolean) {
@@ -923,6 +941,12 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
                 ModuleSettings.DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED,
             ),
+            cloudGitHubSyncEnabled = prefs.getBoolean(ModuleSettings.KEY_CLOUD_GITHUB_SYNC_ENABLED,
+                prefs.getBoolean(ModuleSettings.KEY_CLOUD_SYNC_EXTENSION_ENABLED,
+                    ModuleSettings.DEFAULT_CLOUD_SYNC_EXTENSION_ENABLED)),
+            syncBookLimitEnabled = prefs.getBoolean(ModuleSettings.KEY_SYNC_BOOK_LIMIT_ENABLED, false),
+            syncBookLimit = prefs.getInt(ModuleSettings.KEY_SYNC_BOOK_LIMIT,
+                ModuleSettings.DEFAULT_SYNC_BOOK_LIMIT).coerceIn(1, ModuleSettings.MAX_SYNC_BOOK_LIMIT),
             cloudLocalLibraryEnabled = cloudLocalLibraryEnabled,
             cloudExtendedDisplayEnabled = cloudExtendedDisplayEnabled,
             cloudDownloadCancelEnabled = cloudDownloadCancelEnabled,
@@ -1495,6 +1519,9 @@ class XposedModuleSettings(
             snapshot.cloudEnabled,
             snapshot.cloudWebDavEnabled,
             snapshot.cloudSyncExtensionEnabled,
+            snapshot.cloudGitHubSyncEnabled,
+            snapshot.syncBookLimitEnabled,
+            snapshot.syncBookLimit,
             snapshot.cloudLocalLibraryEnabled,
             snapshot.cloudExtendedDisplayEnabled,
             snapshot.cloudDownloadCancelEnabled,
@@ -1544,7 +1571,8 @@ class XposedModuleSettings(
                     "editFile=${snapshot.editFileEnabled}, " +
                     "cloud=${snapshot.cloudEnabled}, " +
                     "cloudWebDav=${snapshot.cloudWebDavEnabled}, " +
-                    "cloudSyncExtension=${snapshot.cloudSyncExtensionEnabled}, " +
+                    "webDavSync=${snapshot.cloudSyncExtensionEnabled}, githubSync=${snapshot.cloudGitHubSyncEnabled}, " +
+                    "syncBookLimit=${snapshot.syncBookLimitEnabled}/${snapshot.syncBookLimit}, " +
                     "cloudLocalLibrary=${snapshot.cloudLocalLibraryEnabled}, " +
                     "cloudExtendedDisplay=${snapshot.cloudExtendedDisplayEnabled}, " +
                     "cloudDownloadCancel=${snapshot.cloudDownloadCancelEnabled}, " +

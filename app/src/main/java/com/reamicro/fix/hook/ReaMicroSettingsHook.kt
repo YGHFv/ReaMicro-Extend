@@ -103,6 +103,7 @@ class ReaMicroSettingsHook(
     @Volatile internal var readerHighlightScreenPlanUiState: Any? = null
     @Volatile internal var profileBackgroundVersionUiState: Any? = null
     @Volatile internal var bookshelfSettingsVersionUiState: Any? = null
+    @Volatile internal var syncSettingsVersionUiState: Any? = null
 
     @Volatile internal var discoverVersionUiState: Any? = null
 
