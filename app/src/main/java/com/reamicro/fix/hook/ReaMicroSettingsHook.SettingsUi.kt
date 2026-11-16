@@ -1478,7 +1478,11 @@ internal fun ReaMicroSettingsHook.renderHostLazyColumn(
 ) {
     nativeUi.lazyColumn(modifierOverride ?: pageModifier(innerPaddings, extendBottom), spacedBy(itemSpacing), listContent, composer)
 }
-internal fun ReaMicroSettingsHook.renderHostSettingsCard(rows: List<ToggleRow>, composer: Any) {
+internal fun ReaMicroSettingsHook.renderHostSettingsCard(
+    rows: List<ToggleRow>,
+    composer: Any,
+    actions: List<ActionRow> = emptyList(),
+) {
     val content = functionProxy("ModuleSettingsCardContent", FUNCTION3_CLASS) { args ->
         val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
         val stateUpdaters = mutableMapOf<String, (Boolean) -> Unit>()
@@ -1489,6 +1493,11 @@ internal fun ReaMicroSettingsHook.renderHostSettingsCard(rows: List<ToggleRow>, 
             if (hasVisibleRow && visible) renderHostDivider(innerComposer)
             renderHostSwitchRow(row, innerComposer, stateUpdaters, pendingStateUpdates)
             if (visible) hasVisibleRow = true
+        }
+        actions.forEach { row ->
+            if (hasVisibleRow) renderHostDivider(innerComposer)
+            renderHostActionRow(row, innerComposer)
+            hasVisibleRow = true
         }
         targetUnit()
     }

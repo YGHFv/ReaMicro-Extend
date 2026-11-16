@@ -37,88 +37,71 @@ internal fun ReaMicroSettingsHook.renderSyncConfigurationSettingsContent(innerPa
                     bumpSyncSettingsVersion()
                     enabled
                 },
-            )), inner)
-        }
-        if (snapshot.syncBookLimitEnabled) {
-            addLazyItem(scope, 0x524d534e) { inner ->
-                renderHostActionCard(listOf(ActionRow(
+            )), inner, actions = if (snapshot.syncBookLimitEnabled) {
+                listOf(ActionRow(
                     key = ModuleSettings.KEY_SYNC_BOOK_LIMIT,
                     title = "同步图书数量",
                     trailing = "${snapshot.syncBookLimit} 本",
                     onClick = { openSyncBookLimitDialog() },
-                )), inner)
-            }
-        }
-        addLazyItem(scope, 0x524d534f) { inner ->
-            renderHostSupportingText("超过数量时移除远端最长时间未变更的图书，保留本机图书。配置在下次同步时生效。", inner)
+                ))
+            } else emptyList())
         }
         val activity = activityProvider()
         if (activity != null) {
             val configuration = ModuleConfigSyncSettings(activity.applicationContext)
             addLazyItem(scope, 0x524d5355) { inner ->
-                renderHostSettingsCard(listOf(ToggleRow(
-                    key = "skip_online_books", title = "跳过在线图书", checked = configuration.skipOnlineBooks,
-                    onChanged = { enabled, _ ->
-                        configuration.setSkipOnlineBooks(enabled); bumpSyncSettingsVersion(); enabled
-                    },
-                )), inner)
-            }
-            if (configuration.skipOnlineBooks) {
-                addLazyItem(scope, 0x524d5357) { inner ->
-                    renderHostSettingsCard(listOf(ToggleRow(
+                renderHostSettingsCard(listOf(
+                    ToggleRow(
+                        key = "skip_online_books", title = "跳过在线图书", checked = configuration.skipOnlineBooks,
+                        onChanged = { enabled, _ ->
+                            configuration.setSkipOnlineBooks(enabled); bumpSyncSettingsVersion(); enabled
+                        },
+                    ),
+                    ToggleRow(
                         key = "online_progress_only", title = "仅同步进度和 UUID", checked = configuration.onlineProgressOnly,
+                        visibleProvider = { configuration.skipOnlineBooks },
                         onChanged = { enabled, _ ->
                             configuration.setOnlineProgressOnly(enabled); bumpSyncSettingsVersion(); enabled
                         },
-                    )), inner)
-                }
-                addLazyItem(scope, 0x524d5356) { inner ->
-                    renderHostSupportingText(if (configuration.onlineProgressOnly)
-                        "不上传在线章节目录和正文，保留 UUID、阅读进度及必要的书源定位标记。接收端保留本机章节，仅从对应书源获取目录和更新章节。"
-                    else "在线图书仅同步 UUID、书源和目录标记，保留接收端已有章节，再从书源补齐更新。接收端需有对应书源及登录配置。", inner)
-                }
+                    ),
+                ), inner)
             }
             addLazyItem(scope, 0x524d5350) { inner ->
-                renderHostSettingsCard(listOf(ToggleRow(
-                    key = "module_config_sync_enabled", title = "同步模块配置", checked = configuration.enabled,
-                    onChanged = { enabled, _ ->
-                        configuration.setEnabled(enabled); bumpSyncSettingsVersion(); enabled
-                    },
-                )), inner)
-            }
-            if (configuration.enabled) {
-                addLazyItem(scope, 0x524d5351) { inner ->
-                    renderHostSettingsCard(listOf(ToggleRow(
+                val rows = listOf(
+                    ToggleRow(
+                        key = "module_config_sync_enabled", title = "同步模块配置", checked = configuration.enabled,
+                        onChanged = { enabled, _ ->
+                            configuration.setEnabled(enabled); bumpSyncSettingsVersion(); enabled
+                        },
+                    ),
+                    ToggleRow(
                         key = "module_config_backup_only", title = "仅备份", checked = configuration.backupOnly,
+                        visibleProvider = { configuration.enabled },
                         onChanged = { enabled, _ ->
                             configuration.setBackupOnly(enabled); bumpSyncSettingsVersion(); enabled
                         },
-                    )), inner)
+                    ),
+                ) + ModuleConfigScope.entries.map { item -> ToggleRow(
+                    key = "module_config_scope_${item.name}", title = item.title,
+                    checked = item in configuration.scopes,
+                    visibleProvider = { configuration.enabled },
+                    onChanged = { enabled, _ ->
+                        configuration.setScope(item, enabled); bumpSyncSettingsVersion(); enabled
+                    },
+                ) }
+                val actions = buildList {
+                    if (configuration.enabled) {
+                        add(ActionRow(
+                            key = "module_config_backup", title = "立即备份模块配置",
+                            onClick = { ModuleConfigSyncActions.request?.invoke(false) },
+                        ))
+                        if (!configuration.backupOnly) add(ActionRow(
+                            key = "module_config_fetch", title = "手动获取并应用模块配置",
+                            onClick = { ModuleConfigSyncActions.request?.invoke(true) },
+                        ))
+                    }
                 }
-                addLazyItem(scope, 0x524d5352) { inner ->
-                    renderHostSettingsCard(ModuleConfigScope.entries.map { item -> ToggleRow(
-                        key = "module_config_scope_${item.name}", title = item.title,
-                        checked = item in configuration.scopes,
-                        onChanged = { enabled, _ ->
-                            configuration.setScope(item, enabled); bumpSyncSettingsVersion(); enabled
-                        },
-                    ) }, inner)
-                }
-                addLazyItem(scope, 0x524d5353) { inner ->
-                    val actions = arrayListOf(ActionRow(
-                        key = "module_config_backup", title = "立即备份模块配置",
-                        onClick = { ModuleConfigSyncActions.request?.invoke(false) },
-                    ))
-                    if (!configuration.backupOnly) actions += ActionRow(
-                        key = "module_config_fetch", title = "手动获取并应用模块配置",
-                        onClick = { ModuleConfigSyncActions.request?.invoke(true) },
-                    )
-                    renderHostActionCard(actions, inner)
-                }
-                addLazyItem(scope, 0x524d5354) { inner ->
-                    renderHostSupportingText(
-                        "随书架同步备份所选配置，按登录的阅微 ID 加密。同账号另一端仅在手动获取时解密并应用；仅备份开启时不下发配置。阅微 ID 不是保密密码。", inner)
-                }
+                renderHostSettingsCard(rows, inner, actions)
             }
         }
         targetUnit()
