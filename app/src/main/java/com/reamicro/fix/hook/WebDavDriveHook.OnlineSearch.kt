@@ -234,9 +234,7 @@ internal fun WebDavDriveHook.updateOnlineCompletionSearchTarget(path: String, ta
 }
 
 internal fun WebDavDriveHook.loadOnlineCompletionSearchCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String) {
-    val parserMode = com.reamicro.fix.online.OnlineParserMode.capture()
-    val url = if (parserMode.enhanced) coverUrl.trim()
-        else normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl).trim()
+    val url = normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl).trim()
     val frame = imageView.parent as? HostSearchCoverView
     if (url.isBlank()) {
         imageView.tag = null
@@ -244,7 +242,7 @@ internal fun WebDavDriveHook.loadOnlineCompletionSearchCover(imageView: ImageVie
         return
     }
     val generation = onlineSearchTasks.generation
-    val binding = OnlineSearchCoverBinding("${source.id}|${source.revision}|${parserMode.generation}|$url", webDavHomeSearchSeq.get(), generation)
+    val binding = OnlineSearchCoverBinding("${source.id}|${source.revision}|$url", webDavHomeSearchSeq.get(), generation)
     if (storagePaused || storageClosed || !homeSearch.isCurrent(binding.query) || !onlineSearchTasks.isCurrent(generation)) return
     if (imageView.tag == binding) return
     imageView.tag = binding
@@ -258,12 +256,6 @@ internal fun WebDavDriveHook.loadOnlineCompletionSearchCover(imageView: ImageVie
         runCatching {
             TaskCancellation.checkCurrent()
             if (target.get() == null) return@runCatching null
-            com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserMode.generation)
-            if (parserMode.enhanced) {
-                val bytes = com.reamicro.fix.online.EnhancedOnlineParser.bytes(source, url, isCover = true).bytes
-                require(bytes.size <= ONLINE_SEARCH_COVER_MAX_BYTES) { "封面数据过大" }
-                return@runCatching decodeOnlineSearchCover(bytes)
-            }
             if (url.startsWith("data:image/", ignoreCase = true)) {
                 require(url.length <= ONLINE_SEARCH_COVER_MAX_BYTES * 4) { "封面数据过大" }
                 val separator = url.indexOf(',')
@@ -375,9 +367,8 @@ internal fun WebDavDriveHook.searchOnlineCompletionSourcesProgressively(
     val signal = TaskCancellation.current()?.child() ?: TaskCancellation()
     val generation = onlineSearchTasks.generation
     val latch = CountDownLatch(sources.size)
-    val enhanced = com.reamicro.fix.online.OnlineParserMode.capture().enhanced
     val budgets = sources.map {
-        onlineSearchRequestBudgetMs(enhanced, it.respondTime,
+        onlineSearchRequestBudgetMs(it.respondTime,
             com.reamicro.fix.online.OnlineSourceDownloadPolicyStore.effectiveConcurrentRate(it))
     }
     val queueBudget = budgets.max() * ((sources.size - 1) / 3) + 30_000L
@@ -473,17 +464,6 @@ internal fun WebDavDriveHook.searchOnlineCompletionSource(
     }
     return runCatching {
         val trace = OnlineSearchTrace.current()
-        val parserMode = com.reamicro.fix.online.OnlineParserMode.capture()
-        if (parserMode.enhanced) {
-            trace?.stage("enhanced-setup")
-            val results = com.reamicro.fix.online.EnhancedOnlineParser.search(source, query)
-                .distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
-                .take(ONLINE_COMPLETION_RESULT_LIMIT)
-            com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserMode.generation)
-            val group = OnlineSearchGroup(source, query, results, "")
-            onParsedResults?.invoke(group)
-            return@runCatching group
-        }
         trace?.stage("rule-url")
         val request = buildOnlineSearchRequest(source, query)
         trace?.stage("rate-limit")
@@ -501,14 +481,14 @@ internal fun WebDavDriveHook.searchOnlineCompletionSource(
                     onlineSearchRelevanceScore(query, indexed.value.name, indexed.value.author)
                 }.thenBy { it.index },
             )
-            .map { it.value.copy(parsingState = parserMode) }
+            .map { it.value }
             .take(ONLINE_COMPLETION_RESULT_LIMIT)
         if (parsedResults.isNotEmpty()) {
             onParsedResults?.invoke(OnlineSearchGroup(source, query, parsedResults, ""))
         }
         trace?.stage("metadata-enrichment")
         val results = enrichOnlineSearchResultsMetadata(source, parsedResults)
-        com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserMode.generation)
+        com.reamicro.fix.online.OnlineSourceStore.requireCurrent(source)
         logWebDav("online completion source ok name=${source.name} results=${results.size} first=${results.firstOrNull()?.name.orEmpty()}")
         OnlineSearchGroup(source, query, results, "")
     }.getOrElse {

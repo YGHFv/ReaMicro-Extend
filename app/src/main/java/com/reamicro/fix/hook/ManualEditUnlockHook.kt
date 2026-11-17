@@ -70,7 +70,7 @@ internal class ManualEditUnlockHook(
         if (retired) return
         val activity = activity()?.takeUnless { it.isFinishing || it.isDestroyed } ?: return
         val snapshot = settings.snapshot()
-        val unlocked = snapshot.associationManualEditUnlocked && snapshot.onlineEnhancedParserUnlocked
+        val unlocked = snapshot.associationManualEditUnlocked
         val now = SystemClock.uptimeMillis()
         if (lastActivity.get() !== activity || now - lastTap > 2500L || tapTargetUnlocked != !unlocked) taps = 0
         tapTargetUnlocked = !unlocked
@@ -81,12 +81,12 @@ internal class ManualEditUnlockHook(
             taps >= 7 -> {
                 taps = 0
                 tapTargetUnlocked = null
-                if (!settings.setHiddenSourceFeaturesUnlocked(!unlocked)) {
+                if (!settings.setAssociationManualEditUnlocked(!unlocked)) {
                     "保存扩展功能设置失败，请重试"
                 } else if (unlocked) {
-                    "已关闭手动编辑和增强解析并隐藏入口"
+                    "已关闭手动编辑并隐藏入口"
                 } else {
-                    "已解锁手动编辑和增强解析，可在关联补全与在线补全中开启"
+                    "已解锁手动编辑，可在关联补全中开启"
                 }
             }
             taps >= 4 -> "再点击 ${7 - taps} 次可${if (unlocked) "关闭" else "解锁"}扩展功能"

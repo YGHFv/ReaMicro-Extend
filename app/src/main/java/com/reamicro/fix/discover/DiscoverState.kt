@@ -81,10 +81,8 @@ internal object DiscoverState {
 
     init {
         val observer = OnlineSourceStore.observeChanges { invalidate() }
-        val modeObserver = com.reamicro.fix.online.OnlineParserMode.observeChanges { invalidate() }
         ModuleResources.cleanup {
             observer.close()
-            modeObserver.close()
             synchronized(this) {
                 cancelRequest()
                 cache.clear()
@@ -228,21 +226,6 @@ internal object DiscoverState {
         if (current == DiscoverSelection.NONE) return
         selectionKey(current)?.let(cache::remove)
         load(current, context)
-    }
-
-    /** A control action replaces only its source's kinds and invalidates affected book pages. */
-    @Synchronized fun updateKinds(sourceId: String, revision: String, kinds: List<DiscoverKind>, context: Context?) {
-        val previous = sources.firstOrNull { it.source.id == sourceId && it.source.revision == revision } ?: return
-        if (!OnlineSourceStore.isCurrent(previous.source)) return
-        sources = sources.map { if (it === previous) it.copy(kinds = kinds.toList()) else it }
-        cache.keys.removeAll { it.sourceId == sourceId }
-        if (selection.sourceId == sourceId) {
-            cancelRequest()
-            selection = resolveSelection(selection, sources)
-            persistSelection(context)
-            bump()
-            load(selection, context)
-        } else bump()
     }
 
     @Synchronized fun selectSource(sourceId: String, context: Context?) {

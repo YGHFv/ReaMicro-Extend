@@ -92,13 +92,11 @@ internal class OnlineSearchTrace(
     }
 }
 
-internal fun onlineSearchRequestBudgetMs(enhanced: Boolean, respondTime: Int, concurrentRate: String): Long {
+internal fun onlineSearchRequestBudgetMs(respondTime: Int, concurrentRate: String): Long {
     val interval = concurrentRate.substringAfter('/', concurrentRate).toLongOrNull()
         ?.coerceIn(0L, 60_000L) ?: 0L
-    // 增强 HTTP 的单次调用允许 60 秒；旧解析器另有连接时间，解析与限速也要留在外层预算中。
-    val network = if (enhanced) 60_000L else {
-        val read = respondTime.toLong().coerceIn(15_000L, 300_000L)
-        read + read.coerceAtMost(30_000L)
-    }
+    // 外层预算覆盖读取、连接、限速等待与解析时间。
+    val read = respondTime.toLong().coerceIn(15_000L, 300_000L)
+    val network = read + read.coerceAtMost(30_000L)
     return network + interval + 15_000L
 }

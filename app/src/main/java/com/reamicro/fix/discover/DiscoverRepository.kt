@@ -21,22 +21,14 @@ internal object DiscoverRepository {
     private const val MAX_BOOKS = 60
 
     fun parseKinds(source: OnlineSourceEntry): List<DiscoverKind> =
-        if (com.reamicro.fix.online.OnlineParserMode.isEnhanced)
-            com.reamicro.fix.online.EnhancedOnlineParser.kinds(source)
-        else parseExploreKinds(source.exploreUrl)
+        parseExploreKinds(source.exploreUrl)
 
     fun parseFilter(source: OnlineSourceEntry): DiscoverFilter? =
-        if (com.reamicro.fix.online.OnlineParserMode.isEnhanced) null else parseExploreFilter(source.exploreUrl)
+        parseExploreFilter(source.exploreUrl)
 
     fun loadBooks(source: OnlineSourceEntry, kind: DiscoverKind, page: Int = 1): DiscoverLoadState {
-        val parsing = com.reamicro.fix.online.OnlineParserMode.capture()
         com.reamicro.fix.online.OnlineSourceStore.requireCurrent(source)
         if (!kind.isBookList) return DiscoverLoadState.Loaded(emptyList())
-        if (parsing.enhanced) {
-            return DiscoverLoadState.Loaded(
-                com.reamicro.fix.online.EnhancedOnlineParser.explore(source, kind, page),
-            )
-        }
         val hook = WebDavDriveHook.activeInstance
             ?: return DiscoverLoadState.Failed("在线书源模块未就绪")
         val base = sourceBaseUrl(source)
@@ -60,10 +52,9 @@ internal object DiscoverRepository {
                 lastError = it.message.orEmpty().ifBlank { it.javaClass.simpleName }
             }.getOrDefault(emptyList())
             com.reamicro.fix.online.OnlineSourceStore.requireCurrent(source)
-            com.reamicro.fix.online.OnlineParserMode.requireCurrent(parsing.generation)
-            if (books.isNotEmpty()) return DiscoverLoadState.Loaded(books.map { it.copy(parsingState = parsing) })
+            if (books.isNotEmpty()) return DiscoverLoadState.Loaded(books)
         }
-        com.reamicro.fix.online.OnlineParserMode.requireCurrent(parsing.generation)
+        com.reamicro.fix.online.OnlineSourceStore.requireCurrent(source)
         return if (lastError.isBlank()) {
             DiscoverLoadState.Loaded(emptyList())
         } else {

@@ -27,7 +27,7 @@ class ModuleConfigSyncTest {
             assertEquals(ModuleConfigScope.SOURCE_CREDENTIALS, scope(key))
         assertEquals(ModuleConfigScope.SOURCES, scope("online_download_on_demand_id"))
         for (key in listOf("sync_book_limit", "online_download_daily_used_id", "module_enabled",
-                "cloud_github_sync_enabled", "online_enhanced_parser_unlocked")) assertNull(scope(key))
+                "cloud_github_sync_enabled")) assertNull(scope(key))
         assertEquals(ModuleConfigScope.API, ModuleConfigPolicy.fileScope("reamicro_ai_apis.json"))
         assertEquals(ModuleConfigScope.SOURCES, ModuleConfigPolicy.fileScope("reamicro_online_sources/a.rmonline"))
         for (path in listOf("../token", "reamicro_online_sources/../../token", "/token", "C:/token", "reamicro_online_sources/.cache/a.json"))

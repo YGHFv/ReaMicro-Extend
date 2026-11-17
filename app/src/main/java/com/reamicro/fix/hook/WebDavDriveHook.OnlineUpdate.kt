@@ -3,11 +3,9 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.cloud.webdav.OnlineDownloadedChapter
 import com.reamicro.fix.hook.webdav.*
 import com.reamicro.fix.logging.logWebDav
-import com.reamicro.fix.online.OnlineParserMode
 import com.reamicro.fix.online.OnlineSourceDailyLimitException
 import com.reamicro.fix.online.OnlineSourceDownloadPolicyStore
 import com.reamicro.fix.online.OnlineSourceStore
-import com.reamicro.fix.online.forTarget
 import com.reamicro.fix.online.download.*
 import com.reamicro.fix.online.epub.OnlineUpdateStyleFingerprint
 import com.reamicro.fix.reload.TaskCancellation
@@ -35,11 +33,9 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
     check(book.callLong("getUid") == storageIdentity.accountId && original.parentFile == expectedRoot) {
         "图书目录与更新账号不一致"
     }
-    val generation = OnlineParserMode.forTarget(target).generation
     val execution = storageExecutionGeneration.get()
     fun checkIdentity() {
         active.check()
-        OnlineParserMode.requireCurrent(generation)
         OnlineSourceStore.requireCurrent(target.source)
         check(!storageClosed && settingsProvider().moduleEnabled && execution == storageExecutionGeneration.get() &&
             AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider())) { "账号或模块状态已变化，已停止章节更新" }
@@ -47,7 +43,7 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
     val originalGuard = OnlineBookWriteGuard(original, isCurrent = {
         !storageClosed && settingsProvider().moduleEnabled &&
             AccountHostRuntime.isCurrentStorage(storageIdentity, activityProvider()) &&
-            OnlineSourceStore.isCurrent(target.source) && generation == OnlineParserMode.generation
+            OnlineSourceStore.isCurrent(target.source)
     }, commitCurrent = { action -> AccountHostRuntime.withCurrentStorage(storageIdentity, action = action) })
     val snapshot = OnlineUpdateStaging(original) { checkIdentity(); originalGuard.checkCurrent() }
     check(File(original, "OEBPS/Text").isDirectory && File(original, "OEBPS/content.opf").isFile &&

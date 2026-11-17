@@ -1224,18 +1224,6 @@ internal fun ReaMicroSettingsHook.renderOnlineCompletionSettingsContent(innerPad
         val snapshot = settings.snapshot()
         addLazyItem(lazyListScope, 0x524d4f4d) { itemComposer ->
             renderHostSettingsCard(buildList {
-                if (snapshot.onlineEnhancedParserUnlocked) {
-                    add(ToggleRow(
-                        key = ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED,
-                        title = "增强解析",
-                        checked = snapshot.onlineEnhancedParserEnabled,
-                        onChanged = { checked, _ ->
-                            if (!settings.setOnlineEnhancedParserEnabled(checked)) showToast("保存解析设置失败，请重试")
-                            bumpOnlineSourceVersion()
-                            settings.snapshot().onlineEnhancedParserEnabled
-                        },
-                    ))
-                }
                 add(ToggleRow(ModuleSettings.KEY_ONLINE_DISCOVER_ENABLED, "发现入口", snapshot.onlineDiscoverEnabled,
                     onChanged = { checked, _ -> settings.setOnlineDiscoverEnabled(checked); checked }))
             }, itemComposer)

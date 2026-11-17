@@ -1,9 +1,0 @@
-Android parsing sources are adapted from HapeLee/legado-with-MD3:
-https://github.com/HapeLee/legado-with-MD3
-Upstream commit: e257ee124aabd4ae778804c5cffec4c30714db5b
-
-This distribution contains ReaMicro Extend adaptations for host HTTP, cookies,
-WebView and parser storage. Unused simplified/traditional conversion APIs and
-dictionaries are omitted. These adaptations are included as of 2026-11-15.
-
-The upstream source is licensed under GNU GPL version 3; see LICENSE.

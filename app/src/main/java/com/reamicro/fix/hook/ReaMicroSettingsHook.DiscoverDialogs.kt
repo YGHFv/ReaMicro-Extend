@@ -91,10 +91,6 @@ internal fun ReaMicroSettingsHook.openDiscoverKindDialog(activity: Activity) {
     val entry = DiscoverState.sources.firstOrNull { it.source.id == selection.sourceId } ?: return
     val kinds = DiscoverState.kindsFor(entry)
     if (kinds.isEmpty()) return
-    if (kinds.any { it.control != null }) {
-        openEnhancedDiscoverControls(entry)
-        return
-    }
     activity.runOnModuleUiThread {
         runCatching {
             val context: Context = activity
@@ -532,7 +528,6 @@ private fun discoverDownloadTarget(source: DiscoverSource, book: DiscoverBook): 
             wordCount = book.wordCount,
             updateTime = book.updateTime,
             platformName = "",
-            parsingState = book.parsingState,
         ),
     )
 

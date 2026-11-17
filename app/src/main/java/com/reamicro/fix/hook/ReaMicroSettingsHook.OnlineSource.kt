@@ -353,10 +353,6 @@ internal fun ReaMicroSettingsHook.openOnlineSourceLoginDialog(
         onResult(false)
         return
     }
-    if (com.reamicro.fix.online.OnlineParserMode.isEnhanced) {
-        openEnhancedOnlineSourceLogin(source, enableFlow, onResult)
-        return
-    }
     val loginFields = OnlineSourceAuth.loginFields(source)
     if (OnlineSourceTrxsCompat.isSource(source)) {
         openTrxsOnlineSourceLoginDialog(activity, source, enableFlow, onResult)

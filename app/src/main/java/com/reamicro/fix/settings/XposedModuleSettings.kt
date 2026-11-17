@@ -29,16 +29,6 @@ class XposedModuleSettings(
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
         snapshotCache.clear()
         fontSettingsCache.clear()
-        if (key == null || key == ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED ||
-            key == ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED ||
-            key == ModuleSettings.KEY_MODULE_ENABLED
-        ) {
-            com.reamicro.fix.online.OnlineParserMode.publish(
-                prefs.getBoolean(ModuleSettings.KEY_MODULE_ENABLED, ModuleSettings.DEFAULT_MODULE_ENABLED) &&
-                    prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, false) &&
-                    prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, false),
-            )
-        }
         if (key == null || key == ModuleSettings.KEY_MODULE_ENABLED) {
             publishModuleEnabled(prefs.getBoolean(
                 ModuleSettings.KEY_MODULE_ENABLED, ModuleSettings.DEFAULT_MODULE_ENABLED))
@@ -91,7 +81,6 @@ class XposedModuleSettings(
         cachedHighlightSettings = null
         cachedHighlightSettingsAtMs = 0L
         publishModuleEnabled(snapshot().moduleEnabled)
-        com.reamicro.fix.online.OnlineParserMode.publish(snapshot().canUseEnhancedOnlineParser)
     }
 
     fun snapshot(): ModuleSettingsSnapshot {
@@ -138,46 +127,6 @@ class XposedModuleSettings(
         snapshotCache.clear()
         snapshot()
         return true
-    }
-
-    fun setHiddenSourceFeaturesUnlocked(unlocked: Boolean): Boolean {
-        val preferences = prefs() ?: return false
-        val previous = snapshot()
-        val editor = preferences.edit()
-            .putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED, unlocked)
-            .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, unlocked)
-        if (!unlocked) {
-            editor.putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED, false)
-                .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, false)
-        }
-        val saved = runCatching { editor.commit() }.getOrDefault(false)
-        if (!saved) {
-            runCatching { preferences.edit()
-                .putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED, previous.associationManualEditUnlocked)
-                .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, previous.onlineEnhancedParserUnlocked)
-                .putBoolean(ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_ENABLED, previous.associationManualEditEnabled)
-                .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, previous.onlineEnhancedParserEnabled)
-                .commit() }
-        }
-        snapshotCache.clear()
-        snapshot()
-        return saved
-    }
-
-    fun setOnlineEnhancedParserEnabled(enabled: Boolean): Boolean {
-        val preferences = prefs() ?: return false
-        val before = snapshot()
-        if (enabled && !before.onlineEnhancedParserUnlocked) return false
-        val saved = runCatching { preferences.edit()
-            .putBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, enabled).commit() }.getOrDefault(false)
-        if (!saved) {
-            runCatching { preferences.edit().putBoolean(
-                ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, before.onlineEnhancedParserEnabled,
-            ).commit() }
-        }
-        snapshotCache.clear()
-        snapshot()
-        return saved
     }
 
     fun setAssociationUnlinkEnabled(enabled: Boolean) {
@@ -858,8 +807,6 @@ class XposedModuleSettings(
                 ModuleSettings.KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED,
                 ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_UNLOCKED,
             ),
-            onlineEnhancedParserUnlocked = prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_UNLOCKED, false),
-            onlineEnhancedParserEnabled = prefs.getBoolean(ModuleSettings.KEY_ONLINE_ENHANCED_PARSER_ENABLED, false),
             associationUnlinkEnabled = prefs.getBoolean(
                 ModuleSettings.KEY_ASSOCIATION_UNLINK_ENABLED,
                 ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED,

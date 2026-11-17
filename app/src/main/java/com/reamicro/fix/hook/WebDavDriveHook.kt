@@ -254,7 +254,7 @@ class WebDavDriveHook(
     ) {
         private val cachedBodies = mutableMapOf<String, String>()
         private val attemptedItemIds = mutableSetOf<String>()
-        private var disabled = target.result.parsingState?.enhanced == true || !supportsOnlineFanqieBatch(
+        private var disabled = !supportsOnlineFanqieBatch(
             sourceUrl = target.source.sourceUrl,
             endpointTemplate = target.source.chapterBatchEndpoint,
             batchSize = target.source.chapterBatchSize,

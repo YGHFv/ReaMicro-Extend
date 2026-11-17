@@ -44,10 +44,9 @@ class OnlineSearchTraceTest {
         assertTrue(trace.diagnostic().contains("response-wait:74000"))
     }
 
-    @Test fun budgetsCoverHttpAndRateWaitInBothParserModes() {
-        assertEquals(78_000L, onlineSearchRequestBudgetMs(true, 180_000, "10/3000"))
-        assertEquals(228_000L, onlineSearchRequestBudgetMs(false, 180_000, "10/3000"))
-        assertEquals(45_000L, onlineSearchRequestBudgetMs(false, 0, ""))
+    @Test fun budgetsCoverHttpAndRateWait() {
+        assertEquals(228_000L, onlineSearchRequestBudgetMs(180_000, "10/3000"))
+        assertEquals(45_000L, onlineSearchRequestBudgetMs(0, ""))
     }
 
     @Test fun eightSecondSlowSnapshotIsLoggedOnceWithoutCancellingTheRequest() {

@@ -9,8 +9,6 @@ object ModuleSettings {
     const val KEY_ASSOCIATION_ENABLED = "association_enabled"
     const val KEY_ASSOCIATION_MANUAL_EDIT_ENABLED = "association_manual_edit_enabled"
     const val KEY_ASSOCIATION_MANUAL_EDIT_UNLOCKED = "association_manual_edit_unlocked"
-    const val KEY_ONLINE_ENHANCED_PARSER_UNLOCKED = "online_enhanced_parser_unlocked"
-    const val KEY_ONLINE_ENHANCED_PARSER_ENABLED = "online_enhanced_parser_enabled"
     const val KEY_ASSOCIATION_UNLINK_ENABLED = "association_unlink_enabled"
     const val KEY_ASSOCIATION_COVER_FIX_ENABLED = "association_cover_fix_enabled"
     const val KEY_READER_ENABLED = "reader_enabled"
@@ -217,8 +215,6 @@ data class ModuleSettingsSnapshot(
     val associationEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_ENABLED,
     val associationManualEditEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_ENABLED,
     val associationManualEditUnlocked: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_MANUAL_EDIT_UNLOCKED,
-    val onlineEnhancedParserUnlocked: Boolean = false,
-    val onlineEnhancedParserEnabled: Boolean = false,
     val associationUnlinkEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_UNLINK_ENABLED,
     val associationCoverFixEnabled: Boolean = ModuleSettings.DEFAULT_ASSOCIATION_COVER_FIX_ENABLED,
     val readerEnabled: Boolean = ModuleSettings.DEFAULT_READER_ENABLED,
@@ -293,9 +289,6 @@ data class ModuleSettingsSnapshot(
 
     val canUseManualEdit: Boolean
         get() = canRunAssociation && associationManualEditUnlocked && associationManualEditEnabled
-
-    val canUseEnhancedOnlineParser: Boolean
-        get() = moduleEnabled && onlineEnhancedParserUnlocked && onlineEnhancedParserEnabled
 
     val canUseAssociationUnlink: Boolean
         get() = canRunAssociation && associationUnlinkEnabled

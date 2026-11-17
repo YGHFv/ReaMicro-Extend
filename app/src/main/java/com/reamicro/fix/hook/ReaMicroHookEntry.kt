@@ -91,13 +91,11 @@ class ReaMicroHookEntry {
     }
 
     internal fun attachStartupContext(context: android.content.Context) {
-        com.reamicro.fix.online.OnlineParserContext.attach(context)
         moduleSettings.attachContext(context)
         synchronizeDisabledExecution(context)
     }
 
     internal fun observeStartupActivity(activity: Activity, resumed: Boolean) {
-        com.reamicro.fix.online.OnlineParserContext.attach(activity)
         setCurrentActivity(activity)
         currentActivityResumed = resumed
         moduleSettings.attachContext(activity)
@@ -163,9 +161,6 @@ class ReaMicroHookEntry {
             return
         }
         YouShuWebSearchBridge.attach(activityProvider) { moduleSettings.snapshot().moduleEnabled }
-        installFeature("HostSourceBrowserBridge") {
-            check(HostSourceBrowserBridge.install(classLoader, activityProvider)) { "宿主书源网页入口不可用" }
-        }
         val readerHook = ReaderHook(
             classLoader = classLoader,
             activityProvider = activityProvider,

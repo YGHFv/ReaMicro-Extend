@@ -21,8 +21,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "阅微补全"
 include(":app")
-include(":legado-parser")
-project(":legado-parser").projectDir = file("third_party/legado/android")
 
 include(":scripta-editor")
 project(":scripta-editor").projectDir = file("third_party/scripta/editor")

@@ -193,7 +193,8 @@ dependencies {
     testImplementation("org.json:json:20260719")
     testImplementation("org.xerial:sqlite-jdbc:3.49.1.0")
 
-    implementation(project(":legado-parser"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
 

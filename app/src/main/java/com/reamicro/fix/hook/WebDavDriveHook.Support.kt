@@ -58,16 +58,9 @@ import com.reamicro.fix.logging.logWebDav
 internal fun WebDavDriveHook.install() {
     logWebDav("install start")
     WebDavDriveHook.activeInstance = this
-    val parserModeObserver = com.reamicro.fix.online.OnlineParserMode.observeChanges {
-        onlineSearchTasks.cancelAll()
-        onlineCompletionSearchTargets.clear()
-        onlineCompletionSearchRowViews.clear()
-        onlineCompletionSearchBooks.clear()
-    }
     val onDemandAttachment = OnlineOnDemandBridge.attach(::downloadOnlineCompletionOnDemandChapter)
     com.reamicro.fix.reload.ModuleResources.cleanup {
         try {
-            parserModeObserver.close()
             closeStorageForReload()
         } finally {
             onDemandAttachment.close()

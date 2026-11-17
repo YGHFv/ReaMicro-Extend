@@ -197,8 +197,7 @@ private fun ReaMicroSettingsHook.renderDiscoverKindChip(
     val selected = kind.key == selection.kindKey
     val activity = activityProvider()
     val clickable = clickableModifier(modifierInstance(), "DiscoverKind${kind.title}") {
-        if (kind.control != null && !kind.isBookList) openEnhancedDiscoverControls(source, kind)
-        else DiscoverState.select(source.source.id, kind.title, activity?.applicationContext, kind.key)
+        DiscoverState.select(source.source.id, kind.title, activity?.applicationContext, kind.key)
     }
     val mod = paddingSides(discoverHeight(clickable, DISCOVER_KIND_CONTENT_HEIGHT_DP),
         if (first) 0 else DiscoverShelfStyle.GROUP_HORIZONTAL_PADDING, 0,
@@ -540,8 +539,7 @@ private fun cancelDiscoverCover(view: ImageView) {
 internal fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, coverUrl: String, detailUrl: String) {
     val hook = WebDavDriveHook.activeInstance ?: return
     if (!OnlineSourceStore.isCurrent(source)) { cancelDiscoverCover(imageView); return }
-    val parserMode = com.reamicro.fix.online.OnlineParserMode.capture()
-    val key = "${source.id}|${source.revision}|${parserMode.generation}|$coverUrl|$detailUrl"
+    val key = "${source.id}|${source.revision}|$coverUrl|$detailUrl"
     val previous = imageView.tag as? DiscoverCoverRequest
     if (previous?.key == key || imageView.tag == key) return
     cancelDiscoverCover(imageView)
@@ -557,11 +555,6 @@ internal fun loadDiscoverCover(imageView: ImageView, source: OnlineSourceEntry, 
     imageView.contentDescription = "正在加载封面"
     val task = java.util.concurrent.FutureTask<Unit> {
         val bitmap = runCatching { request.operation.run {
-            if (parserMode.enhanced) {
-                return@run decodeDiscoverCoverBytes(
-                    com.reamicro.fix.online.EnhancedOnlineParser.bytes(source, coverUrl, isCover = true).bytes,
-                )
-            }
             val url = hook.normalizeOnlineCoverUrl(source, sourceBaseUrl(source), coverUrl).trim()
             if (url.isBlank()) null else downloadDiscoverCover(hook, source, url)
                 ?: if (isFanqieCoverUrl(url)) downloadDiscoverCoverViaWebPage(hook, detailUrl)

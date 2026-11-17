@@ -22,8 +22,6 @@ import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceScriptCompat
 import com.reamicro.fix.online.OnlineSourceStore
-import com.reamicro.fix.online.OnlineParserMode
-import com.reamicro.fix.online.forTarget
 import com.reamicro.fix.online.OnlineSourceTrxsCompat
 import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
 import com.reamicro.fix.notification.onlineCompletionDownloadBigText
@@ -374,10 +372,6 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
     val sourceRegistration = OnlineSourceStore.observeChanges {
         if (!OnlineSourceStore.isCurrent(source)) cancellation.cancel()
     }
-    val parserGeneration = com.reamicro.fix.online.OnlineParserMode.generation
-    val parserRegistration = com.reamicro.fix.online.OnlineParserMode.observeChanges {
-        if (com.reamicro.fix.online.OnlineParserMode.generation != parserGeneration) cancellation.cancel()
-    }
     val completed = java.util.concurrent.atomic.AtomicBoolean()
     var interruptRegistration: AutoCloseable? = null
     val notificationFailureReported = java.util.concurrent.atomic.AtomicBoolean()
@@ -388,7 +382,6 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
         onlineCompletionUpdateControls.remove(key, control)
         onlineCompletionUpdateNotificationIds.remove(key)?.let { onlineCompletionProgressNotifiers.remove(it) }
         sourceRegistration.close()
-        parserRegistration.close()
         interruptRegistration?.close()
         parentStop?.close()
         control.finish()
@@ -438,7 +431,6 @@ internal fun WebDavDriveHook.startOnlineCompletionChapterUpdate(
                 cancellation.run {
                 fun checkCurrent() {
                     cancellation.check()
-                    com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserGeneration)
                     OnlineSourceStore.requireCurrent(source)
                     check(!storageClosed && settingsProvider().moduleEnabled &&
                         execution == storageExecutionGeneration.get() &&
@@ -719,12 +711,6 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
         return
     }
     target.source = OnlineSourceDownloadPolicyStore.attach(appContext, target.source)
-    val parserMode = try {
-        OnlineParserMode.forTarget(target)
-    } catch (error: java.util.concurrent.CancellationException) {
-        showToast(error.message ?: "解析方式已切换，请重新搜索")
-        return
-    }
     if (!OnlineSourceStore.isCurrent(target.source)) {
         showToast("在线源已更新或删除，请重新搜索后下载")
         return
@@ -756,8 +742,7 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
         workId = workId,
         checkActive = { !storageClosed && settingsProvider().moduleEnabled &&
             execution == storageExecutionGeneration.get() &&
-            com.reamicro.fix.reload.ModuleResources.accepting && OnlineSourceStore.isCurrent(target.source) &&
-            com.reamicro.fix.online.OnlineParserMode.generation == parserMode.generation },
+            com.reamicro.fix.reload.ModuleResources.accepting && OnlineSourceStore.isCurrent(target.source) },
     )
     if (onlineCompletionRunningDownloads.putIfAbsent(key, task) != null) {
         cancelOnlineCompletionTrackedWork(task)
@@ -768,9 +753,6 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
     target.imageCache = com.reamicro.fix.online.download.OnlineChapterImageCache(File(cacheDir, "images"))
     val sourceRegistration = OnlineSourceStore.observeChanges {
         if (!OnlineSourceStore.isCurrent(target.source)) task.cancellation.cancel()
-    }
-    val parserRegistration = com.reamicro.fix.online.OnlineParserMode.observeChanges {
-        if (com.reamicro.fix.online.OnlineParserMode.generation != parserMode.generation) task.cancellation.cancel()
     }
     val modeLabel = if (mode == OnlineBookDownloadMode.ON_DEMAND) "逐章加载" else "整本下载"
     showToast("已开始$modeLabel：${target.result.name}")
@@ -793,7 +775,6 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
     }
     val lifetime = com.reamicro.fix.online.download.OnlineDownloadLifetime {
         sourceRegistration.close()
-        parserRegistration.close()
         cleanupOnlineCompletionDownloadTask(task)
         target.imageCache = null
         onlineCompletionRunningDownloads.remove(key, task)
@@ -1026,7 +1007,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
         }.getOrNull()
 
             ?: run {
-                if (OnlineParserMode.forTarget(target).enhanced || !isFanqieCoverUrl(coverUrl)) return@run null
+                if (!isFanqieCoverUrl(coverUrl)) return@run null
                 runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
                     .onFailure { error ->
                         com.reamicro.fix.xposed.HookRuntime.logAlways(
@@ -1133,7 +1114,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
         }.getOrNull()
 
             ?: run {
-                if (OnlineParserMode.forTarget(target).enhanced || !isFanqieCoverUrl(coverUrl)) return@run null
+                if (!isFanqieCoverUrl(coverUrl)) return@run null
                 runCatching { downloadDiscoverCoverViaWebPage(this, target.result.detailUrl) }
                     .onFailure { error ->
                         com.reamicro.fix.xposed.HookRuntime.logAlways(
@@ -1305,9 +1286,6 @@ internal fun WebDavDriveHook.loadOnlineCompletionToc(
     target: OnlineDownloadTarget,
     onProgress: (Int, String) -> Unit,
 ): OnlineTocSnapshot {
-    if (OnlineParserMode.forTarget(target).enhanced) {
-        return com.reamicro.fix.online.EnhancedOnlineParser.toc(target, onProgress)
-    }
     val startedAt = System.nanoTime()
     val detailUrl = target.result.detailUrl.ifBlank { error("搜索结果缺少详情页地址") }
     onProgress(3, "读取详情页")
@@ -1367,18 +1345,6 @@ internal fun WebDavDriveHook.downloadOnlineChapter(
     batchSession: OnlineChapterBatchSession? = null,
 ): OnlineDownloadedChapter =
     OnlineSourceDownloadPolicyStore.withChapterDownload(currentContext(), target.source) {
-        if (OnlineParserMode.forTarget(target).enhanced) {
-            val content = com.reamicro.fix.online.EnhancedOnlineParser.content(target, chapter, index)
-                .let(com.reamicro.fix.online.epub.OnlineChapterImageMarkup::preserveUpstream)
-            OnlineChapterContentValidator.downloadedFailureReason(content)?.let { reason ->
-                error("章节正文无效：$reason")
-            }
-            return@withChapterDownload OnlineDownloadedChapter(
-                title = chapter.title.ifBlank { "第 ${index + 1} 章" },
-                content = content, volumeTitle = chapter.volumeTitle, level = chapter.level,
-                sourceUrl = chapter.url, transport = "legado",
-            ).also { completed -> cacheOnlineChapterImages(target, completed) }
-        }
         val batchBody = batchSession?.bodyFor(index, chapter)
         val transport: String
         val body = if (batchBody != null) {
@@ -1620,9 +1586,7 @@ internal fun WebDavDriveHook.extractOnlineChapterContent(source: OnlineSourceEnt
 internal fun WebDavDriveHook.downloadOnlineBytes(source: OnlineSourceEntry, requestUrl: String): OnlineBinaryPayload {
     return com.reamicro.fix.online.OnlineSourceTask(source).use { operation ->
         operation.run {
-            if (com.reamicro.fix.online.OnlineParserMode.isEnhanced) {
-                com.reamicro.fix.online.EnhancedOnlineParser.bytes(source, requestUrl)
-            } else downloadOnlineBytesCurrent(source, requestUrl)
+            downloadOnlineBytesCurrent(source, requestUrl)
         }
     }
 }
@@ -1630,12 +1594,7 @@ internal fun WebDavDriveHook.downloadOnlineBytes(source: OnlineSourceEntry, requ
 internal fun WebDavDriveHook.downloadOnlineImageBytes(
     target: OnlineDownloadTarget, url: String, isCover: Boolean = false,
 ): OnlineBinaryPayload =
-    if (OnlineParserMode.forTarget(target).enhanced)
-        com.reamicro.fix.online.EnhancedOnlineParser.bytes(
-            target.source, url, isCover,
-            state = OnlineParserMode.forTarget(target), session = target.parserBook,
-        )
-    else downloadOnlineBytes(target.source,
+    downloadOnlineBytes(target.source,
         if (isCover) normalizeOnlineCoverUrl(target.source, sourceBaseUrl(target.source), url) else url)
 
 private fun WebDavDriveHook.downloadOnlineBytesCurrent(source: OnlineSourceEntry, requestUrl: String): OnlineBinaryPayload {
@@ -1779,11 +1738,9 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
     val execution = storageExecutionGeneration.get()
     val context = currentContext() ?: error("按需下载缺少 Context")
     val identity = request.storageIdentity
-    val parserGeneration = com.reamicro.fix.online.OnlineParserMode.generation
     var operationSource: OnlineSourceEntry? = null
     fun checkCurrent() {
         TaskCancellation.checkCurrent()
-        com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserGeneration)
         operationSource?.let(OnlineSourceStore::requireCurrent)
         check(!storageClosed && settingsProvider().moduleEnabled && execution == storageExecutionGeneration.get() &&
             !Thread.currentThread().isInterrupted && AccountHostRuntime.isCurrentStorage(identity)) {
@@ -1833,11 +1790,6 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
         ),
     )
     val result = runCatching {
-        if (OnlineParserMode.forTarget(target).enhanced) {
-            return@runCatching downloadOnlineChapter(
-                target, request.metadata.detailUrl, "", chapter, request.chapterIndex,
-            )
-        }
         val detail = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
             checkCurrent()
             requestOnlineSearch(source, request.metadata.detailUrl)
