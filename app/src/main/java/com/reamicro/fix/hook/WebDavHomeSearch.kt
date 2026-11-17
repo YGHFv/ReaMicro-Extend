@@ -30,11 +30,13 @@ internal class WebDavHomeSearch(private val drive: WebDavDriveHook) {
     private var localUpdate: Runnable? = null
     @Volatile private var closed = false
 
-    fun request(viewModel: Any, query: String) {
+    fun request(viewModel: Any, query: String, origin: String = "input") {
         val execution = drive.storageExecutionGeneration.get()
         if (closed || drive.storageClosed || !drive.settingsProvider().moduleEnabled) return
         val request = Request(drive.webDavHomeSearchSeq.incrementAndGet(), query.trim(), WeakReference(viewModel),
             AccountHostRuntime.storageSnapshot(drive.activityProvider()), execution)
+        HookRuntime.logAlways("ReaMicro home search request sequence=${request.sequence} origin=$origin " +
+            "previous=${current?.sequence} chars=${request.query.length}")
         onMain {
             if (request.sequence != drive.webDavHomeSearchSeq.get() || drive.storageClosed || closed) return@onMain
             cancelWorkers()
@@ -124,7 +126,7 @@ internal class WebDavHomeSearch(private val drive: WebDavDriveHook) {
             val saved = current ?: return@onMain
             if (saved.execution != drive.storageExecutionGeneration.get()) return@onMain
             val target = saved.viewModel.get() ?: return@onMain
-            if (saved.query.isNotEmpty()) request(target, saved.query)
+            if (saved.query.isNotEmpty()) request(target, saved.query, origin = "resume")
         }
     }
 

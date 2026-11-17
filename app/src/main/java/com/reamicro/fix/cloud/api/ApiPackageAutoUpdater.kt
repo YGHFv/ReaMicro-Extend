@@ -22,7 +22,7 @@ object ApiPackageAutoUpdater {
         val interval = if (prefs.getBoolean(retryKey, false)) RETRY_INTERVAL_MS else CHECK_INTERVAL_MS
         if (now - prefs.getLong(lastCheckKey, 0L) in 0 until interval) return
         if (!running.compareAndSet(false, true)) return
-        val task = com.reamicro.fix.reload.ModuleResources.thread {
+        val task = com.reamicro.fix.reload.ModuleResources.maintenanceThread({
             var succeeded = false
             try {
                 val client = ApiServerClient(store, config)
@@ -80,7 +80,7 @@ object ApiPackageAutoUpdater {
                     running.set(false)
                 }
             }
-        }
+        }, "ReaMicro-PackageAutoUpdate", onFinished = { running.set(false) })
         try {
             task.start()
         } catch (error: java.util.concurrent.RejectedExecutionException) {

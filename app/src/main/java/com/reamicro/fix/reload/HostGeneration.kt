@@ -59,7 +59,8 @@ internal object HostGeneration : Application.ActivityLifecycleCallbacks {
         var retirement: ResourceRetirement? = null
         var refusal: String? = null
         try {
-            val idleDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2_000L)
+            ModuleResources.pauseMaintenance()
+            val idleDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(10_000L)
             var waitingLogged = false
             do {
                 onMain {
@@ -103,6 +104,8 @@ internal object HostGeneration : Application.ActivityLifecycleCallbacks {
                 application = null
                 classLoader = null
             }
+            // 主线程清理不能争抢框架回调已经持有的模块锁。
+            requireNotNull(retirement).attempt { ModuleResources.finishHookRelease() }
             requireNotNull(retirement).awaitCompletion()
             HookRuntime.logAlways("ReaMicro API102 old generation retired pid=${android.os.Process.myPid()}")
             return true
@@ -119,6 +122,11 @@ internal object HostGeneration : Application.ActivityLifecycleCallbacks {
                 throw IllegalStateException("Old composition recovery failed", restoreError)
             }
             return false
+        } finally {
+            // 安全拒绝后旧代际继续使用，允许维护任务在后续前台事件中重新执行。
+            if (ModuleResources.gate.state == ReloadGate.State.ACTIVE) {
+                try { ModuleResources.finishHookRelease() } finally { ModuleResources.resumeMaintenance() }
+            }
         }
     }
 

@@ -57,6 +57,8 @@ object LegadoPlatform {
         val threadCount: Int get() = 4
         /** Capture the caller's source/revision guard for OkHttp dispatcher callbacks. */
         fun captureSession(): ((() -> Any?) -> Any?)? = null
+        /** 仅上报请求阶段名称，调用方自行关联搜索，不传递 URL、请求头或正文。 */
+        fun captureNetworkTrace(): ((String) -> Unit)? = null
         fun getCookie(url: String): String? =
             context.getSharedPreferences("legado_parser_cookies", Context.MODE_PRIVATE)
                 .getString(url, null)

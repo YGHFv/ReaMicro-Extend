@@ -20,6 +20,7 @@ import java.net.URL
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import com.reamicro.fix.reload.ModuleResources
+import com.reamicro.fix.reload.TaskCancellation
 
 class ProfileBackgroundHook(
     private val classLoader: ClassLoader,
@@ -190,10 +191,10 @@ class ProfileBackgroundHook(
         if (!force && autoRandomRefreshAttempted) return
         if (!randomRefreshRunning.compareAndSet(false, true)) return
         if (!force) autoRandomRefreshAttempted = true
+        var queued = false
         try {
-            ModuleResources.thread({
+            ModuleResources.maintenanceThread({
                 var target: File? = null
-                var queued = false
                 try {
                     val downloaded = downloadRandomProfileBackground(activity, url)
                     target = downloaded
@@ -202,14 +203,18 @@ class ProfileBackgroundHook(
                     queued = true
                 } catch (error: Throwable) {
                     if (error is InterruptedException) Thread.currentThread().interrupt()
-                    HookRuntime.logError("$LOG_PREFIX random image refresh failed", error)
+                    if (error !is java.util.concurrent.CancellationException && !Thread.currentThread().isInterrupted) {
+                        HookRuntime.logError("$LOG_PREFIX random image refresh failed", error)
+                    }
                 } finally {
                     if (!queued) {
                         target?.delete()
                         randomRefreshRunning.set(false)
                     }
                 }
-            }, "ReaMicro-ProfileRandomImage").start()
+            }, "ReaMicro-ProfileRandomImage", onFinished = {
+                if (!queued) randomRefreshRunning.set(false)
+            }).start()
         } catch (error: Throwable) {
             randomRefreshRunning.set(false)
             if (!force) autoRandomRefreshAttempted = false
@@ -223,6 +228,7 @@ class ProfileBackgroundHook(
         target: File,
         updated: Pair<Bitmap, String>?,
     ) {
+        TaskCancellation.checkCurrent()
         val lease = requireNotNull(ModuleResources.lease()) { "模块正在重载" }
         val submitted = try {
             ModuleResources.handler(android.os.Looper.getMainLooper()).post {
@@ -282,6 +288,7 @@ class ProfileBackgroundHook(
     }
 
     private fun downloadRandomProfileBackground(activity: Activity, url: String): File {
+        TaskCancellation.checkCurrent()
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = RANDOM_IMAGE_CONNECT_TIMEOUT_MS
             readTimeout = RANDOM_IMAGE_READ_TIMEOUT_MS
@@ -292,10 +299,13 @@ class ProfileBackgroundHook(
             setRequestProperty("Pragma", "no-cache")
             setRequestProperty("Accept", "image/*,*/*;q=0.8")
         }
+        val cancellation = TaskCancellation.current()?.register(connection::disconnect)
         try {
             val code = connection.responseCode
+            TaskCancellation.checkCurrent()
             if (code !in 200..299) error("HTTP $code")
             val bytes = connection.inputStream.use { readLimited(it, MAX_RANDOM_IMAGE_BYTES) }
+            TaskCancellation.checkCurrent()
             validateImageBytes(bytes)
             val targetDir = File(activity.filesDir, "profile_background")
             check(targetDir.isDirectory || targetDir.mkdirs()) { "无法创建背景目录" }
@@ -303,12 +313,14 @@ class ProfileBackgroundHook(
             val target = File.createTempFile(RANDOM_IMAGE_FILE_PREFIX, ".$extension", targetDir)
             return try {
                 target.writeBytes(bytes)
+                TaskCancellation.checkCurrent()
                 target
             } catch (error: Throwable) {
                 target.delete()
                 throw error
             }
         } finally {
+            cancellation?.close()
             connection.disconnect()
         }
     }

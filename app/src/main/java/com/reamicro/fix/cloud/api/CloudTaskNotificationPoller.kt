@@ -31,9 +31,9 @@ object CloudTaskNotificationPoller {
         lastPollAt = now
         lastRequestIdentity = identity
         try {
-            com.reamicro.fix.reload.ModuleResources.thread {
+            com.reamicro.fix.reload.ModuleResources.maintenanceThread({
                 perform(appContext, store, source, settings)
-            }.start()
+            }, "ReaMicro-NotificationPoll", onFinished = { running.set(false) }).start()
         } catch (error: Throwable) {
             running.set(false)
             lastPollAt = 0L
@@ -68,6 +68,7 @@ object CloudTaskNotificationPoller {
             val items = data.optJSONArray("notifications") ?: org.json.JSONArray()
             val acknowledged = mutableListOf<String>()
             for (index in 0 until items.length()) {
+                com.reamicro.fix.reload.TaskCancellation.checkCurrent()
                 if (store.get().requestIdentity() != settings.requestIdentity()) break
                 val item = items.optJSONObject(index) ?: continue
                 val id = item.optString("id")
@@ -81,7 +82,8 @@ object CloudTaskNotificationPoller {
 
             if (acknowledged.isNotEmpty()) client.acknowledgeNotifications(acknowledged)
         } catch (error: Throwable) {
-
+            if (error is java.util.concurrent.CancellationException || error is InterruptedException ||
+                Thread.currentThread().isInterrupted) return
             if (isTransientNetworkFailure(error)) {
                 logNetworkFailureThrottled(error)
             } else {
@@ -118,15 +120,18 @@ object CloudTaskNotificationPoller {
     private fun confirmModuleDelivery(context: Context, intent: Intent, id: String): Boolean {
         val latch = CountDownLatch(1)
         val confirmed = AtomicBoolean(false)
+        // 取消等待不能释放 Android 尚未送达的广播回调。
+        val lease = com.reamicro.fix.reload.ModuleResources.lease("notification-delivery") ?: return false
         val resultReceiver = object : BroadcastReceiver() {
             override fun onReceive(receiverContext: Context?, resultIntent: Intent?) {
-
-                confirmed.set(resultCode == Activity.RESULT_OK)
-                latch.countDown()
+                try {
+                    confirmed.set(resultCode == Activity.RESULT_OK)
+                    latch.countDown()
+                } finally { lease.close() }
             }
         }
         return runCatching {
-            context.sendOrderedBroadcast(
+            try { context.sendOrderedBroadcast(
                 Intent(intent).setClassName(
                     CloudTaskNotifications.MODULE_PACKAGE_NAME,
                     CloudTaskNotifications.RECEIVER_CLASS,
@@ -137,10 +142,14 @@ object CloudTaskNotificationPoller {
                 Activity.RESULT_CANCELED,
                 null,
                 null,
-            )
+            ) } catch (error: Throwable) {
+                lease.close()
+                throw error
+            }
 
             latch.await(MODULE_CONFIRM_TIMEOUT_MS, TimeUnit.MILLISECONDS) && confirmed.get()
         }.getOrElse {
+            com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
             HookRuntime.log("ReaMicro API task notification broadcast failed id=$id: ${it.message}")
             false
         }

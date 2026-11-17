@@ -53,6 +53,8 @@ internal object EnhancedOnlineParser {
         override fun clearCookies() = OnlineSourceAuth.clearParserCookies(context)
         override fun captureSession(): ((() -> Any?) -> Any?)? =
             repository.current.get()?.let { op -> { action -> repository.withOperation(op, action) } }
+        override fun captureNetworkTrace(): ((String) -> Unit)? =
+            com.reamicro.fix.online.search.OnlineSearchTrace.current()?.let { trace -> trace::stage }
         override suspend fun browser(request: LegadoPlatform.BrowserRequest): LegadoPlatform.BrowserResult {
             val op = repository.current.get()
             return HostSourceBrowserBridge.browse(request.copy(
@@ -170,7 +172,9 @@ internal object EnhancedOnlineParser {
         }
         try {
             op.check()
-            return runBlocking(job + repository.current.asContextElement(op)) {
+            return runBlocking(job + repository.current.asContextElement(op) +
+                com.reamicro.fix.online.search.OnlineSearchTrace.local.asContextElement(
+                    com.reamicro.fix.online.search.OnlineSearchTrace.current())) {
                 currentCoroutineContext().ensureActive()
                 val result = block(op)
                 currentCoroutineContext().ensureActive()
@@ -306,7 +310,8 @@ internal object EnhancedOnlineParser {
     ): OnlineBinaryPayload =
         run(source, state, session) { op ->
             val ruleBook = session?.book ?: book
-            val request = AnalyzeUrl(url, baseUrl = source.sourceUrl, source = op.upstream,
+            val imageUrl = if (isCover) com.reamicro.fix.online.search.directOnlineCoverUrl(url) else url
+            val request = AnalyzeUrl(imageUrl, baseUrl = source.sourceUrl, source = op.upstream,
                 ruleData = ruleBook, coroutineContext = currentCoroutineContext())
             val bytes = if (url.startsWith("data:", true)) {
                 check(url.length <= 24 * 1024 * 1024) { "图片超过 16 MiB" }
@@ -328,7 +333,7 @@ internal object EnhancedOnlineParser {
             }
             val variable = ruleBook?.variable
             val decoded = com.script.rhino.runScriptWithContext(currentCoroutineContext()) {
-                ImageUtils.decode(url, bytes, isCover, op.upstream, ruleBook)
+                ImageUtils.decode(imageUrl, bytes, isCover, op.upstream, ruleBook)
             } ?: error("书源图片解码失败")
             if (session != null && variable != ruleBook?.variable) session.dirty = true
             OnlineBinaryPayload(decoded, java.net.URLConnection.guessContentTypeFromStream(

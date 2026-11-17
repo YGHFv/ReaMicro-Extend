@@ -76,7 +76,8 @@ internal object ModuleImportPrecheck {
 
     fun prepareDirectory(
         directory: java.io.File, sourceUri: String, uuid: String, title: String, continuingUuid: String?,
-    ): ModuleDirectoryImportPlan = hook?.prepareModuleDirectoryImport(directory, sourceUri, uuid, title, continuingUuid)
+        repository: Any,
+    ): ModuleDirectoryImportPlan = hook?.prepareModuleDirectoryImport(directory, sourceUri, uuid, title, continuingUuid, repository)
         ?: ModuleDirectoryImportPlan(true, uuid, title)
 
     fun discard(plan: ModuleDirectoryImportPlan) {

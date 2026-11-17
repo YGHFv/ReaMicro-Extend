@@ -59,6 +59,8 @@ object WebBook {
             throw NoStackTraceException("搜索url不能为空")
         }
         val ruleData = RuleData()
+        val trace = io.legado.app.platform.LegadoPlatform.adapter.captureNetworkTrace()
+        trace?.invoke("rule-url")
         val analyzeUrl = AnalyzeUrl(
             mUrl = searchUrl,
             key = key,
@@ -69,6 +71,7 @@ object WebBook {
             coroutineContext = coroutineContext
         )
         var res = analyzeUrl.getStrResponseAwait()
+        trace?.invoke("login-check")
         //检测书源是否已登录
         bookSource.loginCheckJs?.let { checkJs ->
             if (checkJs.isNotBlank()) {
@@ -76,6 +79,7 @@ object WebBook {
             }
         }
         checkRedirect(bookSource, res)
+        trace?.invoke("parse-results")
         return BookList.analyzeBookList(
             bookSource = bookSource,
             ruleData = ruleData,

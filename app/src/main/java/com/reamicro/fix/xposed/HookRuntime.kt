@@ -97,13 +97,16 @@ object HookRuntime {
             method.isAccessible = true
             val framework = frameworkRef.get()
                 ?: throw IllegalStateException("LibXposed framework is not attached")
-            framework.hook(method)
+            val handle = framework.hook(method)
                 .setPriority(callback.priority)
                 // Callback errors are caught inside HookInvocation. Deliberate cancellation and
                 // failed-write outcomes must still reach the host caller.
                 .setExceptionMode(XposedInterface.ExceptionMode.PASSTHROUGH)
                 .intercept(interceptor(callback, generationBound = true,
                     featureBound = managementRegistration.get() != true, featureGate = featureRegistration.get()))
+            object : XposedInterface.HookHandle by handle {
+                override fun unhook() = ModuleResources.releaseHook { handle.unhook() }
+            }
         }
 
     /** 崩溃上报保护在代际切换和功能开关关闭期间始终生效。 */

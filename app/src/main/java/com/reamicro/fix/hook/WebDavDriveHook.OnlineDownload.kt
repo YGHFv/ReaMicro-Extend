@@ -65,6 +65,7 @@ import com.reamicro.fix.online.epub.safeOnlineFileName
 import com.reamicro.fix.online.epub.defaultOnlineChapterHrefs
 import com.reamicro.fix.online.search.parseOnlineJsonRoot
 import com.reamicro.fix.online.search.resolveOnlineUrl
+import com.reamicro.fix.online.search.sourceBaseUrl
 import com.reamicro.fix.online.search.onlineJsonRuleValues
 import com.reamicro.fix.online.search.onlineJsonString
 import com.reamicro.fix.online.epub.onlineVolumeSegments
@@ -1634,7 +1635,8 @@ internal fun WebDavDriveHook.downloadOnlineImageBytes(
             target.source, url, isCover,
             state = OnlineParserMode.forTarget(target), session = target.parserBook,
         )
-    else downloadOnlineBytes(target.source, url)
+    else downloadOnlineBytes(target.source,
+        if (isCover) normalizeOnlineCoverUrl(target.source, sourceBaseUrl(target.source), url) else url)
 
 private fun WebDavDriveHook.downloadOnlineBytesCurrent(source: OnlineSourceEntry, requestUrl: String): OnlineBinaryPayload {
     TaskCancellation.checkCurrent()
@@ -1967,7 +1969,7 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(
         val unzipDirFile = unzipOnlineCompletionEpub(file) { throwIfOnlineCompletionDownloadCancelled(task) }
         throwIfOnlineCompletionDownloadCancelled(task)
         val plan = ModuleImportPrecheck.prepareDirectory(unzipDirFile, sourceUrl, importUuid, importTitle,
-            task.importedBookDir?.name)
+            task.importedBookDir?.name, bookshelf)
         if (!plan.allowed) throw OnlineCompletionDownloadCancelledException("已取消导入")
         importPlan = plan
         importUuid = plan.uuid
@@ -2330,10 +2332,11 @@ internal fun WebDavDriveHook.shouldStartOnlineCompletionNotificationActivity(
     done: Boolean,
     broadcastSent: Boolean,
 ): Boolean {
-    if (done) return !broadcastSent
+    // 广播已提交时由接收器和通知服务处理，透明 Activity 会打断宿主搜索页面的生命周期。
+    if (broadcastSent) return false
+    if (done) return true
     val now = System.currentTimeMillis()
     val last = onlineCompletionModuleActivityPromptAt[id] ?: 0L
-    if (last > 0L && broadcastSent) return false
     if (last > 0L && now - last < ONLINE_COMPLETION_MODULE_ACTIVITY_RETRY_MS) return false
     onlineCompletionModuleActivityPromptAt[id] = now
     return true

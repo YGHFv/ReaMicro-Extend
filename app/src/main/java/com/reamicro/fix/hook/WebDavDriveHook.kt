@@ -146,6 +146,7 @@ class WebDavDriveHook(
     @Volatile internal var storageClosed = false
     internal val onlineCompletionSearchTargets = ConcurrentHashMap<String, OnlineDownloadTarget>()
     internal val onlineCompletionSearchRowViews = ConcurrentHashMap<String, WeakReference<View>>()
+    internal val onlineCompletionSearchBooks = OnlineSearchBookCache<Any>()
     internal val onlineCompletionRunningDownloads = ConcurrentHashMap<String, OnlineCompletionDownloadTask>()
     internal val onlineCompletionRunningDownloadsByNotificationId = ConcurrentHashMap<Int, OnlineCompletionDownloadTask>()
     internal val onlineCompletionRunningUpdates = ConcurrentHashMap<String, TaskCancellation>()

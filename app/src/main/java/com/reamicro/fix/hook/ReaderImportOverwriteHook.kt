@@ -882,12 +882,12 @@ class ReaderImportOverwriteHook(
 
     internal fun prepareModuleDirectoryImport(
         directory: File, sourceUri: String, fallbackUuid: String, fallbackTitle: String, continuingUuid: String?,
+        repository: Any,
     ): ModuleDirectoryImportPlan = withRequestEpoch {
         if (!settingsProvider().canRunReaderOverwriteCheck) return@withRequestEpoch ModuleDirectoryImportPlan(true, fallbackUuid, fallbackTitle)
         val identity = storageIdentity()
-        val repository = requireNotNull(repositoryRef?.get() ?: ReaMicroBookMetadataSync.currentBookshelfRepository()) {
-            "阅微导入服务暂不可用，请稍后重试"
-        }
+        // 复用下载流程取得的宿主服务；热重载后的构造器缓存可能尚未恢复。
+        require(host.type("repository").isInstance(repository)) { "阅微导入服务类型不匹配" }
         val root = requireNotNull(okioPathOf(directory))
         val opf = requireNotNull(obtainOpf(root)) { "导入内容不可用" }
         val uuid = resolveImportUuid(opf) ?: fallbackUuid

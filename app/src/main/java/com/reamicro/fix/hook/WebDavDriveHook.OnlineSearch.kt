@@ -44,7 +44,9 @@ import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 import com.reamicro.fix.hook.webdav.*
-import com.reamicro.fix.online.search.onlineCompletionSearchMetaLine
+import com.reamicro.fix.online.search.onlineSearchTagLine
+import com.reamicro.fix.online.search.OnlineSearchTrace
+import com.reamicro.fix.online.search.onlineSearchRequestBudgetMs
 import com.reamicro.fix.online.search.sourceBaseUrl
 import com.reamicro.fix.online.search.parseOnlineJsonRoot
 import com.reamicro.fix.online.search.onlineJsonRuleValues
@@ -70,7 +72,8 @@ import com.reamicro.fix.reload.TaskCancellation
 
 private data class OnlineSearchRowBinding(val path: String, val query: Long)
 private data class OnlineSearchCoverBinding(val key: String, val query: Long, val generation: Long)
-private const val ONLINE_SEARCH_COVER_MAX_BYTES = 2 * 1024 * 1024
+// 与在线图片请求的响应上限一致；显示时仍按 512 像素采样，不缓存原始大图。
+private const val ONLINE_SEARCH_COVER_MAX_BYTES = 16 * 1024 * 1024
 private const val ONLINE_SEARCH_COVER_MAX_EDGE = 512
 
 internal fun WebDavDriveHook.renderOnlineCompletionCloudBookSearchRow(book: Any, target: OnlineDownloadTarget, composer: Any) {
@@ -135,7 +138,7 @@ internal fun WebDavDriveHook.createOnlineCompletionSearchRowView(
     }
     texts.addView(titleView)
     val authorView = TextView(context).apply {
-        text = onlineCompletionSearchSupportingLine(target.result)
+        text = target.result.author.ifBlank { "佚名" }
         setTextColor(textColors[1])
         EmbeddedHostUi.text(this, "BodyMedium")
         maxLines = 1
@@ -144,13 +147,23 @@ internal fun WebDavDriveHook.createOnlineCompletionSearchRowView(
         setPadding(0, hostDp(4f), 0, 0)
     }
     texts.addView(authorView)
+    val tagsView = TextView(context).apply {
+        text = onlineSearchTagLine(target.result)
+        setTextColor(textColors[2])
+        EmbeddedHostUi.text(this, "BodySmall")
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        includeFontPadding = false
+        setPadding(0, hostDp(4f), 0, 0)
+    }
+    texts.addView(tagsView)
     row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     applyOnlineCompletionSearchTypeface(texts)
     bindOnlineCompletionSearchRow(row, book)
     onlineCompletionSearchTargets[cloudPathOf(book)]
         ?.takeIf { it != target }
         ?.let { latestTarget -> applyOnlineCompletionSearchRow(row, latestTarget, colors = null) }
-    row.contentDescription = "${target.result.name}，${onlineCompletionSearchSupportingLine(target.result)}"
+    row.contentDescription = onlineCompletionSearchDescription(target.result)
     return row
 }
 
@@ -179,15 +192,19 @@ internal fun WebDavDriveHook.applyOnlineCompletionSearchRow(row: View, target: O
         colors?.getOrNull(0)?.let { setTextColor(it) }
     }
     (textContainer.getChildAt(1) as? TextView)?.apply {
-        text = onlineCompletionSearchSupportingLine(target.result)
+        text = target.result.author.ifBlank { "佚名" }
         colors?.getOrNull(1)?.let { setTextColor(it) }
     }
-    row.contentDescription = "${target.result.name}，${onlineCompletionSearchSupportingLine(target.result)}"
+    (textContainer.getChildAt(2) as? TextView)?.apply {
+        text = onlineSearchTagLine(target.result)
+        colors?.getOrNull(2)?.let { setTextColor(it) }
+    }
+    row.contentDescription = onlineCompletionSearchDescription(target.result)
     applyOnlineCompletionSearchTypeface(textContainer)
 }
 
-private fun onlineCompletionSearchSupportingLine(result: OnlineBookSearchResult): String =
-    result.author.ifBlank { "佚名" } + " · " + onlineCompletionSearchMetaLine(result)
+private fun onlineCompletionSearchDescription(result: OnlineBookSearchResult): String =
+    "${result.name}，${result.author.ifBlank { "佚名" }}，${onlineSearchTagLine(result)}"
 
 internal fun WebDavDriveHook.applyOnlineCompletionSearchTypeface(textContainer: ViewGroup) {
     val roles = listOf("TitleSmall", "BodyMedium", "BodySmall")
@@ -231,11 +248,11 @@ internal fun WebDavDriveHook.loadOnlineCompletionSearchCover(imageView: ImageVie
     if (storagePaused || storageClosed || !homeSearch.isCurrent(binding.query) || !onlineSearchTasks.isCurrent(generation)) return
     if (imageView.tag == binding) return
     imageView.tag = binding
-    frame?.state("加载中") ?: imageView.setImageDrawable(null)
     onlineSearchTasks.cachedCover(binding.key)?.let {
         frame?.loaded(it) ?: imageView.setImageBitmap(it)
         return
     }
+    frame?.state("加载中") ?: imageView.setImageDrawable(null)
     val target = WeakReference(imageView)
     val accepted = onlineSearchTasks.cover(generation) {
         runCatching {
@@ -358,6 +375,14 @@ internal fun WebDavDriveHook.searchOnlineCompletionSourcesProgressively(
     val signal = TaskCancellation.current()?.child() ?: TaskCancellation()
     val generation = onlineSearchTasks.generation
     val latch = CountDownLatch(sources.size)
+    val enhanced = com.reamicro.fix.online.OnlineParserMode.capture().enhanced
+    val budgets = sources.map {
+        onlineSearchRequestBudgetMs(enhanced, it.respondTime,
+            com.reamicro.fix.online.OnlineSourceDownloadPolicyStore.effectiveConcurrentRate(it))
+    }
+    val queueBudget = budgets.max() * ((sources.size - 1) / 3) + 30_000L
+    val traces = budgets.map { OnlineSearchTrace(OnlineSearchTrace.nextId(), it, queueBudget) }
+    val sourceSignals = sources.map { signal.child() }
     val groups = WebDavSearchResults(
         sources.map { OnlineSearchGroup(it, needle, emptyList(), "搜索中") },
         isCurrent = { !signal.isCancelled && onlineSearchTasks.isCurrent(generation) },
@@ -366,17 +391,50 @@ internal fun WebDavDriveHook.searchOnlineCompletionSourcesProgressively(
     try {
         sources.forEachIndexed { index, source ->
             signal.check()
-            val accepted = onlineSearchTasks.source(signal, generation, latch::countDown) {
-                val finalGroup = searchOnlineCompletionSource(source, needle) { parsedGroup ->
-                    groups.publish(index, parsedGroup)
+            val trace = traces[index]
+            val accepted = onlineSearchTasks.source(sourceSignals[index], generation, latch::countDown) {
+                if (!trace.start()) return@source
+                trace.run {
+                    try {
+                        val finalGroup = searchOnlineCompletionSource(source, needle) { parsedGroup ->
+                            trace.parsed { groups.publish(index, parsedGroup) }
+                        }
+                        if (trace.finish()) {
+                            groups.publish(index, finalGroup)
+                            HookRuntime.logAlways("ReaMicro online search source finished sourceId=${source.id} " +
+                                "results=${finalGroup.results.size} failed=${finalGroup.error.isNotBlank()} ${trace.diagnostic()}")
+                        }
+                    } finally {
+                        if (trace.finish()) {
+                            HookRuntime.logAlways("ReaMicro online search source cancelled sourceId=${source.id} ${trace.diagnostic()}")
+                        }
+                    }
                 }
-                groups.publish(index, finalGroup)
             }
             if (!accepted) {
+                trace.finish()
                 groups.publish(index, OnlineSearchGroup(source, needle, emptyList(), "搜索队列繁忙"))
+                HookRuntime.logAlways("ReaMicro online search source rejected sourceId=${source.id} ${trace.diagnostic()}")
             }
         }
-        latch.await(ONLINE_COMPLETION_SEARCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        while (latch.count > 0) {
+            signal.check()
+            traces.forEachIndexed { index, trace ->
+                if (trace.takeSlowSnapshot()) {
+                    HookRuntime.logAlways("ReaMicro online search source slow sourceId=${sources[index].id} ${trace.diagnostic(includeStack = true)}")
+                }
+                if (trace.remainingMs() <= 0L && trace.finish()) {
+                    val error = if (trace.hasStarted()) "搜索超时" else "搜索队列等待超时"
+                    if (!trace.hasParsed()) {
+                        groups.publish(index, OnlineSearchGroup(sources[index], needle, emptyList(), error))
+                    }
+                    HookRuntime.logAlways("ReaMicro online search source deadline sourceId=${sources[index].id} ${trace.diagnostic(includeStack = true)}")
+                    sourceSignals[index].cancel()
+                }
+            }
+            val wait = traces.minOf { it.remainingMs() }.coerceIn(1L, 250L)
+            latch.await(wait, TimeUnit.MILLISECONDS)
+        }
         signal.check()
         return groups.finish(
             transform = { if (it.error == "搜索中") it.copy(error = "搜索超时") else it },
@@ -414,8 +472,10 @@ internal fun WebDavDriveHook.searchOnlineCompletionSource(
         return OnlineSearchGroup(source, query, emptyList(), "源缺少 searchUrl")
     }
     return runCatching {
+        val trace = OnlineSearchTrace.current()
         val parserMode = com.reamicro.fix.online.OnlineParserMode.capture()
         if (parserMode.enhanced) {
+            trace?.stage("enhanced-setup")
             val results = com.reamicro.fix.online.EnhancedOnlineParser.search(source, query)
                 .distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
                 .take(ONLINE_COMPLETION_RESULT_LIMIT)
@@ -424,11 +484,15 @@ internal fun WebDavDriveHook.searchOnlineCompletionSource(
             onParsedResults?.invoke(group)
             return@runCatching group
         }
+        trace?.stage("rule-url")
         val request = buildOnlineSearchRequest(source, query)
+        trace?.stage("rate-limit")
         val response = OnlineConcurrentRateLimiter.withLimitBlocking(source) {
+            trace?.stage("http-start")
             requestOnlineSearch(source, request)
         }
         TaskCancellation.checkCurrent()
+        trace?.stage("parse-results")
         val parsedResults = parseOnlineSearchResults(source, query, response)
             .distinctBy { "${it.name}|${it.author}|${it.detailUrl}" }
             .withIndex()
@@ -442,12 +506,15 @@ internal fun WebDavDriveHook.searchOnlineCompletionSource(
         if (parsedResults.isNotEmpty()) {
             onParsedResults?.invoke(OnlineSearchGroup(source, query, parsedResults, ""))
         }
+        trace?.stage("metadata-enrichment")
         val results = enrichOnlineSearchResultsMetadata(source, parsedResults)
         com.reamicro.fix.online.OnlineParserMode.requireCurrent(parserMode.generation)
         logWebDav("online completion source ok name=${source.name} results=${results.size} first=${results.firstOrNull()?.name.orEmpty()}")
         OnlineSearchGroup(source, query, results, "")
     }.getOrElse {
         TaskCancellation.rethrowIfCancelled(it)
+        HookRuntime.logAlways("ReaMicro online search source error sourceId=${source.id} " +
+            "type=${it.javaClass.simpleName} ${OnlineSearchTrace.current()?.diagnostic().orEmpty()}")
         logWebDav("online completion source failed name=${source.name} error=${it.message}")
         OnlineSearchGroup(source, query, emptyList(), it.message.orEmpty().ifBlank { "搜索失败" })
     }
@@ -710,7 +777,9 @@ private fun WebDavDriveHook.requestOnlineSearchCurrent(source: OnlineSourceEntry
                     }
                 }
                 TaskCancellation.checkCurrent()
+                OnlineSearchTrace.current()?.stage("http-headers")
                 val code = connection.responseCode
+                OnlineSearchTrace.current()?.stage("http-body")
                 val stream = if (code in 200..299) connection.inputStream else connection.errorStream
                 val body = stream?.bufferedReader(charset)?.use { reader ->
                     com.reamicro.fix.online.download.readOnlineResponseText(reader, checkCurrent = {
@@ -741,6 +810,7 @@ private fun WebDavDriveHook.requestOnlineSearchCurrent(source: OnlineSourceEntry
             }
             TaskCancellation.checkCurrent()
             if ((failure.statusCode == 401 || failure.statusCode == 403) && !authRetried && source.hasLoginConfig) {
+                OnlineSearchTrace.current()?.stage("auth-retry")
                 val login = OnlineSourceAuth.loginWithSavedCredentials(currentApplicationContext() ?: currentContext(), source)
                 TaskCancellation.checkCurrent()
                 logWebDav(
@@ -1054,13 +1124,13 @@ internal fun WebDavDriveHook.applyOnlineTemplate(
 }
 
 internal fun WebDavDriveHook.normalizeOnlineCoverUrl(source: OnlineSourceEntry, baseUrl: String, value: String): String {
-    val raw = value.trim()
+    val raw = com.reamicro.fix.online.search.directOnlineCoverUrl(value.trim())
     if (raw.isBlank()) return ""
 
     if (!raw.startsWith("http", ignoreCase = true) && FANQIE_IMAGE_PATH_REGEX.containsMatchIn(raw)) {
         replaceFanqieCover(raw).takeIf { it.isNotBlank() }?.let { return it }
     }
-    val resolved = resolveOnlineUrl(baseUrl.ifBlank { sourceBaseUrl(source) }, value)
+    val resolved = resolveOnlineUrl(baseUrl.ifBlank { sourceBaseUrl(source) }, raw)
 
     runCatching {
         val uri = URI(resolved)
@@ -1133,6 +1203,7 @@ internal fun WebDavDriveHook.updateHomeOnlineCompletionSearchResults(
 internal fun WebDavDriveHook.handleOnlineCompletionSearchTap(book: Any, query: Long = webDavHomeSearchSeq.get()): Boolean {
     if (!homeSearch.isCurrent(query)) return false
     val path = cloudPathOf(book)
+    HookRuntime.logAlways("ReaMicro online search download click sequence=$query")
     logWebDav("online completion tap path=$path")
     return when {
         path.startsWith(ONLINE_COMPLETION_SOURCE_PREFIX) -> {

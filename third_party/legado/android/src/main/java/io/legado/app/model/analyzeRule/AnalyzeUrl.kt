@@ -441,7 +441,10 @@ class AnalyzeUrl(
         if (skipRateLimit) {
             return executeStrRequest(jsStr, sourceRegex, useWebView, isTest)
         }
+        val trace = io.legado.app.platform.LegadoPlatform.adapter.captureNetworkTrace()
+        trace?.invoke("rate-limit")
         concurrentRateLimiter.withLimit {
+            trace?.invoke("http-start")
             return executeStrRequest(jsStr, sourceRegex, useWebView, isTest)
         }
     }

@@ -62,6 +62,7 @@ internal fun WebDavDriveHook.install() {
         onlineSearchTasks.cancelAll()
         onlineCompletionSearchTargets.clear()
         onlineCompletionSearchRowViews.clear()
+        onlineCompletionSearchBooks.clear()
     }
     val onDemandAttachment = OnlineOnDemandBridge.attach(::downloadOnlineCompletionOnDemandChapter)
     com.reamicro.fix.reload.ModuleResources.cleanup {
@@ -257,6 +258,7 @@ internal fun WebDavDriveHook.onModuleEnabledChanged(enabled: Boolean) {
                 storageUiGeneration.incrementAndGet()
                 onlineCompletionSearchTargets.clear()
                 onlineCompletionSearchRowViews.clear()
+                onlineCompletionSearchBooks.clear()
                 currentContext()?.let { context ->
                     onlineCompletionRunningDownloads.values.forEach { task ->
                         cancelOnlineCompletionNotification(context, task.notificationId, task.key)
@@ -327,6 +329,7 @@ private fun WebDavDriveHook.releaseStorageUiReferences() {
     workTrackerRef = null
     onlineCompletionSearchTargets.clear()
     onlineCompletionSearchRowViews.clear()
+    onlineCompletionSearchBooks.clear()
     cloudStorageScreenRefreshAt.clear()
     onlineCompletionModuleActivityPromptAt.clear()
     listOf(
@@ -799,9 +802,6 @@ internal fun WebDavDriveHook.newOnlineCompletionSourceCloudBook(group: OnlineSea
     val encodedQuery = URLEncoder.encode(group.query, "UTF-8")
     val path = "$ONLINE_COMPLETION_SOURCE_PREFIX${group.source.id}?q=$encodedQuery"
     val best = group.results.firstOrNull()
-    if (best != null) {
-        updateOnlineCompletionSearchTarget(path, OnlineDownloadTarget(group.source, group.query, best), group.sequence)
-    }
     val status = when {
         group.error.isNotBlank() -> group.error
         best == null -> "无结果"
@@ -813,12 +813,17 @@ internal fun WebDavDriveHook.newOnlineCompletionSourceCloudBook(group: OnlineSea
         if (best != null && group.results.size > 1) "${group.results.size} 条结果" else null,
         if (best == null) group.source.sourceUrl.takeIf { it.isNotBlank() } else null,
     ).joinToString(" · ")
-    return newOnlineCompletionCloudBook(
-        path = path,
-        name = status,
-        subtitle = subtitle,
-        result = best,
-    )
+    return onlineCompletionSearchBooks.get(path, group.sequence, group.source.revision, group) {
+        if (best != null) {
+            updateOnlineCompletionSearchTarget(path, OnlineDownloadTarget(group.source, group.query, best), group.sequence)
+        }
+        newOnlineCompletionCloudBook(
+            path = path,
+            name = status,
+            subtitle = subtitle,
+            result = best,
+        )
+    }
 }
 
 internal fun onlineCompletionGroupTitle(group: OnlineSearchGroup): String =
@@ -853,13 +858,15 @@ internal fun WebDavDriveHook.newOnlineCompletionResultCloudBook(
 ): Any {
     val encodedQuery = URLEncoder.encode(query, "UTF-8")
     val path = "$ONLINE_COMPLETION_BOOK_PREFIX${source.id}/$index?q=$encodedQuery"
-    updateOnlineCompletionSearchTarget(path, OnlineDownloadTarget(source, query, result), sequence)
-    return newOnlineCompletionCloudBook(
-        path = path,
-        name = result.name,
-        subtitle = onlineCompletionSearchMetaLine(result),
-        result = result,
-    )
+    return onlineCompletionSearchBooks.get(path, sequence, source.revision, result) {
+        updateOnlineCompletionSearchTarget(path, OnlineDownloadTarget(source, query, result), sequence)
+        newOnlineCompletionCloudBook(
+            path = path,
+            name = result.name,
+            subtitle = onlineCompletionSearchMetaLine(result),
+            result = result,
+        )
+    }
 }
 
 internal fun WebDavDriveHook.newOnlineCompletionCloudBook(
@@ -1164,7 +1171,7 @@ internal fun WebDavDriveHook.rememberCloudStorageRepository(repository: Any?) {
     if (repository == null) return
     cloudStorageRepositoryRef = WeakReference(repository)
     com.reamicro.fix.core.HostWorkBindings.requireCurrent().field("storage.bookshelf").get(repository)?.let {
-        bookshelfRepositoryRef = WeakReference(it)
+        rememberBookshelfRepository(it)
     }
     com.reamicro.fix.core.HostWorkBindings.requireCurrent().field("storage.manager").get(repository)?.let {
         rememberWorkerManager(it)
@@ -1195,6 +1202,8 @@ internal fun WebDavDriveHook.rememberHomeViewModelDependencies(viewModel: Any?) 
 internal fun WebDavDriveHook.rememberBookshelfRepository(repository: Any?) {
     if (repository == null) return
     bookshelfRepositoryRef = WeakReference(repository)
+    // 首页重组会恢复已存在的服务，同时提供给导入和元数据功能。
+    ReaMicroBookMetadataSync.rememberBookshelfRepository(repository)
     repairOnlineCompletionBookMetadataSoon(repository)
 }
 

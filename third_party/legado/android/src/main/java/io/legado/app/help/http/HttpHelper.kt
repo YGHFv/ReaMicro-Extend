@@ -30,6 +30,7 @@ internal class HttpRequestSession(
     private val context: CoroutineContext,
     private val runner: ((() -> Any?) -> Any?)?,
 ) {
+    val trace: ((String) -> Unit)? = LegadoPlatform.adapter.captureNetworkTrace()
     @Suppress("UNCHECKED_CAST")
     fun <T> run(action: () -> T): T {
         context.ensureActive()
@@ -121,6 +122,7 @@ private fun createClient(): OkHttpClient {
     val cache = Cache(File(LegadoPlatform.cacheDir, "http_cache"), 100L * 1024L * 1024L)
 
     val builder = OkHttpClient.Builder()
+        .eventListenerFactory { call -> ParserHttpTrace(call.request().tag(HttpRequestSession::class.java)?.trace) }
         .cache(cache)
         .connectTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
@@ -170,6 +172,28 @@ private fun createClient(): OkHttpClient {
         }
     builder.addInterceptor(DecompressInterceptor)
     return builder.build()
+}
+
+/** 阶段耗时由搜索会话累计；没有搜索会话的下载请求不产生诊断日志。 */
+private class ParserHttpTrace(private val trace: ((String) -> Unit)?) : okhttp3.EventListener() {
+    override fun callStart(call: Call) { trace?.invoke("http-dispatch") }
+    override fun dnsStart(call: Call, domainName: String) { trace?.invoke("dns") }
+    override fun dnsEnd(call: Call, domainName: String, inetAddressList: List<java.net.InetAddress>) {
+        trace?.invoke("connect-pending")
+    }
+    override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
+        trace?.invoke("connect")
+    }
+    override fun secureConnectStart(call: Call) { trace?.invoke("tls") }
+    override fun connectionAcquired(call: Call, connection: okhttp3.Connection) { trace?.invoke("connection-ready") }
+    override fun requestHeadersStart(call: Call) { trace?.invoke("request-headers") }
+    override fun requestBodyStart(call: Call) { trace?.invoke("request-body") }
+    override fun requestHeadersEnd(call: Call, request: okhttp3.Request) { trace?.invoke("response-wait") }
+    override fun requestBodyEnd(call: Call, byteCount: Long) { trace?.invoke("response-wait") }
+    override fun responseHeadersStart(call: Call) { trace?.invoke("response-headers") }
+    override fun responseBodyStart(call: Call) { trace?.invoke("response-body") }
+    override fun responseBodyEnd(call: Call, byteCount: Long) { trace?.invoke("http-complete") }
+    override fun callFailed(call: Call, ioe: java.io.IOException) { trace?.invoke("http-failed-${ioe.javaClass.simpleName}") }
 }
 
 /**

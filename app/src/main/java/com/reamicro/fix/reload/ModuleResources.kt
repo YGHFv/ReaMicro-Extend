@@ -23,6 +23,8 @@ object ModuleResources {
     private val executors = ArrayList<ExecutorService>()
     private val cleanups = ArrayList<() -> Unit>()
     private val blockers = ArrayList<() -> String?>()
+    private val maintenance = ReloadMaintenance()
+    private val hookRelease = ReloadHookRelease()
     private val leaseOwners = java.util.concurrent.ConcurrentHashMap<Any, String>()
     val accepting: Boolean get() = !injected || gate.state == ReloadGate.State.ACTIVE
 
@@ -196,18 +198,44 @@ object ModuleResources {
 
     fun thread(action: Runnable, name: String): Thread = GenerationThread(action, name)
 
+    internal fun maintenanceThread(
+        action: Runnable, name: String, onFinished: () -> Unit,
+    ): Thread = GenerationThread(action, name, restartable = true, onFinished = onFinished)
+
+    internal fun pauseMaintenance() = maintenance.pause()
+    internal fun resumeMaintenance() = maintenance.resume()
+
+    internal fun releaseHook(action: () -> Unit) = hookRelease.release(
+        injected && gate.state != ReloadGate.State.ACTIVE && Looper.myLooper() === Looper.getMainLooper(),
+        action,
+    )
+
+    internal fun finishHookRelease() {
+        check(Looper.myLooper() !== Looper.getMainLooper()) { "Framework hook release requires the reload thread" }
+        hookRelease.drain()
+    }
+
     fun backgroundThread(name: String, isDaemon: Boolean, block: () -> Unit): Thread =
         thread(Runnable(block), name).apply { this.isDaemon = isDaemon; start() }
 
-    private class GenerationThread(private val action: Runnable, name: String) : Thread(name) {
+    private class GenerationThread(
+        private val action: Runnable, name: String,
+        private val restartable: Boolean = false,
+        private val onFinished: () -> Unit = {},
+    ) : Thread(name) {
         private var admission: AutoCloseable? = null
+        private var maintenanceTicket: ReloadMaintenance.Ticket? = null
 
         @Synchronized override fun start() {
             synchronized(gate) {
                 if (state != State.NEW) throw IllegalThreadStateException()
                 admission = lease("thread:$name") ?: throw RejectedExecutionException("Module generation is retiring")
-                threads.add(this)
-                try { super.start() } catch (error: Throwable) {
+                try {
+                    if (restartable) maintenanceTicket = maintenance.register(this)
+                    threads.add(this)
+                    super.start()
+                } catch (error: Throwable) {
+                    maintenanceTicket?.close()
                     admission?.close()
                     admission = null
                     throw error
@@ -215,7 +243,17 @@ object ModuleResources {
             }
         }
         override fun run() {
-            try { action.run() } finally { admission?.close() }
+            try {
+                val ticket = maintenanceTicket
+                if (ticket == null) action.run() else ticket.run(action)
+            } catch (error: java.util.concurrent.CancellationException) {
+                if (!restartable) throw error
+            } finally {
+                try { onFinished() } finally {
+                    maintenanceTicket?.close()
+                    admission?.close()
+                }
+            }
         }
     }
 
