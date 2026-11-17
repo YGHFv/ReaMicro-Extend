@@ -2,8 +2,8 @@ package com.reamicro.fix.hook
 
 import android.content.Context
 import android.content.res.Configuration
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.Typography
+import top.yukonga.miuix.kmp.theme.Colors
+import com.reamicro.fix.ui.ModuleTypography
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -56,9 +56,9 @@ internal object HostEmbeddedStyle {
     fun openedCount(fonts: Fonts) = EmbeddedHostUi.textStyle("LabelSmall", text(11, FontWeight.Bold, 1f, fonts.fileName))
     fun drawerName(fonts: Fonts) = EmbeddedHostUi.textStyle("TitleSmall", text(15, FontWeight.Bold, 1f, fonts.fileName))
 
-    fun typography(fonts: Fonts, override: FontFamily? = null): Typography {
+    fun typography(fonts: Fonts, override: FontFamily? = null): ModuleTypography {
         val family = override ?: fonts.serif
-        val base = Typography()
+        val base = ModuleTypography()
         fun style(role: String, fallback: TextStyle) =
             EmbeddedHostUi.textStyle(role, fallback.copy(fontFamily = family,
                 platformStyle = PlatformTextStyle(includeFontPadding = false)))
@@ -97,7 +97,7 @@ internal object HostEmbeddedStyle {
         val primary = native.role("Primary")
         val primarySoft = native.role("PrimaryContainer")
         val error = native.role("Error")
-        fun controlsScheme(): ColorScheme = native.controlsScheme()
+        fun controlsScheme(): Colors = native.controlsScheme()
     }
     fun palette(context: Context, darkHint: Boolean) =
         Palette(HostThemeColors.snapshot(context, darkHint))

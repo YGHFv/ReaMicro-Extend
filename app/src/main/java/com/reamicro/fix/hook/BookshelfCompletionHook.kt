@@ -221,8 +221,8 @@ internal class BookshelfCompletionHook(
             lastStartedAt = lastStartedAt,
         )
         if (!allowed) {
-            logAutomaticSkip("更新间隔未满半小时",
-                "更新间隔未满半小时 lastStarted=$lastStartedAt lastCompleted=$lastCompletedAt " +
+            logAutomaticSkip("更新间隔未满1小时",
+                "更新间隔未满1小时 lastStarted=$lastStartedAt lastCompleted=$lastCompletedAt " +
                     "remainingMs=${BookshelfCompletionPolicy.AUTO_UPDATE_INTERVAL_MS - (now - maxOf(lastStartedAt, lastCompletedAt))}")
         }
         return allowed

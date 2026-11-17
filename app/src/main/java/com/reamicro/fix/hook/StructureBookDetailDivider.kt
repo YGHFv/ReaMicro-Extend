@@ -2,7 +2,7 @@ package com.reamicro.fix.hook
 
 
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.HorizontalDivider
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp

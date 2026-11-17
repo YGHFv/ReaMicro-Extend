@@ -9,8 +9,7 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -29,6 +28,9 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.core.InjectedModuleContext
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleTextButton
+import com.reamicro.fix.ui.ProvideModuleButtonText
 
 internal class ReaderThoughtSelectionEditor(
     private val activity: Activity, private val initialText: String,
@@ -123,7 +125,7 @@ internal class ReaderThoughtSelectionEditor(
         }
         val focus = remember { FocusRequester() }
         val keyboard = LocalSoftwareKeyboardController.current
-        MaterialTheme(colorScheme = p.controlsScheme(), typography = typography) {
+        ModuleTheme(colorScheme = p.controlsScheme(), typography = typography) {
 
             Box(Modifier.fillMaxWidth()
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
@@ -134,25 +136,25 @@ internal class ReaderThoughtSelectionEditor(
                     scale = scale, placeholder = "编辑选中的文本",
                     footer = {
                         Text(HostThoughtInputStyle.countLabel(text.text), Modifier.fillMaxWidth(),
-                            style = MaterialTheme.typography.bodySmall.copy(fontSize = EmbeddedHostUi.textMetrics.bodySmall.sp),
+                            style = ModuleTheme.typography.bodySmall.copy(fontSize = EmbeddedHostUi.textMetrics.bodySmall.sp),
                             color = p.caption, textAlign = TextAlign.End, maxLines = 1)
                         Spacer(Modifier.height((HostThoughtInputStyle.ACTION_GAP_UDP * scale).dp))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(enabled = !saving, onClick = { dismiss() }) { Text("取消") }
+                            ModuleTextButton(enabled = !saving, onClick = { dismiss() }) { Text("取消") }
                             Spacer(Modifier.weight(1f))
                             Button(enabled = !saving, onClick = { onSave(text.text, handle) },
                                 modifier = Modifier
                                     .widthIn(min = (HostThoughtInputStyle.SAVE_MIN_WIDTH_UDP * scale).dp)
                                     .height((HostThoughtInputStyle.SAVE_HEIGHT_UDP * scale).dp),
-                                shape = CircleShape,
+                                cornerRadius = 100.dp,
 
-                                contentPadding = PaddingValues(HostThoughtInputStyle.SAVE_CONTENT_PADDING_DP.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = p.primary,
-                                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                                    disabledContainerColor = p.primary.copy(alpha = HostThoughtInputStyle.SAVE_DISABLED_CONTAINER_ALPHA),
-                                    disabledContentColor = MaterialTheme.colorScheme.onPrimary.copy(
+                                insideMargin = PaddingValues(HostThoughtInputStyle.SAVE_CONTENT_PADDING_DP.dp),
+                                colors = ButtonDefaults.buttonColors(color = p.primary,
+                                    contentColor = ModuleTheme.colorScheme.onPrimary,
+                                    disabledColor = p.primary.copy(alpha = HostThoughtInputStyle.SAVE_DISABLED_CONTAINER_ALPHA),
+                                    disabledContentColor = ModuleTheme.colorScheme.onPrimary.copy(
                                         alpha = HostThoughtInputStyle.SAVE_DISABLED_CONTENT_ALPHA))) {
-                                Text(if (saving) "正在保存…" else "保存")
+                                ProvideModuleButtonText { Text(if (saving) "正在保存…" else "保存") }
                             }
                         }
                     })

@@ -25,14 +25,12 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -51,6 +49,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
@@ -65,6 +64,18 @@ import com.reamicro.fix.epub.editor.FontPreviewSamples
 import com.reamicro.fix.epub.editor.epubPreviewSampleSize
 import kotlinx.coroutines.CancellationException
 import com.reamicro.fix.reload.ModuleUiRuntime
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleIconButton
+import com.reamicro.fix.ui.ModuleCircularProgressIndicator
+import com.reamicro.fix.ui.ModuleLinearProgressIndicator
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.SnackbarDuration
+import top.yukonga.miuix.kmp.basic.SnackbarHost
+import top.yukonga.miuix.kmp.basic.SnackbarHostState
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -73,7 +84,7 @@ import org.json.JSONObject
 import java.io.File
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class,
+@OptIn(ExperimentalLayoutApi::class,
     androidx.compose.foundation.ExperimentalFoundationApi::class)
 internal class EpubStructureView(
     private val activity: Activity,
@@ -165,7 +176,7 @@ internal class EpubStructureView(
     fun setExternalBusy(value: Boolean) { externalWriteBusy = value }
     suspend fun showFeedback(message: String, warning: Boolean = false) {
         if (message.isBlank()) return
-        snackbar.currentSnackbarData?.dismiss()
+        snackbar.newestSnackbarData()?.dismiss()
         snackbar.showSnackbar(message, withDismissAction = warning,
             duration = if (warning) SnackbarDuration.Long else SnackbarDuration.Short)
     }
@@ -221,7 +232,7 @@ internal class EpubStructureView(
             }.getOrNull() }
         }
         val typography = remember(uiFont, hostFonts, EmbeddedHostUi.typographyStyles) { HostEmbeddedStyle.typography(hostFonts, uiFont) }
-        MaterialTheme(colorScheme = themed, typography = typography) {
+        ModuleTheme(colorScheme = themed, typography = typography) {
             val scope = rememberCoroutineScope()
             var metadata by remember { mutableStateOf(JSONObject()) }
             var displayBookTitle by remember { mutableStateOf(bookTitle) }
@@ -233,7 +244,7 @@ internal class EpubStructureView(
             var previewGeneration by remember { mutableIntStateOf(0) }
             var revealedPath by remember { mutableStateOf<String?>(null) }
             val collapsed = remember { mutableStateMapOf<String, Boolean>() }
-            val drawer = rememberDrawerState(DrawerValue.Closed)
+            val drawer = rememberStructureDrawerState()
             var sheet by remember { mutableStateOf<Entry?>(null) }
             var prompt by remember { mutableStateOf<Prompt?>(null) }
             var promptError by remember { mutableStateOf<String?>(null) }
@@ -283,7 +294,7 @@ internal class EpubStructureView(
             }
             fun editCssValue(entry: Entry, rule: JSONObject, row: JSONObject, hash: String) {
                 if (!row.optBoolean("editable")) {
-                    scope.launch { snackbar.showSnackbar("此属性值过长，不能在弹窗中安全编辑") }
+                    scope.launch { showFeedback("此属性值过长，不能在弹窗中安全编辑") }
                     return
                 }
                 prompt = Prompt(
@@ -297,7 +308,7 @@ internal class EpubStructureView(
             }
             fun editCssSelector(entry: Entry, rule: JSONObject, hash: String) {
                 if (!rule.optBoolean("editableSelector")) {
-                    scope.launch { snackbar.showSnackbar("选择器过长，请使用源码编辑") }
+                    scope.launch { showFeedback("选择器过长，请使用源码编辑") }
                     return
                 }
                 prompt = textPrompt("CSS 选择器", rule.getString("selector"),
@@ -402,7 +413,7 @@ internal class EpubStructureView(
                     catch (e: Exception) {
                         com.reamicro.fix.xposed.HookRuntime.log("ReaMicro structure metadata deferred failure: ${e.message}")
                         metadataLoading = false
-                        snackbar.showSnackbar("文件列表已加载，元数据读取失败：${e.message.orEmpty()}")
+                        showFeedback("文件列表已加载，元数据读取失败：${e.message.orEmpty()}")
                     }
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { failure = e.message ?: "读取失败" }
@@ -498,16 +509,17 @@ internal class EpubStructureView(
                     modifier = Modifier.fillMaxSize(),
                     containerColor = pageColor,
                     contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom),
-                    snackbarHost = { SnackbarHost(snackbar) },
+                    snackbarHost = { SnackbarHost(state = snackbar) },
                     topBar = {
                         StructureToolbar(
                             title = displayBookTitle, subtitle = file?.path,
                             titleStyle = HostEmbeddedStyle.title(hostFonts),
                             subtitleStyle = HostEmbeddedStyle.caption(hostFonts),
                             titleColor = palette.text, subtitleColor = palette.caption,
-                            modifier = Modifier.windowInsetsPadding(TopAppBarDefaults.windowInsets),
+                            modifier = Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)),
                             navigationIcon = {
-                                IconButton(enabled = !busy, onClick = {
+                                ModuleIconButton(enabled = !busy, onClick = {
                                     if (current != null) { fileNavigationAnimated = true; current = null }
                                     else close()
                                 }) {
@@ -515,18 +527,18 @@ internal class EpubStructureView(
                                 }
                             },
                             actions = {
-                                IconButton(enabled = !busy && !loading && prompt == null && !fileSearchVisible,
+                                ModuleIconButton(enabled = !busy && !loading && prompt == null && !fileSearchVisible,
                                     onClick = { fileSearchVisible = true }) {
                                     Icon(painterResource(R.drawable.ic_structure_search),
                                         stringResource(R.string.epub_structure_search_title),
                                         Modifier.size(24.dp), tint = palette.text)
                                 }
-                                if (file != null) IconButton(enabled = !busy, onClick = {
+                                if (file != null) ModuleIconButton(enabled = !busy, onClick = {
                                     prompt = null; fileNavigationAnimated = true; current = null
                                 }) {
                                     Icon(painterResource(R.drawable.ic_structure_home), "返回图书结构", Modifier.size(24.dp), tint = palette.text)
                                 }
-                                if (opened.isNotEmpty()) IconButton(enabled = !busy && prompt == null, onClick = { scope.launch { drawer.open() } }) {
+                                if (opened.isNotEmpty()) ModuleIconButton(enabled = !busy && prompt == null, onClick = { scope.launch { drawer.open() } }) {
                                     StructureOpenedFilesBadge(opened.size, hostFonts, palette.native.role("OnSurface"), palette.page)
                                 }
 
@@ -541,7 +553,7 @@ internal class EpubStructureView(
 
                     HorizontalDivider(thickness = .8.dp, color = palette.divider)
                     Box(Modifier.fillMaxWidth().weight(1f)) {
-                    ModalNavigationDrawer(
+                    StructureNavigationDrawer(
                         modifier = Modifier.fillMaxSize(),
                         drawerState = drawer, gesturesEnabled = opened.isNotEmpty(),
                         drawerContent = {
@@ -632,7 +644,7 @@ internal class EpubStructureView(
                         }
                             }
                         }
-                        if (metadataLoading && !loading && file != null) LinearProgressIndicator(
+                        if (metadataLoading && !loading && file != null) ModuleLinearProgressIndicator(
                             Modifier.fillMaxWidth().align(Alignment.TopCenter),
                             color = palette.native.role("Tertiary"), trackColor = palette.surfaceHighest,
                         )
@@ -691,18 +703,16 @@ internal class EpubStructureView(
             }
 
             sheet?.let { selected ->
-                ModalBottomSheet(
+                WindowBottomSheet(
+                    show = true,
                     onDismissRequest = { if (!busy) sheet = null },
-                    containerColor = palette.content,
-                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                    contentWindowInsets = { BottomSheetDefaults.windowInsets.exclude(WindowInsets.systemBars) },
-                    dragHandle = {
-                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Spacer(Modifier.padding(top = 14.dp, bottom = 16.dp).size(40.dp, 4.dp)
-                                .clip(RoundedCornerShape(1.dp)).background(palette.surfaceHighest))
-                        }
-                    },
+                    backgroundColor = palette.content,
+                    cornerRadius = 20.dp,
+                    insideMargin = DpSize.Zero,
+                    outsideMargin = DpSize.Zero,
+                    defaultWindowInsetsPadding = false,
+                    dragHandleColor = palette.surfaceHighest,
+                    allowDismiss = !busy,
                 ) {
                     Column(Modifier.fillMaxWidth().padding(start = 20.dp, top = 2.dp, end = 20.dp, bottom = 8.dp)
                         .navigationBarsPadding(), verticalArrangement = Arrangement.spacedBy(20.dp)) {
@@ -874,7 +884,7 @@ internal class EpubStructureView(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             val contentName = StructureFileLabels.name(file.name, cover, banner)
             Text(if (file.kind == "navigation") "目录结构" else contentName,
-                style = MaterialTheme.typography.bodySmall,
+                style = ModuleTheme.typography.bodySmall,
                 color = when {
                     cover && order == 8 -> palette.primary
                     banner && order == 8 -> palette.native.role("Tertiary").takeIf { it != palette.primary }
@@ -882,11 +892,11 @@ internal class EpubStructureView(
                     else -> palette.caption
                 })
             if (file.native && chapterName.isNotBlank()) StructureTruncatedText(chapterName,
-                MaterialTheme.typography.bodySmall, palette.caption, Modifier.weight(1f, fill = false))
+                ModuleTheme.typography.bodySmall, palette.caption, Modifier.weight(1f, fill = false))
             if (dimensions.isNotBlank()) Text(dimensions,
-                style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                style = ModuleTheme.typography.bodySmall, color = palette.caption)
             if (order in setOf(8, 9, 10)) Text(file.size,
-                style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                style = ModuleTheme.typography.bodySmall, color = palette.caption)
         }
     }
 
@@ -923,7 +933,7 @@ internal class EpubStructureView(
                 StructureTruncatedText(file.name.substringBeforeLast('.', file.name),
                     HostEmbeddedStyle.drawerName(hostFonts), palette.native.role("OnSurface"),
                     Modifier.weight(1f).padding(horizontal = 16.dp))
-                IconButton(onClick = onClose) {
+                ModuleIconButton(onClick = onClose) {
                     Icon(HostEmbeddedIcons.Close, "关闭文件", Modifier.size(20.dp), tint = palette.text)
                 }
             }
@@ -940,7 +950,7 @@ internal class EpubStructureView(
             .padding(start = 18.dp, top = 16.dp, end = 12.dp, bottom = 16.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, Modifier.padding(end = 16.dp).size(20.dp), tint = foreground)
-            Text(label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = foreground)
+            Text(label, Modifier.weight(1f), style = ModuleTheme.typography.labelLarge, color = foreground)
             if (chevron) Icon(HostEmbeddedIcons.NavigateNext, null,
                 Modifier.padding(top = 2.dp).size(24.dp), tint = palette.surfaceHighest)
         }
@@ -1018,11 +1028,11 @@ internal class EpubStructureView(
                     enabled = enabled, role = Role.Button, onClickLabel = "编辑字体预览文本",
                     onClick = { editText(index) },
                 ).padding(16.dp)) {
-                    Text(label, color = palette.caption, style = MaterialTheme.typography.bodySmall)
+                    Text(label, color = palette.caption, style = ModuleTheme.typography.bodySmall)
                     HorizontalDivider(Modifier.padding(vertical = 8.dp), thickness = .8.dp, color = palette.divider)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                         Text("EX$index. $sample", Modifier.weight(1f), fontFamily = family,
-                            style = MaterialTheme.typography.titleSmall, color = palette.text)
+                            style = ModuleTheme.typography.titleSmall, color = palette.text)
                         Icon(HostEmbeddedIcons.Edit2, "编辑字体预览文本",
                             Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp), tint = palette.icon)
                     }
@@ -1058,7 +1068,7 @@ internal class EpubStructureView(
         }
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
             StructureSectionHeader("目录 · ${rows.size}", palette.text) {
-                IconButton(onClick = editSource) {
+                ModuleIconButton(onClick = editSource) {
                     Icon(painterResource(R.drawable.ic_structure_host_edit), "编辑目录源文件",
                         Modifier.size((20f * hostScale).dp), tint = if (palette.dark) palette.text else Color.Black)
                 }
@@ -1074,7 +1084,7 @@ internal class EpubStructureView(
                     val target = row.optString("path")
                     StructureContentCard(palette, onClick = { openChapter(target) }, enabled = target.isNotBlank()) {
                         StructureTruncatedText(row.optString("href").ifBlank { "[无章节链接]" },
-                            MaterialTheme.typography.bodySmall, palette.caption, Modifier.fillMaxWidth())
+                            ModuleTheme.typography.bodySmall, palette.caption, Modifier.fillMaxWidth())
                         HorizontalDivider(Modifier.padding(vertical = 12.dp), thickness = 1.dp, color = palette.borderVariant)
                         Text(row.optString("title"), style = structureChapterTextStyle(),
                             color = palette.text)
@@ -1101,11 +1111,11 @@ internal class EpubStructureView(
                     .background(palette.page)
                     .border(.5.dp, palette.borderHigh, RoundedCornerShape(8.dp))
                     .padding(16.dp)) {
-                    Text(label, style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                    Text(label, style = ModuleTheme.typography.bodySmall, color = palette.caption)
                     HorizontalDivider(Modifier.padding(vertical = 12.dp), thickness = 1.dp, color = palette.borderVariant)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                         Text(value.ifBlank { "[未设置]" }, Modifier.weight(1f),
-                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
+                            style = ModuleTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
                             color = if (value.isBlank()) palette.caption else palette.text)
                         Icon(HostEmbeddedIcons.Edit2, "编辑$label",
                             Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp), tint = palette.icon)
@@ -1125,11 +1135,11 @@ internal class EpubStructureView(
             .border(.5.dp, palette.borderHigh, RoundedCornerShape(8.dp))
             .padding(16.dp)) {
             Text("标识 dc:identifier",
-                style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                style = ModuleTheme.typography.bodySmall, color = palette.caption)
             HorizontalDivider(Modifier.padding(vertical = 12.dp), thickness = 1.dp, color = palette.borderVariant)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 StructureTruncatedText(value.ifBlank { if (error.isNotBlank()) "读取失败" else "[未设置]" },
-                    MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
+                    ModuleTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
                     if (value.isBlank()) palette.caption else palette.text, Modifier.weight(1f))
                 Box(Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp)
                     .clickable(enabled = value.isNotBlank() && error.isBlank(), role = androidx.compose.ui.semantics.Role.Button) {
@@ -1181,39 +1191,39 @@ internal class EpubStructureView(
                             onLongClickLabel = "编辑整个 CSS 文件",
                         ).padding(16.dp)) {
                             if (rule.optString("context").isNotBlank()) Text(rule.optString("context"),
-                                style = MaterialTheme.typography.bodySmall, color = palette.caption,
+                                style = ModuleTheme.typography.bodySmall, color = palette.caption,
                                 maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                                 Text(rule.optString("selector"), Modifier.weight(1f),
-                                    style = MaterialTheme.typography.labelMedium, color = Color(0xFFB8860B),
+                                    style = ModuleTheme.typography.labelMedium, color = Color(0xFFB8860B),
                                     maxLines = 3, overflow = TextOverflow.Ellipsis)
                                 Icon(HostEmbeddedIcons.Edit2, "编辑选择器",
                                     Modifier.padding(start = 16.dp, top = 2.dp).size(16.dp), tint = palette.icon)
                             }
                             if (rule.optString("comment").isNotBlank()) Text(rule.optString("comment"),
-                                Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall,
+                                Modifier.padding(top = 4.dp), style = ModuleTheme.typography.bodySmall,
                                 color = palette.caption, maxLines = 4, overflow = TextOverflow.Ellipsis)
                         }
                         HorizontalDivider(thickness = .8.dp, color = palette.divider)
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (rows.length() == 0) Text("此规则没有声明，可长按选择器编辑源码",
-                                style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                                style = ModuleTheme.typography.bodySmall, color = palette.caption)
                             for (i in 0 until rows.length()) {
                                 val row = rows.getJSONObject(i)
                                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp))
                                     .clickable { editValue(rule, row, sourceHash) }
                                     .padding(vertical = 4.dp)) {
-                                    Text(row.optString("summary"), style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                                    Text(row.optString("summary"), style = ModuleTheme.typography.bodySmall, color = palette.caption)
                                     if (row.optString("comment").isNotBlank()) Text(row.optString("comment"),
-                                        style = MaterialTheme.typography.bodySmall, color = palette.caption,
+                                        style = ModuleTheme.typography.bodySmall, color = palette.caption,
                                         maxLines = 3, overflow = TextOverflow.Ellipsis)
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                                         Text(row.optString("name"), Modifier.weight(1f),
-                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Normal),
+                                            style = ModuleTheme.typography.labelMedium.copy(fontWeight = FontWeight.Normal),
                                             color = palette.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                         Text(row.optString("value") + if (row.optBoolean("important")) " !important" else "",
                                             Modifier.weight(1.2f).padding(horizontal = 8.dp),
-                                            style = MaterialTheme.typography.bodyMedium, color = palette.text,
+                                            style = ModuleTheme.typography.bodyMedium, color = palette.text,
                                             textAlign = androidx.compose.ui.text.style.TextAlign.End,
                                             maxLines = 3, overflow = TextOverflow.Ellipsis)
                                         Icon(HostEmbeddedIcons.Edit2, "编辑 ${row.optString("name")}",
@@ -1221,7 +1231,7 @@ internal class EpubStructureView(
                                     }
                                     if (row.optString("computedValue").isNotBlank()) Text(
                                         "解析值：${row.optString("computedValue")}",
-                                        style = MaterialTheme.typography.bodySmall, color = palette.caption,
+                                        style = ModuleTheme.typography.bodySmall, color = palette.caption,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
                             }
@@ -1253,12 +1263,10 @@ internal class EpubStructureView(
         LocalConfiguration.current.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
             android.content.res.Configuration.UI_MODE_NIGHT_YES,
     )
-    CircularProgressIndicator(
+    ModuleCircularProgressIndicator(
         modifier = modifier.size(40.dp),
         color = palette.native.role("Tertiary"),
         trackColor = palette.surfaceHighest,
         strokeWidth = 2.dp,
-        strokeCap = StrokeCap.Round,
-        gapSize = 4.dp,
     )
 }

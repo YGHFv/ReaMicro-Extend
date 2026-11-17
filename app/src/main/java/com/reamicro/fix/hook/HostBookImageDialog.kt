@@ -19,7 +19,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -45,6 +45,10 @@ import kotlinx.coroutines.CancellationException
 import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleLinearProgressIndicator
+import androidx.compose.ui.unit.DpSize
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 internal class HostBookImageDialog(
     private val activity: Activity,
@@ -131,12 +135,12 @@ internal class HostBookImageDialog(
     private data class Preview(val bytes: ByteArray, val bitmap: Bitmap, val key: Pair<String, String>)
     private data class Action(val label: String, val enabled: Boolean, val run: () -> Unit)
 
-    @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+    @OptIn(ExperimentalLayoutApi::class)
     @Composable private fun ImageContent() {
         val palette = HostEmbeddedStyle.palette(activity, dark)
         val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
         val typography = remember(scale, LocalConfiguration.current) { BookImageDialogStyle.typography(activity, scale) }
-        MaterialTheme(colorScheme = palette.controlsScheme(), typography = typography) {
+        ModuleTheme(colorScheme = palette.controlsScheme(), typography = typography) {
             val scope = rememberCoroutineScope()
             var input by rememberSaveable { mutableStateOf(initialPrompt) }
             var size by rememberSaveable { mutableStateOf("2k") }
@@ -194,25 +198,18 @@ internal class HostBookImageDialog(
                     }
                 })
             }
-            ModalBottomSheet(
+            WindowBottomSheet(
+                show = true,
                 onDismissRequest = { if (!committing) dismiss() },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { !committing }),
-
-                containerColor = palette.content, contentColor = palette.text, tonalElevation = 0.dp,
-                shape = RoundedCornerShape(topStart = (BookImageDialogStyle.SHEET_CORNER * scale).dp,
-                    topEnd = (BookImageDialogStyle.SHEET_CORNER * scale).dp),
-
-                contentWindowInsets = { WindowInsets.safeDrawing },
-                dragHandle = {
-                    Box(Modifier.fillMaxWidth().padding(top = (BookImageDialogStyle.HANDLE_TOP * scale).dp,
-                        bottom = (BookImageDialogStyle.HANDLE_BOTTOM * scale).dp), contentAlignment = Alignment.Center) {
-                        Box(Modifier.size((BookImageDialogStyle.HANDLE_WIDTH * scale).dp,
-                            (BookImageDialogStyle.HANDLE_HEIGHT * scale).dp)
-                            .background(palette.surfaceHighest, RoundedCornerShape((1f * scale).dp)))
-                    }
-                },
+                allowDismiss = !committing,
+                backgroundColor = palette.content,
+                cornerRadius = (BookImageDialogStyle.SHEET_CORNER * scale).dp,
+                insideMargin = DpSize.Zero,
+                outsideMargin = DpSize.Zero,
+                dragHandleColor = palette.surfaceHighest,
             ) {
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                BoxWithConstraints(Modifier.fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))) {
                     val density = LocalDensity.current
                     val sheetFocus = LocalFocusManager.current
                     val sheetKeyboard = LocalSoftwareKeyboardController.current
@@ -255,7 +252,7 @@ internal class HostBookImageDialog(
                                 color = palette.caption, style = typography.bodySmall)
                             if (busy && generated && !committing) Text("关闭窗口不会撤回已发送的生成请求",
                                 style = typography.bodySmall, color = palette.caption)
-                            if (busy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.text, trackColor = palette.surfaceHighest)
+                            if (busy) ModuleLinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.text, trackColor = palette.surfaceHighest)
                             if (message.isNotEmpty()) Text(message, color = if (failed) palette.error else palette.caption,
                                 style = typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                             Spacer(Modifier.height((2f * scale).dp))
@@ -294,7 +291,7 @@ internal class HostBookImageDialog(
         val card = Modifier.fillMaxWidth().clip(shape).background(palette.page)
             .border((BookImageDialogStyle.BORDER * scale).dp, palette.borderVariant, shape)
             .padding((12f * scale).dp)
-        val controlStyle = MaterialTheme.typography.bodyLarge
+        val controlStyle = ModuleTheme.typography.bodyLarge
         val editor: @Composable (Modifier) -> Unit = { modifier ->
             BasicTextField(value, { next -> changed(if (uri) next.replace("\r", "").replace("\n", "") else next) },
                 modifier.heightIn(min = 48.dp).semantics { contentDescription = label },

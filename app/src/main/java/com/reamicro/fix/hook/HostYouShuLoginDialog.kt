@@ -23,7 +23,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +51,8 @@ import com.reamicro.fix.reload.HostGeneration
 import com.reamicro.fix.reload.ModuleResources
 import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleLinearProgressIndicator
 
 /** The host dictionary browser uses a 92% by 78% centered window and an 18dp image surface. */
 internal class HostYouShuLoginDialog(
@@ -201,7 +203,7 @@ internal class HostYouShuLoginDialog(
             window?.setDimAmount(0f)
             backdrop.refresh()
         }
-        MaterialTheme(colorScheme = native.controlsScheme(), typography = typography) {
+        ModuleTheme(colorScheme = native.controlsScheme(), typography = typography) {
             BoxWithConstraints(Modifier.fillMaxSize()
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { dismiss() },
                 contentAlignment = Alignment.Center) {
@@ -223,7 +225,7 @@ internal class HostYouShuLoginDialog(
                         color = Color(native.contentArgb), border = BorderStroke(1.dp, Color(native.borderVariantArgb))) {
                         Box(Modifier.fillMaxSize()) {
                             AndroidView(factory = { web }, modifier = Modifier.fillMaxSize())
-                            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp),
+                            if (loading) ModuleLinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp),
                                 color = native.role("Tertiary"), trackColor = native.role("SurfaceContainerHighest"))
                         }
                     }

@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.withFrameNanos
@@ -54,6 +53,11 @@ import com.reamicro.fix.epub.editor.canEditEpubSource
 import com.reamicro.fix.epub.editor.EpubNavigation
 import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.reload.ModuleUiRuntime
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleIconButton
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Text
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -232,7 +236,7 @@ internal class EpubScriptaPanel(
         }
     }
 
-    @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+    @OptIn(ExperimentalLayoutApi::class)
     @Composable
     private fun EditorContent(initialPath: String) {
 
@@ -269,7 +273,7 @@ internal class EpubScriptaPanel(
         var failure by remember { mutableStateOf<String?>(null) }
         var confirmClose by remember { mutableStateOf(false) }
         var confirmTarget by remember { mutableStateOf<String?>(null) }
-        val drawer = rememberDrawerState(DrawerValue.Closed)
+        val drawer = rememberStructureDrawerState()
         var softWrap by remember { mutableStateOf(true) }
         var retry by remember { mutableIntStateOf(0) }
         var searchVisible by remember { mutableStateOf(startWithSearch) }
@@ -710,7 +714,7 @@ internal class EpubScriptaPanel(
         val colors = remember(p) { StructureScriptaChrome.colors(p) }
         val safeDrawingInsets = WindowInsets.safeDrawing
 
-        MaterialTheme(colorScheme = native.controlsScheme(), typography = typography) {
+        ModuleTheme(colorScheme = native.controlsScheme(), typography = typography) {
             androidx.compose.animation.AnimatedVisibility(
                 visibleState = editorVisibility, modifier = Modifier.fillMaxSize(),
                 enter = StructureFileMotion.enter(), exit = StructureFileMotion.exit(),
@@ -724,20 +728,20 @@ internal class EpubScriptaPanel(
                         subtitleStyle = HostEmbeddedStyle.caption(hostFonts),
                         titleColor = textColor, subtitleColor = muted,
                         navigationIcon = {
-                            IconButton(enabled = !saving && !searchBusy, onClick = { close() }) {
+                            ModuleIconButton(enabled = !saving && !searchBusy, onClick = { close() }) {
                                 Icon(HostEmbeddedIcons.Back, "返回", tint = textColor)
                             }
                         },
                         actions = {
-                            IconButton(enabled = !loading && !saving && !searchBusy && !confirmClose && !dismissRequested && !drawer.isOpen,
+                            ModuleIconButton(enabled = !loading && !saving && !searchBusy && !confirmClose && !dismissRequested && !drawer.isOpen,
                                 onClick = { onFileSearchOpened(); fileSearchVisible = true }) {
                                 Icon(painterResource(R.drawable.ic_structure_search),
                                     stringResource(R.string.epub_structure_search_title), Modifier.size(24.dp), tint = textColor)
                             }
-                            IconButton(enabled = !saving && !searchBusy && !confirmClose && !dismissRequested && !drawer.isOpen, onClick = { navigateHome() }) {
+                            ModuleIconButton(enabled = !saving && !searchBusy && !confirmClose && !dismissRequested && !drawer.isOpen, onClick = { navigateHome() }) {
                                 Icon(painterResource(R.drawable.ic_structure_home), "返回图书结构", Modifier.size(24.dp), tint = textColor)
                             }
-                            if (openedFilePaths().isNotEmpty()) IconButton(
+                            if (openedFilePaths().isNotEmpty()) ModuleIconButton(
                                 enabled = !loading && !saving && !searchBusy && !confirmClose && !dismissRequested,
                                 onClick = { coroutineScope.launch { drawer.open() } }) {
                                 StructureOpenedFilesBadge(openedFilePaths().size, hostFonts, p.native.role("OnSurface"), p.page)
@@ -746,7 +750,7 @@ internal class EpubScriptaPanel(
                     )
                     HorizontalDivider(thickness = StructureContentStyle.dividerWidth, color = p.divider)
 
-                    ModalNavigationDrawer(
+                    StructureNavigationDrawer(
                         modifier = Modifier.weight(1f).fillMaxWidth(), drawerState = drawer,
                         gesturesEnabled = drawer.isOpen,
                         drawerContent = {
@@ -778,10 +782,10 @@ internal class EpubScriptaPanel(
                                                             verticalArrangement = Arrangement.Center) {
                                                             if (loading) StructureDataLoading()
                                                             Text(if (loading) "正在读取文件…" else failure.orEmpty(),
-                                                                Modifier.padding(top = 12.dp), style = MaterialTheme.typography.bodyMedium,
+                                                                Modifier.padding(top = 12.dp), style = ModuleTheme.typography.bodyMedium,
                                                                 color = if (failure != null) p.error else p.caption)
                                                             if (failure != null) com.reamicro.fix.ui.DialogActionButton(enabled = !saving && !dismissRequested,
-                                                                onClick = { retry++ }) { Text("重试", style = MaterialTheme.typography.labelMedium) }
+                                                                onClick = { retry++ }) { Text("重试", style = ModuleTheme.typography.labelMedium) }
                                                         }
                                                     } else {
                                                         CodeEditor(

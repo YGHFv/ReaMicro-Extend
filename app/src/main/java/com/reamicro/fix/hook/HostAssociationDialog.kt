@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,6 +28,9 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.R
 import com.reamicro.fix.core.InjectedModuleContext
+import com.reamicro.fix.ui.ModuleTheme
+import androidx.compose.ui.unit.DpSize
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 /** Uses the host book-action sheet's geometry and live theme, including its custom UI font. */
 internal class HostAssociationDialog(
@@ -113,32 +116,26 @@ internal class HostAssociationDialog(
         if (valid) action.run()
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun Content() {
         val palette = HostEmbeddedStyle.palette(activity, dark)
         val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
         val typography = remember(scale, LocalConfiguration.current) { BookImageDialogStyle.typography(activity, scale) }
-        MaterialTheme(colorScheme = palette.controlsScheme(), typography = typography) {
-            ModalBottomSheet(
+        ModuleTheme(colorScheme = palette.controlsScheme(), typography = typography) {
+            WindowBottomSheet(
+                show = true,
                 onDismissRequest = { dismiss() },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                containerColor = palette.content,
-                contentColor = palette.text,
-                tonalElevation = 0.dp,
-                shape = RoundedCornerShape(topStart = (20 * scale).dp, topEnd = (20 * scale).dp),
-                contentWindowInsets = { WindowInsets.safeDrawing },
-                dragHandle = {
-                    Box(Modifier.fillMaxWidth().padding(top = (14 * scale).dp, bottom = (16 * scale).dp),
-                        contentAlignment = Alignment.Center) {
-                        Box(Modifier.size((40 * scale).dp, (4 * scale).dp)
-                            .background(palette.surfaceHighest, RoundedCornerShape(scale.dp)))
-                    }
-                },
+                backgroundColor = palette.content,
+                cornerRadius = (20 * scale).dp,
+                insideMargin = DpSize.Zero,
+                outsideMargin = DpSize.Zero,
+                dragHandleColor = palette.surfaceHighest,
             ) {
-                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                Column(Modifier.fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = (20 * scale).dp).padding(bottom = (16 * scale).dp)) {
-                    Text("关联操作", style = MaterialTheme.typography.labelLarge,
+                    Text("关联操作", style = ModuleTheme.typography.labelLarge,
                         modifier = Modifier.semantics { heading() }.padding(bottom = (20 * scale).dp))
                     Surface(shape = RoundedCornerShape((8 * scale).dp), color = palette.bright,
                         border = BorderStroke((.8f * scale).dp, palette.borderVariant)) {
@@ -153,7 +150,7 @@ internal class HostAssociationDialog(
                     Spacer(Modifier.height((16 * scale).dp))
                     com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() },
                         modifier = Modifier.fillMaxWidth()) {
-                        Text("取消操作", style = MaterialTheme.typography.labelLarge)
+                        Text("取消操作", style = ModuleTheme.typography.labelLarge)
                     }
                 }
             }
@@ -166,8 +163,8 @@ internal class HostAssociationDialog(
             .clickable(role = Role.Button, onClickLabel = action.title, onClick = onClick)
             .padding(horizontal = (18 * scale).dp, vertical = (16 * scale).dp)) {
             Text(action.title, color = if (action.destructive) palette.error else palette.text,
-                style = MaterialTheme.typography.labelLarge)
-            Text(action.description, color = palette.caption, style = MaterialTheme.typography.bodyMedium,
+                style = ModuleTheme.typography.labelLarge)
+            Text(action.description, color = palette.caption, style = ModuleTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = (2 * scale).dp))
         }
     }

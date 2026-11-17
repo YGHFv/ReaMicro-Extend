@@ -13,7 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +34,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import top.yukonga.scripta.editor.EditorColors
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleIconButton
+import com.reamicro.fix.ui.ModuleTextButton
 
 internal object StructureScriptaChrome {
     fun colors(palette: HostEmbeddedStyle.Palette): EditorColors =
@@ -75,35 +78,33 @@ internal fun StructureEditorFooter(
     onUndo: () -> Unit, onRedo: () -> Unit, onSearch: () -> Unit,
     onSave: () -> Unit, onGotoLine: () -> Unit, onSoftWrap: () -> Unit,
 ) {
-    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides StructureSearchChromeMetrics.actionTouchHeight.dp) {
-        Column(Modifier.fillMaxWidth().padding(bottom = StructureSearchChromeMetrics.sectionGap.dp)) {
-            HorizontalDivider(thickness = StructureContentStyle.dividerWidth, color = palette.divider)
-            if (showDetails) FlowRow(Modifier.fillMaxWidth().heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.Center,
-                itemVerticalAlignment = Alignment.CenterVertically) {
-                Text("行 $line · 列 $column", style = structureEditorControlTextStyle(), color = palette.caption)
-                Text(format, style = structureEditorControlTextStyle(), color = palette.caption)
-            }
+    Column(Modifier.fillMaxWidth().padding(bottom = StructureSearchChromeMetrics.sectionGap.dp)) {
+        HorizontalDivider(thickness = StructureContentStyle.dividerWidth, color = palette.divider)
+        if (showDetails) FlowRow(Modifier.fillMaxWidth().heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.Center,
+            itemVerticalAlignment = Alignment.CenterVertically) {
+            Text("行 $line · 列 $column", style = structureEditorControlTextStyle(), color = palette.caption)
+            Text(format, style = structureEditorControlTextStyle(), color = palette.caption)
+        }
 
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.controlGap.dp),
-                verticalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.sectionGap.dp), itemVerticalAlignment = Alignment.CenterVertically) {
-                IconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = state.canUndo, onClick = onUndo) {
-                    Icon(StructureEditorIcons.Undo, "撤销", tint = if (state.canUndo) palette.text else palette.icon)
-                }
-                IconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = state.canRedo, onClick = onRedo) {
-                    Icon(StructureEditorIcons.Redo, "重做", tint = if (state.canRedo) palette.text else palette.icon)
-                }
-                IconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = state.canSearch, onClick = onSearch) {
-                    Icon(StructureIcons.FindReplace, "查找替换", tint = if (state.canSearch) palette.text else palette.icon)
-                }
-                StructureCompactOutlinedAction(if (state.saving) "保存中" else "保存",
-                    state.canSave, palette, onClick = onSave, busy = state.saving)
-                TextButton(enabled = state.interactive, onClick = onGotoLine,
-                    contentPadding = PaddingValues(horizontal = 6.dp), modifier = Modifier.heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp)) {
-                    Text("行号", style = structureEditorControlTextStyle())
-                }
-                SearchToggle("换行", softWrap, state.interactive, palette, onSoftWrap)
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.controlGap.dp),
+            verticalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.sectionGap.dp), itemVerticalAlignment = Alignment.CenterVertically) {
+            ModuleIconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = state.canUndo, onClick = onUndo) {
+                Icon(StructureEditorIcons.Undo, "撤销", tint = if (state.canUndo) palette.text else palette.icon)
             }
+            ModuleIconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = state.canRedo, onClick = onRedo) {
+                Icon(StructureEditorIcons.Redo, "重做", tint = if (state.canRedo) palette.text else palette.icon)
+            }
+            ModuleIconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = state.canSearch, onClick = onSearch) {
+                Icon(StructureIcons.FindReplace, "查找替换", tint = if (state.canSearch) palette.text else palette.icon)
+            }
+            StructureCompactOutlinedAction(if (state.saving) "保存中" else "保存",
+                state.canSave, palette, onClick = onSave, busy = state.saving)
+            ModuleTextButton(enabled = state.interactive, onClick = onGotoLine,
+                contentPadding = PaddingValues(horizontal = 6.dp), modifier = Modifier.heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp)) {
+                Text("行号", style = structureEditorControlTextStyle())
+            }
+            SearchToggle("换行", softWrap, state.interactive, palette, onSoftWrap)
         }
     }
 }
@@ -124,37 +125,35 @@ internal fun StructureScriptaSearchPanel(
     DisposableEffect(Unit) {
         onDispose { keyboard?.hide(); focusManager.clearFocus() }
     }
-    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides StructureSearchChromeMetrics.actionTouchHeight.dp) {
-        Column(modifier.fillMaxWidth().background(palette.content)) {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                .padding(vertical = StructureSearchChromeMetrics.sectionGap.dp),
-                verticalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.sectionGap.dp)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(status.ifBlank { "查找替换" }, Modifier.weight(1f), style = structureEditorControlTextStyle(), color = palette.caption)
-                    IconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = !processing, onClick = onClose) {
-                        Icon(HostEmbeddedIcons.Close, "关闭查找替换", Modifier.size(20.dp), tint = palette.caption)
-                    }
+    Column(modifier.fillMaxWidth().background(palette.content)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+            .padding(vertical = StructureSearchChromeMetrics.sectionGap.dp),
+            verticalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.sectionGap.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(status.ifBlank { "查找替换" }, Modifier.weight(1f), style = structureEditorControlTextStyle(), color = palette.caption)
+                ModuleIconButton(modifier = Modifier.size(StructureSearchChromeMetrics.actionTouchHeight.dp), enabled = !processing, onClick = onClose) {
+                    Icon(HostEmbeddedIcons.Close, "关闭查找替换", Modifier.size(20.dp), tint = palette.caption)
                 }
-                SearchField(query, "查找内容", palette, enabled, ImeAction.Search, onQueryChange, onSearch,
-                    requestFocusOnShow = true)
-                SearchField(replacement, "替换为（留空则删除）", palette, enabled, ImeAction.Done, onReplacementChange, {})
-                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.resultActionGap.dp),
-                    verticalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.sectionGap.dp),
-                    itemVerticalAlignment = Alignment.CenterVertically) {
-                    TextButton(enabled = enabled, onClick = {
-                        onScopeChange(if (scope == EpubSearchScope.CURRENT) EpubSearchScope.HTML else EpubSearchScope.CURRENT)
-                    }, contentPadding = PaddingValues(horizontal = 6.dp)) {
-                        Text(if (scope == EpubSearchScope.CURRENT) "范围：当前" else "范围：HTML", style = structureEditorControlTextStyle())
-                    }
-                    SearchToggle("正则", regex, enabled, palette) { onRegexChange(!regex) }
-                    SearchToggle("仅文本", textOnly, enabled, palette) { onTextOnlyChange(!textOnly) }
-                    StructureCompactOutlinedAction(if (processing) "查找中" else "查找",
-                        enabled && query.isNotEmpty(), palette, onClick = onSearch, busy = processing)
-                    StructureSearchTextAction("上一个", enabled && hasMatches, palette, onPrevious)
-                    StructureSearchTextAction("下一个", enabled && hasMatches, palette, onNext)
-                    StructureSearchTextAction("替换当前", enabled && hasMatches, palette, onReplaceCurrent)
-                    StructureSearchTextAction("替换全部", enabled && query.isNotEmpty(), palette, onReplaceAll)
+            }
+            SearchField(query, "查找内容", palette, enabled, ImeAction.Search, onQueryChange, onSearch,
+                requestFocusOnShow = true)
+            SearchField(replacement, "替换为（留空则删除）", palette, enabled, ImeAction.Done, onReplacementChange, {})
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.resultActionGap.dp),
+                verticalArrangement = Arrangement.spacedBy(StructureSearchChromeMetrics.sectionGap.dp),
+                itemVerticalAlignment = Alignment.CenterVertically) {
+                ModuleTextButton(enabled = enabled, onClick = {
+                    onScopeChange(if (scope == EpubSearchScope.CURRENT) EpubSearchScope.HTML else EpubSearchScope.CURRENT)
+                }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                    Text(if (scope == EpubSearchScope.CURRENT) "范围：当前" else "范围：HTML", style = structureEditorControlTextStyle())
                 }
+                SearchToggle("正则", regex, enabled, palette) { onRegexChange(!regex) }
+                SearchToggle("仅文本", textOnly, enabled, palette) { onTextOnlyChange(!textOnly) }
+                StructureCompactOutlinedAction(if (processing) "查找中" else "查找",
+                    enabled && query.isNotEmpty(), palette, onClick = onSearch, busy = processing)
+                StructureSearchTextAction("上一个", enabled && hasMatches, palette, onPrevious)
+                StructureSearchTextAction("下一个", enabled && hasMatches, palette, onNext)
+                StructureSearchTextAction("替换当前", enabled && hasMatches, palette, onReplaceCurrent)
+                StructureSearchTextAction("替换全部", enabled && query.isNotEmpty(), palette, onReplaceAll)
             }
         }
     }
@@ -197,7 +196,7 @@ private fun SearchToggle(label: String, selected: Boolean, enabled: Boolean,
     val textStyle = structureEditorControlTextStyle()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val side = StructureSearchChromeMetrics.checkboxSide(textStyle.fontSize.value, density.fontScale).dp
-    val markColor = MaterialTheme.colorScheme.onPrimary
+    val markColor = ModuleTheme.colorScheme.onPrimary
     val boxColor = (if (selected) palette.primary else palette.caption).copy(alpha = if (enabled) 1f else .45f)
     Row(Modifier.heightIn(min = StructureSearchChromeMetrics.actionTouchHeight.dp).clip(RoundedCornerShape(4.dp))
         .toggleable(value = selected, enabled = enabled, role = androidx.compose.ui.semantics.Role.Checkbox,
@@ -252,10 +251,10 @@ internal fun StructureScriptaUnsavedPrompt(
                 .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {}
                 .padding(16.dp)) {
                 Text(if (retainedSwitching) "切换文件？" else "保存修改？",
-                    style = MaterialTheme.typography.titleSmall, color = palette.text)
+                    style = ModuleTheme.typography.titleSmall, color = palette.text)
                 Text(if (retainedSwitching) "切换前需要处理 $retainedName 的未保存修改。"
                     else "返回后将丢弃 $retainedName 的未保存修改。",
-                    Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyMedium, color = palette.caption)
+                    Modifier.padding(top = 8.dp), style = ModuleTheme.typography.bodyMedium, color = palette.caption)
                 HorizontalDivider(Modifier.padding(vertical = 12.dp), thickness = StructureContentStyle.dividerWidth,
                     color = palette.borderVariant)
                 for ((label, action) in listOf(
@@ -263,7 +262,7 @@ internal fun StructureScriptaUnsavedPrompt(
                     "继续编辑" to onContinue, "不保存" to onDiscard)) {
                     com.reamicro.fix.ui.DialogActionButton(onClick = action, enabled = visible && !busy,
                         modifier = Modifier.fillMaxWidth()) {
-                        Text(label, style = MaterialTheme.typography.labelLarge)
+                        Text(label, style = ModuleTheme.typography.labelLarge)
                     }
                     Spacer(Modifier.height(4.dp))
                 }

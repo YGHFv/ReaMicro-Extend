@@ -17,7 +17,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clipToBounds
@@ -47,6 +47,10 @@ import com.reamicro.fix.hook.reader.FullTextSearchResult
 import java.io.File
 import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.withContext
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleIconButton
+import com.reamicro.fix.ui.ModuleTextButton
+import com.reamicro.fix.ui.ModuleLinearProgressIndicator
 
 internal class HostFullTextSearchDialog(
     private val activity:Activity,
@@ -152,7 +156,7 @@ internal class HostFullTextSearchDialog(
         // 字体全部就绪后才首次测量列表，避免先用默认字体再替换造成跳动。
         val text=resources
         if(text==null){Box(Modifier.fillMaxSize().background(palette.content));return}
-        MaterialTheme(colorScheme=native.controlsScheme(),typography=HostEmbeddedStyle.typography(text.fonts,text.family)) {
+        ModuleTheme(colorScheme=native.controlsScheme(),typography=HostEmbeddedStyle.typography(text.fonts,text.family)) {
             val keyboard=LocalSoftwareKeyboardController.current
             val requester=remember {FocusRequester()}
             var query by remember {mutableStateOf(initialQuery)}
@@ -162,9 +166,9 @@ internal class HostFullTextSearchDialog(
             val density=androidx.compose.ui.platform.LocalDensity.current
             val metrics=EmbeddedHostUi.textMetrics
             val labelSize=if(metrics.labelLargePx>0f)with(density){metrics.labelLargePx.toSp()} else metrics.labelLarge.sp
-            val labelLine=if(metrics.labelLinePx>0f)with(density){metrics.labelLinePx.toSp()} else MaterialTheme.typography.labelLarge.lineHeight
+            val labelLine=if(metrics.labelLinePx>0f)with(density){metrics.labelLinePx.toSp()} else ModuleTheme.typography.labelLarge.lineHeight
             val statusTop=WindowInsets.safeDrawing.getTop(density)
-            val searchStyle=MaterialTheme.typography.labelLarge.copy(fontSize=labelSize,lineHeight=labelLine,fontWeight=FontWeight(metrics.labelWeight))
+            val searchStyle=ModuleTheme.typography.labelLarge.copy(fontSize=labelSize,lineHeight=labelLine,fontWeight=FontWeight(metrics.labelWeight))
             LaunchedEffect(Unit){if(initialQuery.isBlank()){requester.requestFocus();keyboard?.show()}}
             LaunchedEffect(scroll){snapshotFlow{scroll.firstVisibleItemIndex to scroll.firstVisibleItemScrollOffset}
                 .collect{(index,offset)->firstVisible=index;firstVisibleOffset=offset}}
@@ -180,12 +184,15 @@ internal class HostFullTextSearchDialog(
                             singleLine=true,textStyle=searchStyle.copy(color=palette.text),
                             cursorBrush=SolidColor(palette.primary),keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search),keyboardActions=KeyboardActions(onSearch={submit()}),
                             decorationBox={inner->Box {if(query.isEmpty())Text("输入关键词搜索全书",style=searchStyle,color=palette.caption,maxLines=1);inner()}})
-                        if(query.isNotEmpty())IconButton(onClick={query="";onSearch("")},modifier=Modifier.size(48.dp)) {
+                        if(query.isNotEmpty())ModuleIconButton(onClick={query="";onSearch("")},modifier=Modifier.size(48.dp)) {
                             Icon(HostEmbeddedIcons.Close,"清空搜索",Modifier.size(18.dp),tint=palette.caption)
                         }
                     }
-                    com.reamicro.fix.ui.DialogActionButton(onClick={submit()},enabled=query.isNotBlank()) { Text("搜索") }
-                    com.reamicro.fix.ui.DialogActionButton(onClick={dismiss()}) { Text("取消") }
+                    ModuleTextButton(onClick={submit()},enabled=query.isNotBlank(),
+                        contentColor=palette.primary,disabledContentColor=palette.caption) {
+                        Text("搜索",color=if(query.isNotBlank())palette.primary else palette.caption)
+                    }
+                    ModuleTextButton(onClick={dismiss()},contentColor=palette.text) { Text("取消",color=palette.text) }
                 }
                 // 延迟执行的 key/content 必须捕获同一批结果，不能重新读取已被清空的新状态。
                 val page=state
@@ -205,7 +212,7 @@ internal class HostFullTextSearchDialog(
                                 verticalAlignment=Alignment.CenterVertically) {
                                 Spacer(Modifier.weight(1f))
                                 Text(section.volume,Modifier.weight(1f).padding(start=12.dp),
-                                    style=MaterialTheme.typography.bodySmall,color=palette.caption,textAlign=TextAlign.End,
+                                    style=ModuleTheme.typography.bodySmall,color=palette.caption,textAlign=TextAlign.End,
                                     maxLines=1,overflow=TextOverflow.Ellipsis)
                             }
                         }
@@ -224,9 +231,9 @@ internal class HostFullTextSearchDialog(
                                 if(active)palette.primary else palette.borderHigh)) {
                         Column(Modifier.padding(StructureContentStyle.inset)) {
                             Row(verticalAlignment=Alignment.CenterVertically) {
-                                Text(result.displayChapterTitle,Modifier.weight(1f),style=MaterialTheme.typography.bodySmall,
+                                Text(result.displayChapterTitle,Modifier.weight(1f),style=ModuleTheme.typography.bodySmall,
                                     color=if(active)palette.primary else palette.caption,maxLines=1,overflow=TextOverflow.Ellipsis)
-                                if(active)Text("当前查看",Modifier.padding(start=8.dp),style=MaterialTheme.typography.bodySmall,color=palette.primary)
+                                if(active)Text("当前查看",Modifier.padding(start=8.dp),style=ModuleTheme.typography.bodySmall,color=palette.primary)
                             }
                             HorizontalDivider(Modifier.padding(vertical=12.dp),thickness=1.dp,color=palette.borderVariant)
                             val snippet=remember(result, palette.primary) {buildAnnotatedString {
@@ -235,7 +242,7 @@ internal class HostFullTextSearchDialog(
                                 val end=result.snippetMatchEnd.coerceIn(start,result.snippet.length)
                                 if(end>start)addStyle(SpanStyle(color=palette.primary,fontWeight=FontWeight.Bold),start,end)
                             }}
-                            Text(snippet,Modifier.fillMaxWidth(),style=MaterialTheme.typography.labelLarge.copy(fontWeight=FontWeight.Normal),
+                            Text(snippet,Modifier.fillMaxWidth(),style=ModuleTheme.typography.labelLarge.copy(fontWeight=FontWeight.Normal),
                                 color=palette.text,minLines=2,maxLines=2,overflow=TextOverflow.Ellipsis)
                         }
                         }
@@ -247,9 +254,9 @@ internal class HostFullTextSearchDialog(
                     verticalAlignment=Alignment.CenterVertically) {
                     Box(Modifier.weight(1f).height(48.dp).background(palette.content),contentAlignment=Alignment.CenterStart) {
                         Text(status,Modifier.fillMaxWidth(),
-                            style=MaterialTheme.typography.labelLarge,color=if(page.error!=null)palette.error else palette.text,
+                            style=ModuleTheme.typography.labelLarge,color=if(page.error!=null)palette.error else palette.text,
                             maxLines=1,overflow=TextOverflow.Ellipsis)
-                        if(page.searching && visible)LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.BottomCenter))
+                        if(page.searching && visible)ModuleLinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.BottomCenter))
                     }
                     Spacer(Modifier.weight(1f))
                 }

@@ -10,14 +10,14 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
-import androidx.compose.material3.Text
+import top.yukonga.miuix.kmp.basic.Text
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Typography
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleTypography
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -40,11 +40,11 @@ internal object StructureContentStyle {
     val metadataBorderWidth = .5.dp
     const val overlayScrimAlpha = .1f
 
-    fun chapterTextStyle(typography: Typography) = typography.labelLarge.copy(fontWeight = FontWeight.Normal)
+    fun chapterTextStyle(typography: ModuleTypography) = typography.labelLarge.copy(fontWeight = FontWeight.Normal)
 }
 
 @Composable
-internal fun structureChapterTextStyle() = StructureContentStyle.chapterTextStyle(MaterialTheme.typography)
+internal fun structureChapterTextStyle() = StructureContentStyle.chapterTextStyle(ModuleTheme.typography)
 
 @Composable
 internal fun StructureSectionHeader(
@@ -54,7 +54,7 @@ internal fun StructureSectionHeader(
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     Row(modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = color)
+        Text(text, Modifier.weight(1f), style = ModuleTheme.typography.labelLarge, color = color)
         actions()
     }
 }
@@ -82,7 +82,7 @@ internal fun StructureContentCard(
 internal fun rememberStructureContentTypography(
     hostFonts: HostEmbeddedStyle.Fonts,
     uiFontFileProvider: () -> File?,
-): Typography {
+): ModuleTypography {
     val uiFont by produceState<FontFamily?>(null, uiFontFileProvider) {
         value = withContext(ModuleUiRuntime.io) { runCatching {
             uiFontFileProvider()?.takeIf { it.isFile }?.let { FontFamily(Typeface.createFromFile(it)) }

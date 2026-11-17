@@ -7,10 +7,9 @@ import android.graphics.drawable.RippleDrawable
 import android.widget.TextView
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import com.reamicro.fix.ui.ModuleTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -26,13 +25,14 @@ internal fun DialogActionButton(
     content: @Composable RowScope.() -> Unit,
 ) {
     Button(onClick = onClick, modifier = modifier.heightIn(min = 48.dp), enabled = enabled,
-        shape = RoundedCornerShape(4.dp),
+        cornerRadius = 4.dp, minHeight = 48.dp,
         colors = ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-            disabledContentColor = MaterialTheme.colorScheme.onBackground.copy(alpha = .38f)),
-        content = content)
+            color = ModuleTheme.colorScheme.primary,
+            contentColor = ModuleTheme.colorScheme.onPrimary,
+            disabledColor = ModuleTheme.colorScheme.surfaceContainerHighest,
+            disabledContentColor = ModuleTheme.colorScheme.onBackground.copy(alpha = .38f))) {
+        ProvideModuleButtonText { content() }
+    }
 }
 
 internal fun applyDialogActionStyle(view: TextView, context: Context = view.context) {

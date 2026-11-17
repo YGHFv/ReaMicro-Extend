@@ -6,7 +6,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.material3.MaterialTheme
+import com.reamicro.fix.ui.ModuleTheme
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -87,7 +87,7 @@ import kotlin.math.roundToInt
         Column(Modifier.align(Alignment.TopCenter)
             .offset { IntOffset(0, ((drag ?: fraction) * travel).roundToInt()) }
             .size((16 * scale).dp, (48 * scale).dp)
-            .background(MaterialTheme.colorScheme.surface, CircleShape).border((.5f * scale).dp, palette.borderVariant, CircleShape),
+            .background(ModuleTheme.colorScheme.surface, CircleShape).border((.5f * scale).dp, palette.borderVariant, CircleShape),
             verticalArrangement = Arrangement.spacedBy((4 * scale).dp, Alignment.CenterVertically),
             horizontalAlignment = Alignment.CenterHorizontally) {
             repeat(2) { Box(Modifier.size((6 * scale).dp, (1 * scale).dp).background(palette.borderVariant)) }

@@ -17,12 +17,15 @@ class BookshelfCompletionPolicyTest {
         assertTrue(BookshelfCompletionPolicy.canStartAutomatic(enabled, baseTime, 0L, false))
     }
 
-    @Test fun completedBatchWaitsUntilExactlyThirtyMinutes() {
+    @Test fun completedBatchWaitsUntilExactlyOneHour() {
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_799_000L, baseTime, false, lastStartedAt = 0L,
+            enabled, baseTime + 1_800_000L, baseTime, false, lastStartedAt = 0L,
+        ))
+        assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
+            enabled, baseTime + 3_599_999L, baseTime, false, lastStartedAt = 0L,
         ))
         assertTrue(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_800_000L, baseTime, false, lastStartedAt = 0L,
+            enabled, baseTime + 3_600_000L, baseTime, false, lastStartedAt = 0L,
         ))
     }
 
@@ -32,16 +35,16 @@ class BookshelfCompletionPolicyTest {
             enabled, baseTime + 60_000L, 0L, false, lastStartedAt = baseTime,
         ))
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_799_000L, 0L, false, lastStartedAt = baseTime,
+            enabled, baseTime + 3_599_999L, 0L, false, lastStartedAt = baseTime,
         ))
         assertTrue(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_800_000L, 0L, false, lastStartedAt = baseTime,
+            enabled, baseTime + 3_600_000L, 0L, false, lastStartedAt = baseTime,
         ))
     }
 
     @Test fun newerStartOrManualCompletionPostponesAutomaticUpdate() {
-        val recentTime = baseTime + 1_200_000L
-        val now = baseTime + 1_800_000L
+        val recentTime = baseTime + 2_400_000L
+        val now = baseTime + 3_600_000L
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
             enabled, now, baseTime, false, lastStartedAt = recentTime,
         ))
@@ -50,26 +53,26 @@ class BookshelfCompletionPolicyTest {
             enabled, now, recentTime, false, lastStartedAt = baseTime,
         ))
         assertTrue(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, recentTime + 1_800_000L, recentTime, false, lastStartedAt = baseTime,
+            enabled, recentTime + 3_600_000L, recentTime, false, lastStartedAt = baseTime,
         ))
     }
 
     @Test fun legacyCompletionRemainsTheFallbackWithoutStartedTimestamp() {
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_799_000L, baseTime, false,
+            enabled, baseTime + 3_599_999L, baseTime, false,
         ))
         assertTrue(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_800_000L, baseTime, false,
+            enabled, baseTime + 3_600_000L, baseTime, false,
         ))
     }
 
     @Test fun scanningBlocksBothFirstAndAlreadyDueAutomaticUpdates() {
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(enabled, baseTime, 0L, true))
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_800_000L, baseTime, true,
+            enabled, baseTime + 3_600_000L, baseTime, true,
         ))
         assertTrue(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime + 1_800_000L, baseTime, false,
+            enabled, baseTime + 3_600_000L, baseTime, false,
         ))
     }
 
@@ -86,10 +89,10 @@ class BookshelfCompletionPolicyTest {
     @Test fun futureStartOrCompletionDoesNotAllowAnEarlyAutomaticUpdate() {
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
             enabled, baseTime, baseTime + 60_000L, false,
-            lastStartedAt = baseTime - 1_800_000L,
+            lastStartedAt = baseTime - 3_600_000L,
         ))
         assertFalse(BookshelfCompletionPolicy.canStartAutomatic(
-            enabled, baseTime, baseTime - 1_800_000L, false,
+            enabled, baseTime, baseTime - 3_600_000L, false,
             lastStartedAt = baseTime + 60_000L,
         ))
     }

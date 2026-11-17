@@ -103,6 +103,14 @@ android {
 
     compileSdk = 37
 
+    androidResources {
+        // 仅保留中英文资源及对应地区变体。
+        localeFilters += listOf(
+            "en", "en-rAU", "en-rCA", "en-rGB", "en-rIN", "en-rXC",
+            "zh", "zh-rCN", "zh-rHK", "zh-rTW",
+        )
+    }
+
     defaultConfig {
         applicationId = "com.reamicro.fix"
         ndk { abiFilters += "arm64-v8a" }
@@ -193,8 +201,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
-
-    implementation("androidx.compose.material3:material3:1.5.0-rc01")
 
     implementation("androidx.activity:activity-compose:1.13.0")
     // The app's event relay uses the same public dispatcher API as the vendored Miuix modules.

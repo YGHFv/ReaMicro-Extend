@@ -5,9 +5,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import com.reamicro.fix.ui.ModuleTheme
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
@@ -35,10 +35,10 @@ internal fun HostThoughtEditorInput(
     val density = LocalDensity.current
     val metrics = EmbeddedHostUi.textMetrics
     val size = if (metrics.bodyLargePx > 0f) with(density) { metrics.bodyLargePx.toSp() } else metrics.bodyLarge.sp
-    val line = if (metrics.bodyLinePx > 0f) with(density) { metrics.bodyLinePx.toSp() } else MaterialTheme.typography.bodyLarge.lineHeight
-    val textStyle = MaterialTheme.typography.bodyLarge.copy(
+    val line = if (metrics.bodyLinePx > 0f) with(density) { metrics.bodyLinePx.toSp() } else ModuleTheme.typography.bodyLarge.lineHeight
+    val textStyle = ModuleTheme.typography.bodyLarge.copy(
         color = palette.text, fontSize = size, lineHeight = line,
-        fontFamily = if (sourceMode) FontFamily.Monospace else MaterialTheme.typography.bodyLarge.fontFamily,
+        fontFamily = if (sourceMode) FontFamily.Monospace else ModuleTheme.typography.bodyLarge.fontFamily,
     )
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -47,7 +47,6 @@ internal fun HostThoughtEditorInput(
         contentColor = palette.text,
         border = BorderStroke(HostThoughtInputStyle.BORDER_DP.dp,
             palette.primary.copy(alpha = HostThoughtInputStyle.BORDER_ALPHA)),
-        tonalElevation = 0.dp,
         shadowElevation = HostThoughtInputStyle.SHADOW_DP.dp,
     ) {
         Column(Modifier.fillMaxWidth().padding((EmbeddedHostMetrics.THOUGHT_INSET * scale).dp)) {

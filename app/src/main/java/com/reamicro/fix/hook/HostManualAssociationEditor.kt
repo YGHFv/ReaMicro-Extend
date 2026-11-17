@@ -21,7 +21,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +59,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.reamicro.fix.ui.ModuleTheme
+import androidx.compose.ui.unit.DpSize
+import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 /** Host-styled metadata draft; the original host candidate screen still confirms the association. */
 internal class HostManualAssociationEditor(
@@ -194,7 +197,6 @@ internal class HostManualAssociationEditor(
         problem = null
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun Content() {
         val config = LocalConfiguration.current
@@ -215,15 +217,16 @@ internal class HostManualAssociationEditor(
             window?.setBackgroundDrawableResource(android.R.color.transparent)
             window?.setDimAmount(0f)
         }
-        MaterialTheme(colorScheme = native.controlsScheme(), typography = typography) {
-            ModalBottomSheet(onDismissRequest = { dismiss() },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                shape = RoundedCornerShape(topStart = (20f * scale).dp, topEnd = (20f * scale).dp),
-                containerColor = Color(native.contentArgb), contentColor = foreground, tonalElevation = 0.dp,
-                contentWindowInsets = { WindowInsets.safeDrawing },
-                dragHandle = { SheetHandle(scale, native) }) {
-                // The sheet needs the full window for its bottom anchor; limit only its content.
+        ModuleTheme(colorScheme = native.controlsScheme(), typography = typography) {
+            WindowBottomSheet(show = true, onDismissRequest = { dismiss() },
+                cornerRadius = (20f * scale).dp,
+                backgroundColor = Color(native.contentArgb),
+                insideMargin = DpSize.Zero, outsideMargin = DpSize.Zero,
+                defaultWindowInsetsPadding = false,
+                dragHandleColor = native.role("SurfaceContainerHighest")) {
+                // 面板保留完整窗口锚点，编辑正文自己避让键盘与安全区域。
                 Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).imePadding()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
                     .padding(horizontal = (20f * scale).dp).padding(bottom = (16f * scale).dp)) {
                     Text("手动编辑", Modifier.semantics { heading() }.padding(bottom = (16f * scale).dp),
                         style = typography.labelLarge, color = foreground)
@@ -292,15 +295,6 @@ internal class HostManualAssociationEditor(
     }
 
     @Composable
-    private fun SheetHandle(scale: Float, native: HostThemeColors.Snapshot) {
-        Box(Modifier.fillMaxWidth().padding(top = (14f * scale).dp, bottom = (16f * scale).dp),
-            contentAlignment = Alignment.Center) {
-            Box(Modifier.size((40f * scale).dp, (4f * scale).dp)
-                .background(native.role("SurfaceContainerHighest"), RoundedCornerShape(scale.dp)))
-        }
-    }
-
-    @Composable
     private fun Field(
         label: String, value: String, hint: String, scale: Float, native: HostThemeColors.Snapshot,
         keyboardType: KeyboardType = KeyboardType.Text, multiline: Boolean = false, error: String? = null,
@@ -308,10 +302,10 @@ internal class HostManualAssociationEditor(
     ) {
         val foreground = native.role("OnBackground")
         val caption = Color(native.captionArgb)
-        val style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        val style = ModuleTheme.typography.bodyLarge.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold)
         val height = ((if (multiline) 72f else 48f) * scale).dp
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((4f * scale).dp)) {
-            Text(label, style = MaterialTheme.typography.labelMedium, color = foreground)
+            Text(label, style = ModuleTheme.typography.labelMedium, color = foreground)
             BasicTextField(value, onChange, enabled = !submitted, singleLine = !multiline,
                 minLines = if (multiline) 3 else 1, maxLines = if (multiline) 3 else 1,
                 textStyle = style.copy(color = foreground), cursorBrush = SolidColor(native.role("Primary")),
@@ -331,7 +325,7 @@ internal class HostManualAssociationEditor(
                     }
                 })
             error?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = native.role("Error"),
+                Text(it, style = ModuleTheme.typography.bodySmall, color = native.role("Error"),
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             }
         }
@@ -344,21 +338,20 @@ internal class HostManualAssociationEditor(
     ) {
         val foreground = native.role("OnBackground")
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((4f * scale).dp)) {
-            Text(label, style = MaterialTheme.typography.labelMedium, color = foreground)
+            Text(label, style = ModuleTheme.typography.labelMedium, color = foreground)
             Row(Modifier.fillMaxWidth().heightIn(min = (48f * scale).dp).border((1.2f * scale).dp,
                 if (error == null) Color(native.borderVariantArgb).copy(alpha = .76f) else native.role("Error"),
                 RoundedCornerShape((12f * scale).dp)).clickable(enabled = !submitted, role = Role.Button,
                     onClickLabel = "选择$label", onClick = onClick).padding(horizontal = (14f * scale).dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text(value, modifier = Modifier.weight(1f), color = foreground,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold))
+                    style = ModuleTheme.typography.bodyLarge.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold))
                 Icon(HostEmbeddedIcons.Expanded, null, Modifier.size(24.dp), tint = foreground)
             }
-            error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = native.role("Error")) }
+            error?.let { Text(it, style = ModuleTheme.typography.bodySmall, color = native.role("Error")) }
         }
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun ChoiceSheet(
         title: String, choices: List<Choice>, selected: String, scale: Float,
@@ -369,15 +362,16 @@ internal class HostManualAssociationEditor(
         val listState = rememberLazyListState(
             initialFirstVisibleItemIndex = choices.indexOfFirst { it.id == selected }.coerceAtLeast(0),
         )
-        ModalBottomSheet(onDismissRequest = { selection = null },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            shape = RoundedCornerShape(topStart = (20f * scale).dp, topEnd = (20f * scale).dp),
-            containerColor = Color(native.contentArgb), contentColor = foreground, tonalElevation = 0.dp,
-            contentWindowInsets = { WindowInsets.safeDrawing },
-            dragHandle = { SheetHandle(scale, native) }) {
+        WindowBottomSheet(show = true, onDismissRequest = { selection = null },
+            cornerRadius = (20f * scale).dp,
+            backgroundColor = Color(native.contentArgb),
+            insideMargin = DpSize.Zero, outsideMargin = DpSize.Zero,
+            defaultWindowInsetsPadding = false,
+            dragHandleColor = native.role("SurfaceContainerHighest")) {
             Column(Modifier.fillMaxWidth().heightIn(max = maxHeight)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
                 .padding(horizontal = (20f * scale).dp).padding(bottom = (16f * scale).dp)) {
-                Text(title, style = MaterialTheme.typography.titleSmall,
+                Text(title, style = ModuleTheme.typography.titleSmall,
                     modifier = Modifier.semantics { heading() }.padding(bottom = (16f * scale).dp))
                 Surface(modifier = Modifier.weight(1f, fill = false),
                     shape = RoundedCornerShape((8f * scale).dp), color = Color(native.brightArgb),
@@ -394,8 +388,8 @@ internal class HostManualAssociationEditor(
                                 horizontalArrangement = Arrangement.spacedBy((16f * scale).dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 RadioButton(selected = active, onClick = null, modifier = Modifier.size(24.dp),
-                                    colors = RadioButtonDefaults.colors(selectedColor = tint, unselectedColor = foreground))
-                                Text(choice.title, style = MaterialTheme.typography.labelLarge, color = tint,
+                                    colors = RadioButtonDefaults.radioButtonColors(selectedColor = tint))
+                                Text(choice.title, style = ModuleTheme.typography.labelLarge, color = tint,
                                     modifier = Modifier.weight(1f))
                             }
                         }
@@ -404,7 +398,7 @@ internal class HostManualAssociationEditor(
                 Spacer(Modifier.height((16f * scale).dp))
                 com.reamicro.fix.ui.DialogActionButton(onClick = { selection = null },
                     modifier = Modifier.fillMaxWidth()) {
-                    Text("取消", style = MaterialTheme.typography.labelLarge)
+                    Text("取消", style = ModuleTheme.typography.labelLarge)
                 }
             }
         }

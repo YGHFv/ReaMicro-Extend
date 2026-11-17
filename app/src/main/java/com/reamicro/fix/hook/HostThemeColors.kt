@@ -4,13 +4,13 @@ package com.reamicro.fix.hook
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import androidx.compose.material3.ColorScheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import com.reamicro.fix.xposed.HookCallback
 import com.reamicro.fix.xposed.HookRuntime
+import top.yukonga.miuix.kmp.theme.Colors
 
 internal object HostThemeColors {
     private val roleNames = listOf(
@@ -37,55 +37,61 @@ internal object HostThemeColors {
         val captionArgb: Int, val dark: Boolean, val source: String,
     ) {
         fun role(name: String) = Color(roles.getValue(name))
-        fun controlsScheme(): ColorScheme = ColorScheme(
+        fun controlsScheme(): Colors = Colors(
             primary = role("Primary"),
             onPrimary = role("OnPrimary"),
-            primaryContainer = role("PrimaryContainer"),
-            onPrimaryContainer = role("OnPrimaryContainer"),
-            inversePrimary = role("InversePrimary"),
-            secondary = role("Secondary"),
-            onSecondary = role("OnSecondary"),
-            secondaryContainer = role("SecondaryContainer"),
-            onSecondaryContainer = role("OnSecondaryContainer"),
-            tertiary = role("Tertiary"),
-            onTertiary = role("OnTertiary"),
-            tertiaryContainer = role("TertiaryContainer"),
-            onTertiaryContainer = role("OnTertiaryContainer"),
-            background = role("Background"),
-            onBackground = role("OnBackground"),
-            surface = role("Surface"),
-            onSurface = role("OnSurface"),
-            surfaceVariant = role("SurfaceVariant"),
-            onSurfaceVariant = role("OnSurfaceVariant"),
-            surfaceTint = role("SurfaceTint"),
-            inverseSurface = role("InverseSurface"),
-            inverseOnSurface = role("InverseOnSurface"),
+            primaryVariant = role("PrimaryContainer"),
+            onPrimaryVariant = role("OnPrimaryContainer"),
             error = role("Error"),
             onError = role("OnError"),
             errorContainer = role("ErrorContainer"),
             onErrorContainer = role("OnErrorContainer"),
-            outline = role("Outline"),
-            outlineVariant = role("OutlineVariant"),
-            scrim = role("Scrim"),
-            surfaceBright = role("SurfaceBright"),
-            surfaceDim = role("SurfaceDim"),
+            disabledPrimary = role("Primary").copy(alpha = .38f),
+            disabledOnPrimary = role("OnPrimary").copy(alpha = .38f),
+            disabledPrimaryButton = role("SurfaceContainerHighest"),
+            disabledOnPrimaryButton = role("OnBackground").copy(alpha = .38f),
+            disabledPrimarySlider = role("Primary").copy(alpha = .38f),
+            primaryContainer = role("PrimaryContainer"),
+            onPrimaryContainer = role("OnPrimaryContainer"),
+            secondary = role("Secondary"),
+            onSecondary = role("OnSecondary"),
+            secondaryVariant = role("SecondaryContainer"),
+            onSecondaryVariant = role("OnSecondaryContainer"),
+            disabledSecondary = role("SurfaceContainerHighest"),
+            disabledOnSecondary = role("OnSurfaceVariant").copy(alpha = .38f),
+            disabledSecondaryVariant = role("SurfaceContainerHighest"),
+            disabledOnSecondaryVariant = role("OnSurfaceVariant").copy(alpha = .38f),
+            secondaryContainer = role("SecondaryContainer"),
+            onSecondaryContainer = role("OnSecondaryContainer"),
+            secondaryContainerVariant = role("SurfaceContainerHigh"),
+            onSecondaryContainerVariant = role("OnSurfaceVariant"),
+            tertiaryContainer = role("TertiaryContainer"),
+            onTertiaryContainer = role("OnTertiaryContainer"),
+            tertiaryContainerVariant = role("SurfaceContainerHigh"),
+            background = role("Background"),
+            onBackground = role("OnBackground"),
+            onBackgroundVariant = Color(captionArgb),
+            surface = role("Surface"),
+            onSurface = role("OnSurface"),
+            surfaceVariant = role("SurfaceVariant"),
+            onSurfaceSecondary = role("OnSurfaceVariant"),
+            onSurfaceVariantSummary = role("OnSurfaceVariant"),
+            onSurfaceVariantActions = role("OnSurfaceVariant"),
+            disabledOnSurface = role("OnSurface").copy(alpha = .38f),
             surfaceContainer = role("SurfaceContainer"),
+            onSurfaceContainer = role("OnSurface"),
+            onSurfaceContainerVariant = role("OnSurfaceVariant"),
             surfaceContainerHigh = role("SurfaceContainerHigh"),
+            onSurfaceContainerHigh = role("OnSurface"),
             surfaceContainerHighest = role("SurfaceContainerHighest"),
-            surfaceContainerLow = role("SurfaceContainerLow"),
-            surfaceContainerLowest = role("SurfaceContainerLowest"),
-            primaryFixed = role("PrimaryFixed"),
-            primaryFixedDim = role("PrimaryFixedDim"),
-            onPrimaryFixed = role("OnPrimaryFixed"),
-            onPrimaryFixedVariant = role("OnPrimaryFixedVariant"),
-            secondaryFixed = role("SecondaryFixed"),
-            secondaryFixedDim = role("SecondaryFixedDim"),
-            onSecondaryFixed = role("OnSecondaryFixed"),
-            onSecondaryFixedVariant = role("OnSecondaryFixedVariant"),
-            tertiaryFixed = role("TertiaryFixed"),
-            tertiaryFixedDim = role("TertiaryFixedDim"),
-            onTertiaryFixed = role("OnTertiaryFixed"),
-            onTertiaryFixedVariant = role("OnTertiaryFixedVariant"),
+            onSurfaceContainerHighest = role("OnSurface"),
+            outline = role("Outline"),
+            dividerLine = role("OutlineVariant"),
+            // 宿主 Scrim 是实色，底部面板沿用原有 32% 遮罩透明度。
+            windowDimming = role("Scrim").copy(alpha = .32f),
+            sliderKeyPoint = role("SecondaryContainer"),
+            sliderKeyPointForeground = role("OnSecondaryContainer"),
+            sliderBackground = role("SecondaryContainer"),
         )
     }
 

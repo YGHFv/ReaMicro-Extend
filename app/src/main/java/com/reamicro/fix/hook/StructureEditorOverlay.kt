@@ -15,10 +15,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.error
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
@@ -38,6 +41,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleCircularProgressIndicator
 
 internal data class StructureEditorModel(
     val identity: Any,
@@ -51,7 +56,6 @@ internal data class StructureEditorModel(
     val singleLine: Boolean = false,
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun StructureEditorOverlay(
     model: StructureEditorModel?,
@@ -134,47 +138,44 @@ internal fun StructureEditorOverlay(
                     .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { }
                     .semantics { paneTitle = shown.title ?: "编辑"; isTraversalGroup = true }
                     .padding(16.dp)) {
-                    Text(shown.title ?: stringResource(R.string.epub_structure_editor_title), Modifier.fillMaxWidth(), style = MaterialTheme.typography.titleSmall, color = palette.text)
+                    Text(shown.title ?: stringResource(R.string.epub_structure_editor_title), Modifier.fillMaxWidth(), style = ModuleTheme.typography.titleSmall, color = palette.text)
                     if (shown.label.isNotBlank()) Text(shown.label, Modifier.padding(top = 4.dp),
-                        style = MaterialTheme.typography.bodySmall, color = palette.caption)
+                        style = ModuleTheme.typography.bodySmall, color = palette.caption)
                     if (!shown.note.isNullOrBlank()) Text(shown.note, Modifier.padding(top = 4.dp),
-                        style = MaterialTheme.typography.bodySmall, color = palette.caption,
+                        style = ModuleTheme.typography.bodySmall, color = palette.caption,
                         maxLines = 3, overflow = TextOverflow.Ellipsis)
                     HorizontalDivider(Modifier.padding(top = 12.dp), thickness = .8.dp, color = palette.borderVariant)
 
                     TextField(
                         value = value,
                         onValueChange = { value = it; onEdited(); onValueChanged(it.text) },
-                        modifier = Modifier.fillMaxWidth().heightIn(max = fieldMaxHeight).focusRequester(requester),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = fieldMaxHeight).focusRequester(requester)
+                            .semantics { error?.let { this.error(it) } },
                         enabled = visible && !busy, singleLine = shown.singleLine,
                         keyboardOptions = KeyboardOptions(imeAction = if (shown.singleLine) ImeAction.Search else ImeAction.Default,
                             autoCorrectEnabled = !shown.sourceMode),
                         keyboardActions = KeyboardActions(onSearch = { submit() }),
-                        textStyle = if (shown.sourceMode) MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace)
-                            else MaterialTheme.typography.bodyLarge,
-                        shape = RoundedCornerShape(StructureEditorMetrics.corner.dp),
-                        isError = error != null,
-                        colors = TextFieldDefaults.colors(
-                            focusedTextColor = palette.text, unfocusedTextColor = palette.text,
-                            disabledTextColor = palette.caption, cursorColor = palette.text,
-                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent, errorContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
-                            disabledIndicatorColor = Color.Transparent, errorIndicatorColor = Color.Transparent,
-                        ),
+                        textStyle = ModuleTheme.typography.bodyLarge.copy(
+                            fontFamily = if (shown.sourceMode) FontFamily.Monospace else ModuleTheme.typography.bodyLarge.fontFamily,
+                            color = if (visible && !busy) palette.text else palette.caption),
+                        cornerRadius = StructureEditorMetrics.corner.dp,
+                        insideMargin = DpSize(16.dp, 16.dp),
+                        cursorBrush = SolidColor(if (error != null) palette.error else palette.text),
+                        colors = TextFieldDefaults.textFieldColors(backgroundColor = Color.Transparent,
+                            labelColor = palette.caption, borderColor = Color.Transparent),
                     )
                     supportingContent()
                     if (!error.isNullOrBlank()) Text(error, Modifier.padding(vertical = 4.dp),
-                        style = MaterialTheme.typography.bodySmall, color = palette.error)
+                        style = ModuleTheme.typography.bodySmall, color = palette.error)
                     HorizontalDivider(Modifier.padding(bottom = 16.dp), thickness = .8.dp, color = palette.borderVariant)
                     com.reamicro.fix.ui.DialogActionButton(
                         onClick = submit,
                         modifier = Modifier.fillMaxWidth().semantics { contentDescription = shown.confirmLabel ?: "保存编辑内容" },
                         enabled = canSave,
                     ) {
-                        if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary, trackColor = Color.Transparent)
-                        else Text(shown.confirmLabel ?: stringResource(R.string.epub_structure_editor_confirm), style = MaterialTheme.typography.labelLarge)
+                        if (busy) ModuleCircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp,
+                            color = ModuleTheme.colorScheme.onPrimary, trackColor = Color.Transparent)
+                        else Text(shown.confirmLabel ?: stringResource(R.string.epub_structure_editor_confirm), style = ModuleTheme.typography.labelLarge)
                     }
                 }
             }

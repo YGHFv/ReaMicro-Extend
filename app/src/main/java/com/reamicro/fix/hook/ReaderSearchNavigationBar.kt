@@ -10,7 +10,7 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,6 +27,9 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.core.InjectedModuleContext
 import java.lang.ref.WeakReference
+import com.reamicro.fix.ui.ModuleTheme
+import com.reamicro.fix.ui.ModuleIconButton
+import com.reamicro.fix.ui.ModuleTextButton
 
 internal class ReaderSearchNavigationBar(val activity: Activity, private val reader: ReaderHook) {
     private val owner = ModuleComposeOwner(activity) { dispose() }
@@ -188,10 +191,8 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
         revision
         val p = HostEmbeddedStyle.Palette(themeSnapshot)
 
-        val iconColors = IconButtonDefaults.iconButtonColors(contentColor = p.text,
-            disabledContentColor = p.text.copy(alpha = .38f))
         val fonts = remember { HostEmbeddedStyle.fonts(activity) }
-        MaterialTheme(colorScheme = p.controlsScheme(), typography = HostEmbeddedStyle.typography(fonts)) {
+        ModuleTheme(colorScheme = p.controlsScheme(), typography = HostEmbeddedStyle.typography(fonts)) {
             Surface(modifier = Modifier.pointerInput(Unit) {
 
                 detectDragGesturesAfterLongPress(
@@ -203,24 +204,24 @@ internal class ReaderSearchNavigationBar(val activity: Activity, private val rea
                     dragBy(amount.x, amount.y)
                 }
             }, shape = RoundedCornerShape(28.dp), color = p.page.copy(alpha = .96f),
-                border = BorderStroke(.5.dp, p.borderVariant), tonalElevation = 0.dp) {
+                border = BorderStroke(.5.dp, p.borderVariant)) {
                 Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(modifier = Modifier.size(48.dp), colors = iconColors, onClick = { reader.openBottomSearchPage() }) {
+                    ModuleIconButton(modifier = Modifier.size(48.dp), contentColor = p.text, onClick = { reader.openBottomSearchPage() }) {
                         Icon(HostEmbeddedIcons.SearchResults, "搜索结果列表", Modifier.size(iconSize), tint = p.text)
                     }
-                    IconButton(modifier = Modifier.size(48.dp), colors = iconColors, enabled = index > 0, onClick = { reader.jumpRelativeSearchResult(-1) }) {
+                    ModuleIconButton(modifier = Modifier.size(48.dp), contentColor = p.text, enabled = index > 0, onClick = { reader.jumpRelativeSearchResult(-1) }) {
                         Icon(HostEmbeddedIcons.Back, "上一处", Modifier.size(iconSize), tint = if (index > 0) p.text else p.text.copy(alpha = .38f))
                     }
-                    TextButton(modifier = Modifier.weight(1f, fill = false), colors = ButtonDefaults.textButtonColors(contentColor = p.primary), onClick = { reader.returnToSearchOrigin() }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    ModuleTextButton(modifier = Modifier.weight(1f, fill = false), contentColor = p.primary, onClick = { reader.returnToSearchOrigin() }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(searchNavigationLabel(confirmed, failed) + "${index + 1}/$count", style = MaterialTheme.typography.bodyMedium, color = p.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("返回原位", style = MaterialTheme.typography.bodySmall, color = p.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(searchNavigationLabel(confirmed, failed) + "${index + 1}/$count", style = ModuleTheme.typography.bodyMedium, color = p.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("返回原位", style = ModuleTheme.typography.bodySmall, color = p.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    IconButton(modifier = Modifier.size(48.dp), colors = iconColors, enabled = index < count - 1, onClick = { reader.jumpRelativeSearchResult(1) }) {
+                    ModuleIconButton(modifier = Modifier.size(48.dp), contentColor = p.text, enabled = index < count - 1, onClick = { reader.jumpRelativeSearchResult(1) }) {
                         Icon(HostEmbeddedIcons.Back, "下一处", Modifier.size(iconSize).rotate(180f), tint = if (index < count - 1) p.text else p.text.copy(alpha = .38f))
                     }
-                    IconButton(modifier = Modifier.size(48.dp), colors = iconColors, onClick = { reader.clearStaleSearchNavigation() }) {
+                    ModuleIconButton(modifier = Modifier.size(48.dp), contentColor = p.text, onClick = { reader.clearStaleSearchNavigation() }) {
                         Icon(HostEmbeddedIcons.SearchNavigationClose, "结束搜索导航", Modifier.size(iconSize), tint = p.text)
                     }
                 }
