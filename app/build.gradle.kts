@@ -150,10 +150,6 @@ android {
     }
     sourceSets["main"].assets.srcDir(generatedBundledSourcesRoot)
     sourceSets["main"].assets.srcDir(generatedRootModuleRoot)
-    packaging {
-        // Upstream excludes META-INF/*; only the duplicated Hutool index needs exclusion here.
-        resources.excludes.add("META-INF/INDEX.LIST")
-    }
 }
 
 tasks.matching { task ->
