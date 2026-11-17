@@ -4,7 +4,7 @@ import com.reamicro.fix.settings.ModuleSettingsSnapshot
 
 /** 同步显示与书架专属动作分开；多选和正在阅读均不注入书架动作。 */
 internal object BookshelfCompletionPolicy {
-    const val AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000L
+    const val AUTO_UPDATE_INTERVAL_MS = 30 * 60 * 1000L
 
     enum class Action { UPDATE, STYLE }
 
@@ -28,8 +28,10 @@ internal object BookshelfCompletionPolicy {
         now: Long,
         lastCompletedAt: Long,
         dexKitScanning: Boolean,
+        lastStartedAt: Long = 0L,
     ): Boolean =
         autoUpdate(settings) &&
             !dexKitScanning &&
-            (lastCompletedAt <= 0L || now - lastCompletedAt >= AUTO_UPDATE_INTERVAL_MS)
+            (maxOf(lastStartedAt, lastCompletedAt) <= 0L ||
+                now - maxOf(lastStartedAt, lastCompletedAt) >= AUTO_UPDATE_INTERVAL_MS)
 }

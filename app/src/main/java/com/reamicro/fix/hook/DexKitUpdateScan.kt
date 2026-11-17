@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Looper
 import com.reamicro.fix.BuildConfig
 import com.reamicro.fix.core.HostAutoScanner
+import com.reamicro.fix.core.HostScanReadiness
 import com.reamicro.fix.core.HostScanUpdateStamp
 import com.reamicro.fix.core.HostScanAnnouncement
 import com.reamicro.fix.core.InjectedModuleContext
@@ -29,21 +30,26 @@ internal object DexKitUpdateScan {
     private var dialog: Dialog? = null
     private var displayedSession: Session? = null
     private var displayedFinished = false
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
     private var attempted: HostScanUpdateStamp? = null
-    private var checking = false
-    private var startupRunning = false
+    private val readiness = HostScanReadiness()
+    private val checking: Boolean get() = readiness.checking
+    private val startupRunning: Boolean get() = readiness.startupRunning
+    @Volatile private var startupInstallation: Installation? = null
+    private var automaticBlocked = true
     private val stateListeners = LinkedHashSet<() -> Unit>()
 
     init {
         com.reamicro.fix.reload.ModuleResources.blockWhile {
-            if (checking || isBusy() || isManualDexKitScanning()) "DexKit 扫描尚未结束" else null
+            if (startupRunning || checking || isBusy()) "DexKit 扫描尚未结束" else null
         }
         com.reamicro.fix.reload.ModuleResources.cleanup {
             dismissDialog()
             resumed.clear()
             session = null
-            stateListeners.clear()
+            startupInstallation = null
+            readiness.observeInstallation(null, "模块运行时已退场")
+            synchronized(stateListeners) { stateListeners.clear() }
         }
     }
 
@@ -57,30 +63,38 @@ internal object DexKitUpdateScan {
         val installation: Installation,
         val reason: String,
         val manual: Boolean = false,
-        var finished: Boolean = false,
+        @Volatile var finished: Boolean = false,
         var report: HostAutoScanner.Report? = null,
         var error: String? = null,
     )
 
     /** 在启动查询开始时检查更新，首个页面恢复前台即可提示，不再重复强制扫描。 */
     fun beginStartup(context: Context) {
-        startupRunning = true
-        checking = true
+        readiness.beginStartup()
+        startupInstallation = null
+        main.post { notifyBusyChanged(isBusy()) }
         worker.execute {
             val result = runCatching {
                 val installation = readInstallation(context)
+                startupInstallation = installation
                 val previous = HostScanUpdateStamp.decode(
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(COMPLETED, null))
                 installation to previous
             }
             main.post {
+                val wasBusy = isBusy()
                 result.onSuccess { (installation, previous) ->
+                    readiness.observeInstallation(installation.stamp)
                     if (installation.stamp.needsScan(previous, attempted)) {
                         session = Session(installation, installation.stamp.changeReason(previous))
                         attempted = installation.stamp
                         showSession()
                     }
-                }.onFailure { HookRuntime.logError("ReaMicro startup update check failed", it) }
+                }.onFailure {
+                    readiness.observeInstallation(null, it.message ?: "启动安装状态检查失败")
+                    HookRuntime.logError("ReaMicro startup update check failed", it)
+                }
+                notifyBusyChanged(wasBusy)
             }
         }
     }
@@ -101,8 +115,7 @@ internal object DexKitUpdateScan {
             }
             main.post {
                 val wasBusy = isBusy()
-                startupRunning = false
-                checking = false
+                readiness.finishStartup(result.getOrNull()?.stamp, result.exceptionOrNull()?.message)
                 session?.takeUnless { it.manual }?.let {
                     it.report = report
                     it.error = result.exceptionOrNull()?.message
@@ -117,12 +130,14 @@ internal object DexKitUpdateScan {
     fun onResume(activity: Activity) {
         val wasBusy = isBusy()
         resumed = WeakReference(activity)
-        if (session != null) {
+        if (startupRunning || checking || isBusy()) {
             showSession()
             return
         }
-        if (checking || isManualDexKitScanning()) return
-        checking = true
+        // 已完成的结果仍需复核安装状态，不能让旧弹窗绕过覆盖安装后的自动任务门禁。
+        showSession()
+        readiness.beginChecking()
+        notifyBusyChanged(wasBusy)
         val context = activity.applicationContext
         worker.execute {
             val result = runCatching {
@@ -139,9 +154,19 @@ internal object DexKitUpdateScan {
                 Triple(installation, previous, pending)
             }
             main.post {
-                checking = false
                 result.onSuccess { (installation, previous, pending) ->
-                    if (pending == installation.stamp && session == null && !isManualDexKitScanning()) {
+                    readiness.finishChecking(installation.stamp)
+                    if (session?.installation?.let { it != installation } == true) {
+                        session = null
+                        dismissDialog()
+                    }
+                    if (session != null) {
+                        showSession()
+                        return@onSuccess
+                    }
+                    if (pending == installation.stamp && session == null && !isManualDexKitScanning() &&
+                        HostScanUpdateStamp.decode(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                            .getString(PENDING, null)) == pending) {
                         val reason = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                             .getString(PENDING_REASON, null) ?: "后台扫描已完成"
                         session = Session(installation, reason, finished = true, report = HostAutoScanner.snapshot())
@@ -150,16 +175,18 @@ internal object DexKitUpdateScan {
                     }
                     if (session != null || isManualDexKitScanning() ||
                         !installation.stamp.needsScan(previous, attempted)) return@onSuccess
+                    readiness.beginScan(installation.stamp)
                     val next = Session(installation, installation.stamp.changeReason(previous))
                     session = next
                     attempted = installation.stamp
                     start(context, next)
-                    notifyBusyChanged(wasBusy)
                     showSession()
                 }.onFailure {
                     // 模块正在覆盖安装或包信息不可读时不写入完成标记，下次恢复前台重试。
+                    readiness.finishChecking(null, it.message ?: "当前安装状态无法确认")
                     HookRuntime.logError("ReaMicro DexKit update check deferred", it)
                 }
+                notifyBusyChanged(wasBusy)
             }
         }
     }
@@ -174,27 +201,29 @@ internal object DexKitUpdateScan {
 
     /** 手动扫描共享生命周期和会话，旋转或切换到后台不会丢失结果。 */
     fun requestManualScan(activity: Activity): Boolean {
-        if (checking || isBusy()) return false
+        if (startupRunning || checking || isBusy()) return false
+        val wasBusy = isBusy()
         resumed = WeakReference(activity)
-        checking = true
+        readiness.beginChecking()
+        notifyBusyChanged(wasBusy)
         val context = activity.applicationContext
         worker.execute {
             val installation = runCatching { readInstallation(context) }
             main.post {
-                checking = false
                 installation.onSuccess { value ->
-                    val previousBusy = isBusy()
+                    readiness.beginScan(value.stamp)
                     val next = Session(value, "手动重新扫描", manual = true)
                     session = next
                     attempted = value.stamp
                     start(context, next)
-                    notifyBusyChanged(previousBusy)
                     showSession()
                 }.onFailure {
+                    readiness.finishChecking(null, it.message ?: "手动扫描安装状态检查失败")
                     HookRuntime.logError("ReaMicro manual DexKit installation check failed", it)
                     android.widget.Toast.makeText(context,
                         "无法读取当前安装状态，请重新打开阅微后扫描", android.widget.Toast.LENGTH_LONG).show()
                 }
+                notifyBusyChanged(wasBusy)
             }
         }
         return true
@@ -202,10 +231,11 @@ internal object DexKitUpdateScan {
 
     fun isManualScanning(): Boolean = session?.let { it.manual && !it.finished } == true
 
-    /** The startup worker validated every group for this installed generation. */
-    fun recordStartupValidation(context: Context) {
+    /** 启动扫描必须验证开始和结束时的同一安装，才能给当前进程放行自动任务。 */
+    private fun recordStartupValidation(context: Context): Installation {
         check(HostAutoScanner.snapshot()?.functionalityComplete == true) { "Startup query generation is incomplete" }
         val installation = readInstallation(context)
+        check(installation == startupInstallation) { "启动扫描期间安装状态已变化，请重新打开阅微" }
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val previous = HostScanUpdateStamp.decode(prefs.getString(COMPLETED, null))
         val pending = HostScanUpdateStamp.decode(prefs.getString(PENDING, null))
@@ -226,19 +256,42 @@ internal object DexKitUpdateScan {
                 showSession()
             }
         }
+        return installation
     }
+
     fun isBusy(): Boolean = session?.finished == false
+
+    /** 后台逐本更新只读取线程可见的快照，完成窗口和待确认结果均不参与验证判定。 */
+    fun automaticUpdateBlockReason(): String? =
+        if (!com.reamicro.fix.reload.ModuleResources.accepting) "模块正在热重载"
+        else readiness.automaticUpdateBlockReason()
+
+    /** 仅在自动批次开始前的后台线程复核包状态；逐本检查不再读取包信息。 */
+    fun validateAutomaticUpdateInstallation(context: Context): String? {
+        automaticUpdateBlockReason()?.let { return it }
+        runCatching { readInstallation(context) }.onSuccess {
+            readiness.observeInstallation(it.stamp)
+        }.onFailure {
+            readiness.observeInstallation(null, it.message ?: "当前安装状态无法确认")
+            HookRuntime.logError("ReaMicro automatic update installation validation failed", it)
+        }
+        val reason = automaticUpdateBlockReason()
+        if (reason != null) main.post { notifyBusyChanged(isBusy()) }
+        return reason
+    }
 
     /** 启动首帧门禁只允许独立扫描窗口先显示，手动扫描不影响宿主页绘制。 */
     fun isStartupDialogShowing(): Boolean = dialog?.isShowing == true && session?.manual == false
 
     fun addStateListener(listener: () -> Unit) {
-        stateListeners += listener
+        synchronized(stateListeners) { stateListeners += listener }
     }
 
     private fun notifyBusyChanged(previous: Boolean) {
-        if (previous == isBusy()) return
-        stateListeners.toList().forEach { listener ->
+        val blocked = automaticUpdateBlockReason() != null
+        if (previous == isBusy() && automaticBlocked == blocked) return
+        automaticBlocked = blocked
+        synchronized(stateListeners) { stateListeners.toList() }.forEach { listener ->
             runCatching(listener).onFailure {
                 HookRuntime.logError("ReaMicro DexKit state listener failed", it)
             }
@@ -274,6 +327,7 @@ internal object DexKitUpdateScan {
                 current.report = report
                 current.error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName }
                 current.finished = true
+                readiness.finishScan(current.installation.stamp, result.isSuccess, current.error)
                 HookRuntime.logAlways("ReaMicro DexKit update scan finished: recorded=${result.isSuccess}")
                 result.exceptionOrNull()?.let {
                     HookRuntime.logError("ReaMicro DexKit update scan incomplete", it)

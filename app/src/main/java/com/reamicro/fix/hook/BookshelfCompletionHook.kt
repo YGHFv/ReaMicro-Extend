@@ -33,6 +33,8 @@ internal class BookshelfCompletionHook(
     private companion object {
         const val RUNTIME_PREFS = "reamicro_fix_shelf_runtime"
         const val KEY_LAST_AUTO_UPDATE_COMPLETED_AT = "last_auto_update_completed_at"
+        const val KEY_LAST_AUTO_UPDATE_STARTED_AT = "last_auto_update_started_at"
+        const val KEY_LAST_BATCH_UPDATE_COMPLETED_AT = "last_batch_update_completed_at"
     }
 
     private val main = com.reamicro.fix.reload.ModuleResources.handler(Looper.getMainLooper())
@@ -43,6 +45,10 @@ internal class BookshelfCompletionHook(
     @Volatile private var showingShelf: Boolean? = null
     private val startupClaimed = AtomicBoolean()
     private val running = AtomicBoolean()
+    private val lastAutomaticSkipReason = AtomicReference<String?>()
+    private val startupUpdate = Runnable {
+        if (!startBatch("startup")) startupClaimed.set(false)
+    }
     private val batchCancellation = AtomicReference<TaskCancellation?>()
     private val ui = HostNativeUi(loader)
     private val symbols get() = requireNotNull(HostHomeBindings.bookshelf) { "书架动态契约尚未就绪" }
@@ -52,6 +58,7 @@ internal class BookshelfCompletionHook(
     private val styleChanging = AtomicBoolean()
     private val dexKitListenerRegistered = AtomicBoolean()
     private val dexKitScanGeneration = AtomicInteger()
+    private val dexKitGateGeneration = AtomicInteger()
     private var headerHook: BookshelfHeaderHook? = null
     private val styleState by lazy { ui.mutableState(1) }
     private val settingsState by lazy { ui.mutableState(settingsProvider()) }
@@ -77,9 +84,13 @@ internal class BookshelfCompletionHook(
         }
         if (dexKitListenerRegistered.compareAndSet(false, true)) {
             DexKitUpdateScan.addStateListener {
+                val blocked = DexKitUpdateScan.automaticUpdateBlockReason() != null
+                // 在通知当下记录扫描，避免主线程处理回调时短暂扫描已经结束。
+                if (DexKitUpdateScan.isBusy()) dexKitScanGeneration.incrementAndGet()
+                if (blocked) dexKitGateGeneration.incrementAndGet()
                 main.post {
-                    if (DexKitUpdateScan.isBusy()) {
-                        dexKitScanGeneration.incrementAndGet()
+                    if (blocked) {
+                        main.removeCallbacks(startupUpdate)
                         startupClaimed.set(false)
                     } else {
                         scheduleStartup()
@@ -177,24 +188,74 @@ internal class BookshelfCompletionHook(
     private fun scheduleStartup() {
         if (!canStartAutomaticUpdate()) return
         if (!startupClaimed.compareAndSet(false, true)) return
-        main.postDelayed({
-            if (!startBatch("startup")) startupClaimed.set(false)
-        }, 2000)
+        if (!main.postDelayed(startupUpdate, 2000)) startupClaimed.set(false)
     }
 
-    private fun canStartAutomaticUpdate(): Boolean {
-        val context = activityProvider()?.applicationContext ?: return false
-        val lastCompletedAt = context.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
-            .getLong(KEY_LAST_AUTO_UPDATE_COMPLETED_AT, 0L)
-        return BookshelfCompletionPolicy.canStartAutomatic(
-            settingsProvider(),
-            System.currentTimeMillis(),
-            lastCompletedAt,
-            DexKitUpdateScan.isBusy() || isManualDexKitScanning(),
+    private fun logAutomaticSkip(reason: String, detail: String = reason) {
+        if (lastAutomaticSkipReason.getAndSet(reason) != reason) {
+            HookRuntime.logAlways("ReaMicro shelf auto update skipped: $detail")
+        }
+    }
+
+    private fun canStartAutomaticUpdate(context: Context? = activityProvider()?.applicationContext): Boolean {
+        if (context == null) return false
+        val settings = settingsProvider()
+        if (!BookshelfCompletionPolicy.autoUpdate(settings)) return false
+        DexKitUpdateScan.automaticUpdateBlockReason()?.let { reason ->
+            logAutomaticSkip(reason)
+            return false
+        }
+        val prefs = context.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
+        val lastStartedAt = prefs.getLong(KEY_LAST_AUTO_UPDATE_STARTED_AT, 0L)
+        // 兼容旧版完成时间；手动完整检查书架后同样推迟下一次自动检查。
+        val lastCompletedAt = maxOf(
+            prefs.getLong(KEY_LAST_AUTO_UPDATE_COMPLETED_AT, 0L),
+            prefs.getLong(KEY_LAST_BATCH_UPDATE_COMPLETED_AT, 0L),
         )
+        val now = System.currentTimeMillis()
+        val allowed = BookshelfCompletionPolicy.canStartAutomatic(
+            settings,
+            now,
+            lastCompletedAt,
+            dexKitScanning = false,
+            lastStartedAt = lastStartedAt,
+        )
+        if (!allowed) {
+            logAutomaticSkip("更新间隔未满半小时",
+                "更新间隔未满半小时 lastStarted=$lastStartedAt lastCompleted=$lastCompletedAt " +
+                    "remainingMs=${BookshelfCompletionPolicy.AUTO_UPDATE_INTERVAL_MS - (now - maxOf(lastStartedAt, lastCompletedAt))}")
+        }
+        return allowed
+    }
+
+    private fun claimAutomaticUpdate(context: Context, scanGeneration: Int): Boolean {
+        DexKitUpdateScan.validateAutomaticUpdateInstallation(context)?.let { reason ->
+            logAutomaticSkip(reason)
+            return false
+        }
+        if (dexKitScanGeneration.get() != scanGeneration) {
+            logAutomaticSkip("扫描状态已变化，跳过本次自动更新")
+            return false
+        }
+        val prefs = context.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
+        return synchronized(prefs) {
+            // 已取得批次运行锁；重新读取时间，避免刚结束的手动更新被旧判断绕过。
+            if (!canStartAutomaticUpdate(context)) return@synchronized false
+            val startedAt = System.currentTimeMillis()
+            if (!prefs.edit().putLong(KEY_LAST_AUTO_UPDATE_STARTED_AT, startedAt).commit()) {
+                logAutomaticSkip("自动更新开始时间保存失败")
+                return@synchronized false
+            }
+            // 开始前同步落盘，失败、取消、进程退出和热重载都保留本次限频。
+            lastAutomaticSkipReason.set(null)
+            HookRuntime.logAlways("ReaMicro shelf auto update started: at=$startedAt " +
+                "intervalMs=${BookshelfCompletionPolicy.AUTO_UPDATE_INTERVAL_MS} scanValidated=true")
+            true
+        }
     }
 
     private fun startBatch(reason: String): Boolean {
+        val gateGeneration = dexKitGateGeneration.get()
         val settings = settingsProvider()
         if (!settings.moduleEnabled || !settings.shelfBatchUpdate) return false
         if (reason == "startup" && !canStartAutomaticUpdate()) return false
@@ -213,10 +274,20 @@ internal class BookshelfCompletionHook(
             var total = 0
             var errorMessage: String? = null
             var completed = false
+            var batchStarted = reason != "startup"
             var notifier: WebDavDriveHook.OnlineCompletionProgressNotifier? = null
             try {
                 cancellation.run {
                 val context = drive.currentContext()?.applicationContext ?: error("书架更新缺少 Context")
+                if (reason == "startup") {
+                    batchStarted = claimAutomaticUpdate(context, scanGeneration)
+                    if (!batchStarted) return@run
+                    DexKitUpdateScan.automaticUpdateBlockReason()?.let { blockReason ->
+                        logAutomaticSkip(blockReason)
+                        batchStarted = false
+                        return@run
+                    }
+                }
                 drive.ensureOnlineCompletionCancelReceiver(context)
                 val notificationId = drive.onlineCompletionNotificationIds.incrementAndGet()
                 drive.onlineCompletionUpdateNotificationIds[taskKey] = notificationId
@@ -271,8 +342,9 @@ internal class BookshelfCompletionHook(
                     // 切换账号或关闭开关后停止下一本，已启动的单书操作沿用原锁与校验。
                     if (!settingsProvider().shelfBatchUpdate || !settingsProvider().moduleEnabled ||
                         symbols.uid(repository) != uid ||
-                        (reason == "startup" && (DexKitUpdateScan.isBusy() ||
-                            isManualDexKitScanning() || dexKitScanGeneration.get() != scanGeneration))) break
+                        (reason == "startup" && (!settingsProvider().shelfAutoUpdate ||
+                            DexKitUpdateScan.automaticUpdateBlockReason() != null ||
+                            dexKitScanGeneration.get() != scanGeneration))) break
                     val finished = CountDownLatch(1)
                     val title = symbols.field("book.title").get(book)?.toString().orEmpty()
                     var outcome = OnlineChapterUpdateOutcome(title, error = "章节更新未完成")
@@ -339,12 +411,16 @@ internal class BookshelfCompletionHook(
                 batchCancellation.compareAndSet(cancellation, null)
                 control.finish()
                 cancellation.cancel()
-                if (reason == "startup" && completed && errorMessage == null) {
+                if (completed && errorMessage == null) {
                     drive.currentContext()?.applicationContext
                         ?.getSharedPreferences(RUNTIME_PREFS, Context.MODE_PRIVATE)
-                        ?.edit()?.putLong(KEY_LAST_AUTO_UPDATE_COMPLETED_AT, System.currentTimeMillis())?.apply()
+                        ?.let { prefs ->
+                            synchronized(prefs) {
+                                prefs.edit().putLong(KEY_LAST_BATCH_UPDATE_COMPLETED_AT, System.currentTimeMillis()).apply()
+                            }
+                        }
                 }
-                runCatching {
+                if (batchStarted) runCatching {
                     val context = drive.currentContext()?.applicationContext ?: error("书架更新通知缺少 Context")
                     BookshelfUpdateNotifications.send(
                         context, report,
@@ -352,7 +428,9 @@ internal class BookshelfCompletionHook(
                     )
                 }.onFailure { HookRuntime.logError("ReaMicro shelf report failed: $it", it) }
                 running.set(false)
-                if (reason == "startup" && dexKitScanGeneration.get() != scanGeneration) {
+                if (reason == "startup" && !batchStarted) startupClaimed.set(false)
+                if (reason == "startup" && (dexKitScanGeneration.get() != scanGeneration ||
+                        (!batchStarted && dexKitGateGeneration.get() != gateGeneration))) {
                     startupClaimed.set(false)
                     main.post { scheduleStartup() }
                 }
