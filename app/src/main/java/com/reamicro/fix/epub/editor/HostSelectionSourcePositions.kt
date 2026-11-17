@@ -36,7 +36,9 @@ internal class HostSelectionSourcePositions(
                 }
                 if (nativeName == "#text" || nativeName == "#cdata") {
                     val expected = if (nativeName == "#cdata") raw.text(original) else unescape(raw.text(original))
-                    require(host.wholeText(native) == expected) { "宿主文本与原文件不一致，无法证明源码位置" }
+                    require(selectionSourceTextMatches(host.wholeText(native), expected)) {
+                        "宿主文本与原文件不一致，无法证明源码位置"
+                    }
                 } else if (nativeName !in SelectionHtmlSourceTree.rawTextTags) {
                     match(original.children.filterNot { it.name == "#comment" }, nativeChildren(native), depth + 1)
                 }
