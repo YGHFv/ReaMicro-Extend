@@ -1,4 +1,5 @@
 <resources>
 
     <color name="module_window_background">#FF000000</color>
+    <color name="splash_foreground">#FFF2F2F2</color>
 </resources>

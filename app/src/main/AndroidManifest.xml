@@ -24,7 +24,6 @@
         android:allowBackup="false"
         android:description="@string/module_description"
         android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/module_name"
         android:theme="@style/AppTheme"
         android:enableOnBackInvokedCallback="false"
@@ -127,7 +126,6 @@
             android:enabled="true"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"
-            android:roundIcon="@mipmap/ic_launcher_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -141,7 +139,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_02"
-            android:roundIcon="@mipmap/ic_launcher_02_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -155,7 +152,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_03"
-            android:roundIcon="@mipmap/ic_launcher_03_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -169,7 +165,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_04"
-            android:roundIcon="@mipmap/ic_launcher_04_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -183,7 +178,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_05"
-            android:roundIcon="@mipmap/ic_launcher_05_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -197,7 +191,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_06"
-            android:roundIcon="@mipmap/ic_launcher_06_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -211,7 +204,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_07"
-            android:roundIcon="@mipmap/ic_launcher_07_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -225,7 +217,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_08"
-            android:roundIcon="@mipmap/ic_launcher_08_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -239,7 +230,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_09"
-            android:roundIcon="@mipmap/ic_launcher_09_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>
@@ -253,7 +243,6 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_10"
-            android:roundIcon="@mipmap/ic_launcher_10_round"
             android:label="@string/module_name"
             android:targetActivity=".ui.ModuleMainActivity">
             <intent-filter>

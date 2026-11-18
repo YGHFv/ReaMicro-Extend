@@ -21,16 +21,16 @@ internal enum class ModuleIconStyle(
 
     @ColorRes val background: Int,
 ) {
-    DEFAULT("default", R.string.icon_classic, ".ui.ModuleLauncherAlias", R.mipmap.ic_launcher_foreground, R.color.ic_launcher_background),
-    MONO("mono", R.string.icon_mono, ".ui.ModuleIconAliasMono", R.mipmap.ic_launcher_02_foreground, R.color.ic_launcher_02_background),
-    GOLD("gold", R.string.icon_gold, ".ui.ModuleIconAliasGold", R.mipmap.ic_launcher_03_foreground, R.color.ic_launcher_03_background),
-    NIGHT("night", R.string.icon_night, ".ui.ModuleIconAliasNight", R.mipmap.ic_launcher_04_foreground, R.color.ic_launcher_04_background),
-    SKY("sky", R.string.icon_bamboo, ".ui.ModuleIconAliasSky", R.mipmap.ic_launcher_05_foreground, R.color.ic_launcher_05_background),
-    DARK("dark", R.string.icon_dark, ".ui.ModuleIconAliasDark", R.mipmap.ic_launcher_06_foreground, R.color.ic_launcher_06_background),
-    ROSE("rose", R.string.icon_rose, ".ui.ModuleIconAliasRose", R.mipmap.ic_launcher_07_foreground, R.color.ic_launcher_07_background),
-    BLUE("blue", R.string.icon_blue, ".ui.ModuleIconAliasBlue", R.mipmap.ic_launcher_08_foreground, R.color.ic_launcher_08_background),
-    VIOLET("violet", R.string.icon_violet, ".ui.ModuleIconAliasViolet", R.mipmap.ic_launcher_09_foreground, R.color.ic_launcher_09_background),
-    SLATE("slate", R.string.icon_slate, ".ui.ModuleIconAliasSlate", R.mipmap.ic_launcher_10_foreground, R.color.ic_launcher_10_background),
+    DEFAULT("default", R.string.icon_classic, ".ui.ModuleLauncherAlias", R.drawable.ic_launcher_foreground, R.color.ic_launcher_background),
+    MONO("mono", R.string.icon_mono, ".ui.ModuleIconAliasMono", R.drawable.ic_launcher_02_foreground, R.color.ic_launcher_02_background),
+    GOLD("gold", R.string.icon_gold, ".ui.ModuleIconAliasGold", R.drawable.ic_launcher_03_foreground, R.color.ic_launcher_03_background),
+    NIGHT("night", R.string.icon_night, ".ui.ModuleIconAliasNight", R.drawable.ic_launcher_04_foreground, R.color.ic_launcher_04_background),
+    SKY("sky", R.string.icon_bamboo, ".ui.ModuleIconAliasSky", R.drawable.ic_launcher_05_foreground, R.color.ic_launcher_05_background),
+    DARK("dark", R.string.icon_dark, ".ui.ModuleIconAliasDark", R.drawable.ic_launcher_06_foreground, R.color.ic_launcher_06_background),
+    ROSE("rose", R.string.icon_rose, ".ui.ModuleIconAliasRose", R.drawable.ic_launcher_07_foreground, R.color.ic_launcher_07_background),
+    BLUE("blue", R.string.icon_blue, ".ui.ModuleIconAliasBlue", R.drawable.ic_launcher_08_foreground, R.color.ic_launcher_08_background),
+    VIOLET("violet", R.string.icon_violet, ".ui.ModuleIconAliasViolet", R.drawable.ic_launcher_09_foreground, R.color.ic_launcher_09_background),
+    SLATE("slate", R.string.icon_slate, ".ui.ModuleIconAliasSlate", R.drawable.ic_launcher_10_foreground, R.color.ic_launcher_10_background),
     ;
 
     companion object {
