@@ -9,7 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
 
 /**
  * Retains coordinates without publishing moving row bounds while its popup is closed.
@@ -27,7 +27,7 @@ internal class GlassPreferenceAnchor {
     }
 
     fun capture() {
-        coordinates?.takeIf { it.isAttached }?.let { bounds = it.boundsInRoot() }
+        coordinates?.takeIf { it.isAttached }?.let { bounds = it.boundsInWindow() }
     }
 
     fun clear() {

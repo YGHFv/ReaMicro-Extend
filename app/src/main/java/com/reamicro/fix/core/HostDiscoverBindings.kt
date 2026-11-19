@@ -13,17 +13,18 @@ internal object HostDiscoverBindings {
     fun initialize(loader: ClassLoader, apk: String, dataDir: String) {
         initializationAttempted = true; current = null; snapshot = null
         runCatching { HostQuerySession.use(loader, apk, dataDir) { session ->
+            val ui = requireNotNull(HostUiBindings.boundDescriptors())
             var contract: Contract? = null
             val result = session.query(KEY,
-                validate = { contract = restore(it, loader) }, find = { bridge -> HostDiscoverQueries.query(bridge, apk,
-                    HostAutoScanner.queriedDescriptors().orEmpty(), requireNotNull(HostUiBindings.boundDescriptors()), requireNotNull(HostGraphicsBindings.boundDescriptors())) })
+                validate = { contract = restore(it, loader, ui) }, find = { bridge -> HostDiscoverQueries.query(bridge, apk,
+                    HostAutoScanner.queriedDescriptors().orEmpty(), ui, requireNotNull(HostGraphicsBindings.boundDescriptors())) })
             current = requireNotNull(contract); snapshot = result.values.toMap()
             HookRuntime.log("ReaMicro $KEY ${if (result.cached) "cached" else "resolved"}")
         } }.onFailure { HookRuntime.logError("ReaMicro $KEY unavailable", it) }
     }
 
     fun rescan(session: HostQuerySession.Session, base: Map<String, String>, ui: Map<String, String>, graphics: Map<String, String>): Map<String, String> =
-        session.query(KEY, true, validate = { restore(it, session.loader) },
+        session.query(KEY, true, validate = { restore(it, session.loader, ui) },
             find = { HostDiscoverQueries.query(it, session.apk, base, ui, graphics) }).values.toMap()
 
     class Contract internal constructor(val values: Map<String, String>, val loader: ClassLoader) {
@@ -38,7 +39,7 @@ internal object HostDiscoverBindings {
         fun call(key: String, vararg args: Any?): Any? = method(key).invoke(null, *args)
     }
 
-    internal fun restore(values: Map<String, String>, loader: ClassLoader): Contract {
+    private fun restore(values: Map<String, String>, loader: ClassLoader, ui: Map<String, String>): Contract {
         val required = linkedSetOf<String>()
         fun keys(kind: String, names: String) { names.split(' ').forEach { required += "$kind:$it" } }
         keys("class", "composer modifier vector function0 callback fontWeight verticalAlignment lazyState")
@@ -62,7 +63,9 @@ internal object HostDiscoverBindings {
         check(s.constructor("verticalAlignment").declaringClass == s.type("verticalAlignment") && s.constructor("verticalAlignment").parameterTypes.toList() == listOf(float))
         check(s.constructor("fontWeight").declaringClass == s.type("fontWeight") && s.constructor("fontWeight").parameterTypes.toList() == listOf(int))
         shape("divider", listOf(modifier, long, composer, int, int), Void.TYPE)
-        shape("weight", listOf(modifier, float), modifier, false)
+        check(values.getValue("method:weight") == ui.getValue("method:weight")) {
+            "Discover and native UI must use the same row weight"
+        }
         val spacer = s.method("spacer")
         check(Modifier.isStatic(spacer.modifiers) && spacer.returnType == Void.TYPE && spacer.parameterCount == 2 && spacer.parameterTypes.toSet() == setOf(composer, modifier))
         val text = s.method("text")

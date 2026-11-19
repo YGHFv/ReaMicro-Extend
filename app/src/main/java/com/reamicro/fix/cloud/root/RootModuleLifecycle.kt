@@ -50,20 +50,18 @@ internal class RootModuleLifecycle(
 
     fun remove(): Boolean {
         val before = checked()
-        if (!before.installed && !before.stagedPresent && before.stagedVersion == 0) {
-            command(RootProcessCleanup.removeState())
-            return false
+        val marked = if (before.installed && !before.pendingRemoval) {
+            command(manager().uninstall(), 30)
+            checked().also { check(!it.installed || it.pendingRemoval) { "管理器未确认卸载，已保留暂存模块" } }
+        } else before
+        val after = if (marked.pendingUpdate || marked.stagedPresent || marked.stagedVersion > 0) {
+            command(RootModuleManager.cancelStaging())
+            checked()
+        } else marked
+        check(!after.pendingUpdate && !after.stagedPresent && after.stagedVersion == 0 &&
+            (!after.installed || after.pendingRemoval)) {
+            "卸载未确认：仍有暂存模块或缺少待移除标记"
         }
-        val provider = manager()
-
-        command(provider.cancelStaging())
-        if (before.installed) command(provider.uninstall(), 30)
-        val after = checked()
-        check(!after.stagedPresent && after.stagedVersion == 0 &&
-            (!after.installed || after.pendingRemoval)) { "卸载未确认：仍有暂存模块或缺少待移除标记" }
-        // A first install has only module.prop/update in the live directory.
-        // Cancelling its staging removes the only uninstall.sh, so no manager
-        // can clean private credentials on reboot. Finish that cleanup now.
         command(RootProcessCleanup.removeState())
         return after.installed
     }

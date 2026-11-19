@@ -13,18 +13,21 @@ internal object HostQuerySession {
     private val lock = Any()
     private val local = ThreadLocal<Session?>()
     private var active: Session? = null
-    private data class Inputs(val loader: ClassLoader, val apk: String, val apks: List<String>)
+    private class Inputs(val loader: ClassLoader, val apk: String, val apks: List<String>) {
+        val identity = HostDexIdentity.Installed(apks.map(::File))
+    }
     private var inputs: Inputs? = null
 
     /** Called with the package lifecycle's ApplicationInfo before opening any query session. */
     fun configure(loader: ClassLoader, apk: String, splitApks: List<String> = emptyList()) = synchronized(lock) {
         val paths = (listOf(apk) + splitApks).map { File(it).absolutePath }.distinct()
         require(apk.isNotBlank() && paths.all { File(it).isFile }) { "Host APK class path unavailable" }
-        val configured = Inputs(loader, paths.first(), paths)
         active?.let { session ->
             require(session.loader === loader && session.apks == paths) { "Cannot replace an active host query class path" }
         }
-        inputs = configured
+        if (inputs?.let { it.loader === loader && it.apks == paths } != true) {
+            inputs = Inputs(loader, paths.first(), paths)
+        }
     }
     internal fun dexIndex(apk: String): HostDexIndex? =
         local.get()?.takeIf { it.apk == apk }?.dexIndex()
@@ -41,6 +44,8 @@ internal object HostQuerySession {
     ) : AutoCloseable {
         private data class Resolved(val values: Map<String, String>, val cached: Boolean)
         private var bridge: DexKitBridge? = null
+        private var bridgeFailure: IllegalStateException? = null
+        private val descriptorMembers = lazy(LazyThreadSafetyMode.NONE) { HostMembers() }
         private var index: HostDexIndex? = null
         private var closed = false
         private val failed = linkedMapOf<String, Throwable>()
@@ -105,7 +110,7 @@ internal object HostQuerySession {
                 }
             }
             try {
-                val native = bridge ?: HostDexKit.requireBridge(apk, dataDir, apks).also { bridge = it }
+                val native = requireBridge()
                 freshQueries = true
                 val values = find(native).toMap()
                 validate(values)
@@ -120,6 +125,27 @@ internal object HostQuerySession {
                 throw error
             }
         }
+        private fun requireBridge(): DexKitBridge {
+            bridgeFailure?.let { throw it }
+            return bridge ?: try {
+                HostDexKit.requireBridge(apk, dataDir, apks).also { bridge = it }
+            } catch (error: IllegalStateException) {
+                bridgeFailure = error
+                throw error
+            }
+        }
+
+        internal fun validateDescriptors(values: Map<String, String>) {
+            val members = descriptorMembers.value
+            values.forEach { (key, descriptor) ->
+                when {
+                    key.startsWith("class:") -> members.describedClass(descriptor, loader)
+                    key.startsWith("method:") -> members.describedMethod(descriptor, loader)
+                    key.startsWith("constructor:") -> members.describedConstructor(descriptor, loader)
+                    key.startsWith("field:") -> members.describedField(descriptor, loader)
+                }
+            }
+        }
         fun cached(key: String): Map<String, String>? {
             check(!closed) { "Query session has been released" }
             return if (key in failed) null else resolved[key]?.values?.toMap() ?: cache?.get(key)
@@ -129,6 +155,8 @@ internal object HostQuerySession {
             closed = true
             try { bridge?.close() } finally {
                 bridge = null
+                bridgeFailure = null
+                if (descriptorMembers.isInitialized()) descriptorMembers.value.retire()
                 index = null
                 resolved.clear()
                 failed.clear()
@@ -146,10 +174,8 @@ internal object HostQuerySession {
             require(it.loader === loader && it.apk == apk && it.dataDir == dataDir) { "Nested query session belongs to another host" }
             return@synchronized block(it)
         }
-        val configured = inputs
-        val apks = if (configured != null && configured.loader === loader && configured.apk == File(apk).absolutePath) {
-            configured.apks
-        } else listOf(apk)
+        val configured = inputs?.takeIf { it.loader === loader && it.apk == File(apk).absolutePath }
+        val apks = configured?.apks ?: listOf(apk)
         val directory = File(dataDir, "files/reamicro_dexkit").apply { mkdirs() }
         // One lock and cache per host app, shared safely by its processes.
         val fileLock = runCatching { RandomAccessFile(File(directory, "queries.lock"), "rw") }.onFailure {
@@ -165,7 +191,8 @@ internal object HostQuerySession {
             val cache = if (held == null) null else {
                 // An uncached process opens the DEX through DexKit directly; hashing it
                 // beforehand serves no purpose when no cache lock is available.
-                val key = identity(apks)
+                val generation = "$SCHEMA:${BuildConfig.BUILD_TIME}:${Build.FINGERPRINT}:${Build.VERSION.SDK_INT}"
+                val key = configured?.identity?.key(generation) ?: HostDexIdentity.key(apks.map(::File), generation)
                 val file = File(directory, "queries.bin")
                 runCatching { HostQueryCache(file, key) }.getOrElse {
                     HookRuntime.logError("ReaMicro query cache unreadable; rebuilding", it)
@@ -184,19 +211,4 @@ internal object HostQuerySession {
         }
     }
 
-    // The host DEX and module build already invalidate every query together.
-    private fun identity(apks: List<String>): String =
-        HostDexIdentity.key(apks.map(::File), "$SCHEMA:${BuildConfig.BUILD_TIME}:${Build.FINGERPRINT}:${Build.VERSION.SDK_INT}")
-
-    fun validateDescriptors(values: Map<String, String>, loader: ClassLoader) {
-        val members = HostMembers()
-        values.forEach { (key, descriptor) ->
-            when {
-                key.startsWith("class:") -> members.describedClass(descriptor, loader)
-                key.startsWith("method:") -> members.describedMethod(descriptor, loader)
-                key.startsWith("constructor:") -> members.describedConstructor(descriptor, loader)
-                key.startsWith("field:") -> members.describedField(descriptor, loader)
-            }
-        }
-    }
 }

@@ -131,6 +131,9 @@ import androidx.compose.ui.unit.sp
 import com.reamicro.fix.BuildConfig
 import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.cloud.local.LocalTask
+import com.reamicro.fix.cloud.local.LocalTaskAccount
+import com.reamicro.fix.cloud.local.LocalTaskCredentials
+import com.reamicro.fix.cloud.local.localTaskAccount
 import com.reamicro.fix.cloud.local.AutoReadTimeLock
 import com.reamicro.fix.cloud.local.LocalTaskRecord
 import com.reamicro.fix.cloud.local.LocalTaskRunner
@@ -162,7 +165,6 @@ import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
-import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.integration.captureBackdrop
@@ -174,12 +176,11 @@ import top.yukonga.miuix.kmp.icon.extended.Recent
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tasks
 import top.yukonga.miuix.kmp.icon.glass.Info
-import top.yukonga.miuix.kmp.icon.glass.Recent
-import top.yukonga.miuix.kmp.icon.glass.Settings
+import top.yukonga.miuix.kmp.icon.glass.ClockFill
+import top.yukonga.miuix.kmp.icon.glass.SettingsOutline
 import top.yukonga.miuix.kmp.icon.glass.Tasks
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.PagerFlingTrackerConnection
 import top.yukonga.miuix.kmp.utils.PagerGestureNestedScrollConnection
 import top.yukonga.miuix.kmp.utils.PagerInterceptionMode
 import top.yukonga.miuix.kmp.utils.PagerNavigationSpringSpec
@@ -208,7 +209,6 @@ class ModuleMainActivity : ComponentActivity() {
 
     private val tab = mutableIntStateOf(TAB_RECORDS)
 
-    private val recordsState = mutableStateOf<List<Pair<String, LocalTaskRecord>>>(emptyList())
     private val recordRows = mutableStateOf<List<ModuleRecordRow>>(emptyList())
     private var recordsSelecting by mutableStateOf(false)
     private var selectedRecordKeys by mutableStateOf<Set<String>>(emptySet())
@@ -221,9 +221,20 @@ class ModuleMainActivity : ComponentActivity() {
     private var taskOrder by mutableStateOf(ModuleTaskOrder())
     private val taskOrderPreferences by lazy { ModuleTaskOrderPreferences(getSharedPreferences(UI_PREFS, MODE_PRIVATE)) }
     private var recordDeletionError by mutableStateOf(false)
-    private val failedCount = mutableIntStateOf(0)
     private val taskRows = mutableStateOf<List<TaskRow>>(emptyList())
-    private val accountCount = mutableIntStateOf(0)
+    private var accounts by mutableStateOf<List<LocalTaskAccount>>(emptyList())
+    private var recordsAccount by mutableStateOf<String?>(null)
+    private var tasksAccount by mutableStateOf<String?>(null)
+    private val accountsUi = ModuleAccountsUi()
+    private fun accountLabel(id: String): String = accounts.firstOrNull { it.id == id }?.label ?: id
+    private fun visibleRecords(): List<ModuleRecordRow> = recordRows.value.filter { recordsAccount == null || it.accountId == recordsAccount }
+    private val importCredentialFile = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importAccounts {
+            contentResolver.openInputStream(uri)?.use { input ->
+                LocalTaskCredentials.read(input)
+            } ?: error(uiText(R.string.accounts_file_unavailable))
+        }
+    }
     private val overviewText = mutableStateOf("")
     private val hideRecentTask = mutableStateOf(false)
 
@@ -309,6 +320,8 @@ class ModuleMainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ModuleLogBuffer.attach(this)
         tab.intValue = savedInstanceState?.getInt(STATE_TAB, TAB_RECORDS) ?: TAB_RECORDS
+        recordsAccount = savedInstanceState?.getString(STATE_RECORD_ACCOUNT)
+        tasksAccount = savedInstanceState?.getString(STATE_TASK_ACCOUNT)
         themeConfig = themePreferences.read()
         taskOrder = taskOrderPreferences.read()
         recordsSelecting = savedInstanceState?.getBoolean(STATE_RECORD_SELECTION, false) ?: false
@@ -386,6 +399,9 @@ class ModuleMainActivity : ComponentActivity() {
         if (incoming?.action != CloudTaskNotifications.ACTION_OPEN_RECORDS) return
         textDialog.value = null
         editorDialog.value = null
+        accountsUi.close()
+        exitRecordSelection()
+        recordsAccount = incoming.getStringExtra(CloudTaskNotifications.EXTRA_ACCOUNT_ID)?.takeIf { it.isNotBlank() }
         tab.intValue = TAB_RECORDS
         recordsNavigationRequest.intValue++
 
@@ -534,8 +550,9 @@ class ModuleMainActivity : ComponentActivity() {
         val logText = context.getString(R.string.log_summary, logs.size,
             path?.let { context.getString(R.string.log_file_path, it) } ?: context.getString(R.string.log_file_unavailable))
         return UiData(
-            recordsList, recordsList.count { (_, record) -> record.result != "success" },
-            rows, accountIds.size, rootEnabled, overview, notificationText, logText,
+            recordsList,
+            rows, accountIds.map { localTaskAccount(it, accounts.getJSONObject(it)) }.sortedBy { it.id.toLongOrNull() },
+            rootEnabled, overview, notificationText, logText,
         )
     }
 
@@ -568,12 +585,16 @@ class ModuleMainActivity : ComponentActivity() {
         // records whose occurrence keys will be renumbered after one duplicate is removed.
         if (!recordsDeleting) {
             recordRows.value = moduleRecordRows(data.records)
-            recordsState.value = data.records
-            failedCount.intValue = data.failedCount
             selectedRecordKeys = selectedRecordKeys.intersect(recordRows.value.mapTo(mutableSetOf()) { it.key })
         }
         taskRows.value = data.tasks
-        accountCount.intValue = data.accountCount
+        accounts = data.accounts
+        val ids = accounts.mapTo(mutableSetOf()) { it.id }
+        if (recordsAccount != null && recordsAccount !in ids) {
+            exitRecordSelection()
+            recordsAccount = null
+        }
+        if (tasksAccount != null && tasksAccount !in ids) tasksAccount = null
         rootEnhancementEnabled.value = data.rootEnabled
         overviewText.value = data.overview
         notificationSummary.value = data.notifications
@@ -584,14 +605,13 @@ class ModuleMainActivity : ComponentActivity() {
     private fun ModuleApp() {
         val tabTitles = TAB_TITLE_RES.map { stringResource(it) }
         val pagerState = rememberPagerState(initialPage = tab.intValue, pageCount = { TAB_TITLE_RES.size })
-        val pagerFlingTracker = remember { PagerFlingTrackerConnection() }
         val scope = rememberCoroutineScope()
         val settings = themeConfig.active
         val pagerMode = settings.pagerMode
         val interceptPager = pagerMode == PagerInterceptionMode.CrossAxis
 
         val overlayOpen = textDialog.value != null || editorDialog.value != null || suPathDialog.value != null ||
-            rootModuleDialog.value || rootConfirmation.value != null || recordsDeleteConfirmation
+            rootModuleDialog.value || rootConfirmation.value != null || recordsDeleteConfirmation || accountsUi.open
         val userScrollEnabled = !overlayOpen && !taskDragging && !taskSortPopupOpen && !recordsDeleting
         BackHandler(enabled = recordsSelecting && !overlayOpen && !recordsDeleting) { exitRecordSelection() }
         LaunchedEffect(pagerState.settledPage) {
@@ -613,8 +633,6 @@ class ModuleMainActivity : ComponentActivity() {
                 delay(280)
                 val remaining = recordRows.value.filterNot { it.key in deleted }
                 recordRows.value = remaining
-                recordsState.value = remaining.map { it.accountId to it.record }
-                failedCount.intValue = remaining.count { it.record.result != "success" }
                 selectedRecordKeys -= deleted
                 deletingRecordKeys = emptySet()
                 exitingRecordKeys = emptySet()
@@ -728,7 +746,6 @@ class ModuleMainActivity : ComponentActivity() {
                     flingBehavior = pagerFling,
                     mode = pagerMode,
                     enabled = userScrollEnabled,
-                    flingTracker = pagerFlingTracker,
                     isExcluded = { position ->
                         interceptPager && pagerState.currentPage == TAB_CONFIG &&
                             launcherIconCoordinates?.takeIf { it.isAttached }
@@ -790,14 +807,14 @@ class ModuleMainActivity : ComponentActivity() {
                                         },
                                         actions = {
                                             if (page == TAB_RECORDS && recordsSelecting) {
-                                                val allSelected = recordRows.value.isNotEmpty() &&
-                                                    selectedRecordKeys.size == recordRows.value.size
+                                                val visible = visibleRecords()
+                                                val allSelected = visible.isNotEmpty() && visible.all { it.key in selectedRecordKeys }
                                                 ModuleToolbarAction(
                                                     icon = ModuleActionIcon.SelectAll,
                                                     description = uiText(if (allSelected) R.string.records_deselect_all else R.string.records_select_all),
                                                     onClick = {
                                                         selectedRecordKeys = if (allSelected) emptySet()
-                                                        else recordRows.value.mapTo(linkedSetOf()) { it.key }
+                                                        else visible.mapTo(linkedSetOf()) { it.key }
                                                     },
                                                     enabled = !recordsDeleting,
                                                 )
@@ -808,8 +825,15 @@ class ModuleMainActivity : ComponentActivity() {
                                                     enabled = selectedRecordKeys.isNotEmpty() && !recordsDeleting,
                                                     tint = MiuixTheme.colorScheme.error,
                                                 )
-                                            } else if (page == TAB_TASKS) {
-                                                ModuleTaskSortAction(
+                                            } else if (page == TAB_RECORDS || page == TAB_TASKS) {
+                                                ModuleToolbarAction(
+                                                    icon = ModuleActionIcon.Accounts,
+                                                    description = uiText(R.string.accounts_filter),
+                                                    onClick = { accountsUi.show(if (page == TAB_RECORDS) AccountDialog.Records else AccountDialog.Tasks) },
+                                                    enabled = !overlayOpen && !taskDragging && !pullRefreshing,
+                                                    canActivate = page == currentPage && !isNavigating && !pagerState.isScrollInProgress,
+                                                )
+                                                if (page == TAB_TASKS) ModuleTaskSortAction(
                                                     mode = taskOrder.mode,
                                                     onSelect = ::setTaskSortMode,
                                                     enabled = taskRows.value.isNotEmpty() &&
@@ -909,7 +933,8 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun RecordsPage(contentPadding: PaddingValues, scrollBehavior: ScrollBehavior, listState: LazyListState) {
-        val list = recordRows.value
+        val list = visibleRecords()
+        LaunchedEffect(recordsAccount) { listState.scrollToItem(0) }
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -918,6 +943,11 @@ class ModuleMainActivity : ComponentActivity() {
             overscrollEffect = null,
             contentPadding = contentPadding,
         ) {
+            item(key = "account-scope", contentType = "summary") {
+                Text(recordsAccount?.let(::accountLabel) ?: uiText(R.string.accounts_all),
+                    modifier = Modifier.padding(horizontal = 28.dp), style = MiuixTheme.textStyles.footnote1,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+            }
             if (list.isEmpty()) {
                 item(key = "empty", contentType = "empty") {
                     SectionCard(
@@ -929,7 +959,7 @@ class ModuleMainActivity : ComponentActivity() {
             }
             item(key = "summary", contentType = "summary") {
                 Text(
-                    uiText(R.string.record_summary, list.size, failedCount.intValue),
+                    uiText(R.string.record_summary, list.size, list.count { it.record.result != "success" }),
                     modifier = Modifier.padding(horizontal = 28.dp),
                     style = MiuixTheme.textStyles.footnote1,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -1010,7 +1040,7 @@ class ModuleMainActivity : ComponentActivity() {
                         onClick = { toggleRecordSelection(row.key) },
                         enabled = !recordsDeleting,
                         modifier = Modifier.semantics {
-                            contentDescription = "${taskTitle(record.taskType)} ${formatDateTime(record.at)}"
+                            contentDescription = "${accountLabel(row.accountId)} ${taskTitle(record.taskType)} ${formatDateTime(record.at)}"
                         },
                     )
                 } else {
@@ -1022,7 +1052,7 @@ class ModuleMainActivity : ComponentActivity() {
                     )
                 }
             },
-            description = record.message.takeIf { it.isNotBlank() },
+            description = accountLabel(row.accountId) + record.message.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty(),
             onClick = {
                 if (!recordsDeleting) {
                     if (recordsSelecting) toggleRecordSelection(row.key)
@@ -1038,7 +1068,15 @@ class ModuleMainActivity : ComponentActivity() {
         contentPadding: PaddingValues, listState: LazyListState,
         canStartDrag: () -> Boolean,
     ) {
-        val sourceRows = taskRows.value
+        val sourceRows = taskRows.value.filter { tasksAccount == null || it.accountId == tasksAccount }
+        LaunchedEffect(tasksAccount) { listState.scrollToItem(0) }
+        val scopedOverview = if (tasksAccount == null) overviewText.value else {
+            val now = System.currentTimeMillis()
+            val next = sourceRows.filter { it.task.enabled && it.effectiveNextRunAt > now }
+                .minOfOrNull { it.effectiveNextRunAt }?.let(::formatTime) ?: uiText(R.string.common_none)
+            uiText(R.string.task_overview_body, accounts.count { it.id == tasksAccount }, sourceRows.count { it.task.enabled }, next) +
+                if (rootEnhancementEnabled.value) "" else "\n" + uiText(R.string.root_manual_only)
+        }
         val rows = remember(sourceRows, taskOrder) {
             val keyed = sourceRows.associateBy { moduleTaskOrderKey(it.accountId, it.task.taskType) }
             orderedModuleTaskKeys(taskOrder, sourceRows.map {
@@ -1075,8 +1113,12 @@ class ModuleMainActivity : ComponentActivity() {
             item(key = "overview", contentType = "overview") {
                 SectionCard(
                     title = uiText(R.string.task_overview_title),
-                    description = overviewText.value,
-                )
+                    description = (tasksAccount?.let(::accountLabel) ?: uiText(R.string.accounts_all)) + "\n" + scopedOverview,
+                ) {
+                    CapsuleButton(moduleActionIcon(ModuleActionIcon.Accounts), uiText(R.string.accounts_manage)) {
+                        accountsUi.show(AccountDialog.Manage)
+                    }
+                }
             }
             if (rows.isEmpty()) {
                 item(key = "empty", contentType = "empty") {
@@ -1224,7 +1266,6 @@ class ModuleMainActivity : ComponentActivity() {
                         items = listOf(
                             stringResource(R.string.pager_gesture_default),
                             stringResource(R.string.pager_gesture_cross),
-                            stringResource(R.string.pager_gesture_ios),
                         ),
                         selectedIndex = themeConfig.active.pagerMode.ordinal,
                         onSelectedIndexChange = {
@@ -1296,7 +1337,7 @@ class ModuleMainActivity : ComponentActivity() {
             showActionDivider = true,
             titleColor = if (row.task.enabled) MiuixTheme.colorScheme.onSurface
             else MiuixTheme.colorScheme.onSurfaceVariantActions,
-            description = row.subtitle,
+            description = accountLabel(row.accountId) + "\n" + row.subtitle,
             trailing = {
                 Switch(
                     checked = row.task.enabled,
@@ -1309,6 +1350,58 @@ class ModuleMainActivity : ComponentActivity() {
             Spacer(Modifier.weight(1f))
             CapsuleButton(moduleActionIcon(ModuleActionIcon.Settings), uiText(R.string.action_configure)) { openTaskEditor(row.accountId, row.task, row.spec) }
         }
+    }
+
+    private fun importAccounts(read: () -> String) {
+        if (accountsUi.busy) return
+        accountsUi.show(AccountDialog.Import)
+        accountsUi.busy = true
+        runBg(work = {
+            runCatching {
+                val imported = LocalTaskCredentials.parse(read())
+                LocalTaskStore { applicationContext }.importCredentials(imported)
+                imported.size
+            }
+        }, then = { result ->
+            accountsUi.busy = false
+            result.onSuccess { count ->
+                accountsUi.credential = ""
+                accountsUi.show(AccountDialog.Manage)
+                toast(uiText(R.string.accounts_imported, count))
+                refresh()
+            }.onFailure { accountsUi.error = it.message ?: uiText(R.string.accounts_import_failed) }
+        })
+    }
+
+    private fun saveAccountRemark(account: LocalTaskAccount, remark: String) {
+        if (accountsUi.busy) return
+        accountsUi.busy = true
+        runBg(work = { runCatching { LocalTaskStore { applicationContext }.setAccountRemark(account.id, remark) } }, then = { result ->
+            accountsUi.busy = false
+            result.onSuccess { accountsUi.show(AccountDialog.Manage); refresh() }
+                .onFailure { accountsUi.error = it.message.orEmpty() }
+        })
+    }
+
+    private fun deleteAccount(account: LocalTaskAccount) {
+        if (accountsUi.busy) return
+        accountsUi.busy = true
+        runBg(work = { runCatching { LocalTaskRunner.deleteAccount(applicationContext, account.id) } }, then = { result ->
+            accountsUi.busy = false
+            result.onSuccess { syncError ->
+                accountsUi.editing = null
+                accountsUi.show(AccountDialog.Manage)
+                if (recordsAccount == account.id) { exitRecordSelection(); recordsAccount = null }
+                if (tasksAccount == account.id) tasksAccount = null
+                accounts = accounts.filterNot { it.id == account.id }
+                taskRows.value = taskRows.value.filterNot { it.accountId == account.id }
+                recordRows.value = recordRows.value.filterNot { it.accountId == account.id }
+                if (editorDialog.value?.accountId == account.id) editorDialog.value = null
+                toast(uiText(R.string.accounts_deleted, account.label))
+                if (syncError != null) accountsUi.error = uiText(R.string.accounts_delete_sync_failed, syncError)
+                refresh()
+            }.onFailure { accountsUi.error = it.message ?: uiText(R.string.accounts_delete_failed) }
+        })
     }
 
     private fun inspectRoot() {
@@ -1338,16 +1431,15 @@ class ModuleMainActivity : ComponentActivity() {
                     check(RootTaskBridge.isEnabled(applicationContext)) {
                         applicationContext.getString(R.string.root_sync_disabled)
                     }
-                    RootTaskBridge.synchronize(applicationContext)
-                    System.currentTimeMillis()
+                    RootTaskBridge.synchronize(applicationContext) to System.currentTimeMillis()
                 }
             },
             then = { result ->
                 rootSyncing.value = false
                 rootBusy.value = false
-                result.onSuccess {
-                    rootSyncedAt.value = it
-                    toast(uiText(R.string.root_sync_success))
+                result.onSuccess { (active, at) ->
+                    rootSyncedAt.value = at
+                    toast(uiText(if (active) R.string.root_sync_success else R.string.root_sync_stopped))
                 }.onFailure {
                     rootSyncError.value = it.message ?: it.javaClass.simpleName
                     toast(uiText(R.string.root_sync_failed, rootSyncError.value))
@@ -1465,7 +1557,7 @@ class ModuleMainActivity : ComponentActivity() {
             runCatching {
                 val store = LocalTaskStore { applicationContext }
                 val token = if (enabled) store.token(accountId).also {
-                    check(it.isNotBlank()) { "登录凭据不可用，请在阅微重新登录并同步" }
+                    check(it.isNotBlank()) { "登录凭据不可用，请从账号管理重新导入该账号凭证" }
                 } else ""
                 check(store.get(accountId, task.taskType) != null) { "任务不存在，请刷新后重试" }
                 store.setEnabled(accountId, task.taskType, enabled, token)
@@ -1591,6 +1683,8 @@ class ModuleMainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt(STATE_TAB, tab.intValue)
+        outState.putString(STATE_RECORD_ACCOUNT, recordsAccount)
+        outState.putString(STATE_TASK_ACCOUNT, tasksAccount)
         outState.putBoolean(STATE_RECORD_SELECTION, recordsSelecting && !recordsDeleting)
         outState.putStringArrayList(STATE_SELECTED_RECORDS, ArrayList(if (recordsDeleting) emptySet() else selectedRecordKeys))
         super.onSaveInstanceState(outState)
@@ -1659,6 +1753,7 @@ class ModuleMainActivity : ComponentActivity() {
     private fun dismissTopOverlay() {
         val editor = editorDialog.value
         when {
+            accountsUi.open -> accountsUi.close()
             recordsDeleteConfirmation -> if (!recordsDeleting) recordsDeleteConfirmation = false
             rootConfirmation.value != null -> rootConfirmation.value = null
             rootModuleDialog.value -> rootModuleDialog.value = false
@@ -1877,7 +1972,7 @@ class ModuleMainActivity : ComponentActivity() {
             runCatching {
                 val store = LocalTaskStore { applicationContext }
                 val token = if (updated.enabled) store.token(editor.accountId).also {
-                    check(it.isNotBlank()) { "登录凭据不可用，请在阅微重新登录并同步" }
+                    check(it.isNotBlank()) { "登录凭据不可用，请从账号管理重新导入该账号凭证" }
                 } else ""
                 store.saveEditedTask(editor.accountId, updated, token, editor.task)
                 readTaskRow(store, editor.accountId, updated.taskType)
@@ -1896,7 +1991,7 @@ class ModuleMainActivity : ComponentActivity() {
     private fun showRecordDetail(accountId: String, record: LocalTaskRecord) {
         textDialog.value = TextDialogUi(
             title = { uiText(R.string.record_detail_title, taskTitle(record.taskType)) },
-            content = { moduleRecordDetailText(uiContext, accountId, record, taskTitle(record.taskType), resultLabel(record.result)) },
+            content = { accountLabel(accountId) + "\n\n" + moduleRecordDetailText(uiContext, accountId, record, taskTitle(record.taskType), resultLabel(record.result)) },
         )
     }
 
@@ -2094,6 +2189,19 @@ class ModuleMainActivity : ComponentActivity() {
 
     @Composable
     private fun Dialogs() {
+        ModuleTaskAccountDialogs(
+            ui = accountsUi, accounts = accounts,
+            selected = if (accountsUi.dialog == AccountDialog.Records) recordsAccount else tasksAccount,
+            onSelect = { id ->
+                if (accountsUi.dialog == AccountDialog.Records) {
+                    exitRecordSelection(); recordsAccount = id
+                } else tasksAccount = id
+            },
+            onImport = { raw -> importAccounts { raw } },
+            onChooseFile = { importCredentialFile.launch(arrayOf("*/*")) },
+            onSaveRemark = ::saveAccountRemark,
+            onDelete = ::deleteAccount,
+        )
         if (recordsDeleteConfirmation) {
             AppWindowDialog(
                 show = true,
@@ -2137,7 +2245,7 @@ class ModuleMainActivity : ComponentActivity() {
                     }
                 },
             ) {
-                Card(insideMargin = PaddingValues(0.dp)) {
+                Column {
                     BasicComponent(title = uiText(R.string.root_confirmation_title),
                         summary = uiText(when (action) {
                             RootEnhancementAction.ENABLE -> R.string.root_confirm_enable
@@ -2211,6 +2319,8 @@ class ModuleMainActivity : ComponentActivity() {
             primaryEnabled = !editor.saving,
             onPrimary = { saveTaskEdits(editor) },
         ) {
+            Text(accountLabel(editor.accountId), style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary, modifier = Modifier.padding(bottom = 12.dp))
             val spec = editor.spec
             if (spec?.rewardTriggered != true && spec?.merchant != true) {
                 TaskTimePicker(
@@ -2324,10 +2434,9 @@ class ModuleMainActivity : ComponentActivity() {
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
         Spacer(Modifier.height(6.dp))
-        TextButton(
-            text = modulePawnSelectionSummary(uiContext, options, picked),
-            onClick = { editor.multiOpenLabel = FIELD_PAWN },
-        )
+        CapsuleTextButton(label = modulePawnSelectionSummary(uiContext, options, picked)) {
+            editor.multiOpenLabel = FIELD_PAWN
+        }
         Spacer(Modifier.height(12.dp))
     }
 
@@ -2797,9 +2906,8 @@ class ModuleMainActivity : ComponentActivity() {
 
     private data class UiData(
         val records: List<Pair<String, LocalTaskRecord>>,
-        val failedCount: Int,
         val tasks: List<TaskRow>,
-        val accountCount: Int,
+        val accounts: List<LocalTaskAccount>,
         val rootEnabled: Boolean,
         val overview: String,
         val notifications: String,
@@ -2838,6 +2946,8 @@ class ModuleMainActivity : ComponentActivity() {
     private companion object {
         const val LOG_TAG = "ReaMicroMain"
         const val STATE_TAB = "selectedTab"
+        const val STATE_RECORD_ACCOUNT = "recordsAccount"
+        const val STATE_TASK_ACCOUNT = "tasksAccount"
         const val STATE_RECORD_SELECTION = "recordSelectionActive"
         const val STATE_SELECTED_RECORDS = "selectedRecordKeys"
         const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
@@ -2864,7 +2974,7 @@ class ModuleMainActivity : ComponentActivity() {
         val TAB_TITLE_RES = listOf(R.string.tab_records, R.string.tab_tasks, R.string.tab_settings, R.string.tab_about)
         val TAB_ICONS = listOf(MiuixIcons.Recent, MiuixIcons.Tasks, MiuixIcons.Settings, MiuixIcons.Info)
         val TAB_GLASS_ICONS = listOf(
-            MiuixIcons.Glass.Recent, MiuixIcons.Glass.Tasks, MiuixIcons.Glass.Settings, MiuixIcons.Glass.Info,
+            MiuixIcons.Glass.ClockFill, MiuixIcons.Glass.Tasks, MiuixIcons.Glass.SettingsOutline, MiuixIcons.Glass.Info,
         )
 
         val LIGHT_WINDOW_BG = lightColorScheme().surface.toArgb()

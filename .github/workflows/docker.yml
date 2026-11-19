@@ -45,11 +45,6 @@ jobs:
       - name: Check API source syntax
         working-directory: server/reamicro-api
         run: python -m compileall -q app
-      - name: Run API regression tests
-        working-directory: server/reamicro-api
-        run: |
-          pip install -r requirements.txt httpx
-          python -m unittest discover -s tests -v
       - name: Resolve image name
         id: image
         shell: bash

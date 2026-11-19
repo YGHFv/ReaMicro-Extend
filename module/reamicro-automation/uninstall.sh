@@ -28,5 +28,5 @@ reamicro_cleanup_legacy || stop_result=1
 reamicro_release_wake_lock
 
 [ "$stop_result" -eq 0 ] || exit "$stop_result"
-rm -rf "$STATE" || exit 1
+rm -rf "$STATE" && [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || exit 1
 echo "ReaMicro: scheduler, legacy wake script and private credentials removed"

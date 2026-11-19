@@ -1,5 +1,11 @@
 package com.reamicro.fix.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,7 +71,11 @@ internal fun TaskTimePicker(
         },
         onClick = { expanded = !expanded },
     )
-    if (expanded) {
+    AnimatedVisibility(
+        visible = expanded,
+        enter = expandVertically(tween(220), expandFrom = Alignment.Top) + fadeIn(tween(160)),
+        exit = shrinkVertically(tween(180), shrinkTowards = Alignment.Top) + fadeOut(tween(120)),
+    ) {
 
         val basePickerTextStyle = MiuixTheme.textStyles.main
         val pickerTextStyle = if (basePickerTextStyle.fontWeight == null) {

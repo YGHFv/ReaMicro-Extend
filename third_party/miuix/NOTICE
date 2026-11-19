@@ -1,7 +1,13 @@
 Miuix sources: https://github.com/compose-miuix-ui/miuix
-Upstream commit: ca674992c9645395cdb0d5109d66504ff53d018c
-Integration version: 0.9.4-ca67499-SNAPSHOT
+Upstream tag: v0.9.5-beta01
+Upstream commit: 6d2554a850b8960e2616c968263ff64beb5ffb03
+Integration version: 0.9.5-beta01
 
-The selected common and Android sources retain their upstream contents.
+Only the Android dependency closure used by this application is included.
+Shared commonMain sources are required by Android; other platform source sets are not included.
+Unused components and icon weights are omitted. The icon files and MiuixIcons.kt
+are derived subsets containing the default aliases and Regular glyphs only;
+their retained path data is unchanged. Other retained upstream Kotlin sources are unchanged.
+Android baseline profiles omit rules whose classes are absent from the application.
 Android build adapters and integration wrappers are provided by ReaMicro Extend.
 The upstream source is licensed under Apache License 2.0; see upstream/LICENSE.

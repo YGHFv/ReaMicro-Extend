@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlurEffect
@@ -29,9 +30,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -79,13 +81,13 @@ class GlassPopupAnchor {
     internal val surfaceVisibility: Float get() = surfaceProgress?.value ?: 1f
     internal var surfaceFloating: Boolean by mutableStateOf(false)
 
-    /** The control's outer bounds, in the root's coordinate space. */
+    /** The control's outer bounds in window coordinates. */
     internal var containerBounds: Rect by mutableStateOf(Rect.Zero)
 
-    /** Control content bounds in root coordinates. */
+    /** Control content bounds in window coordinates. */
     internal var contentBounds: Rect by mutableStateOf(Rect.Zero)
 
-    /** The dropdown's value and chevron bounds, in the root's coordinate space. */
+    /** The dropdown's value and chevron bounds in window coordinates. */
     internal var dropdownValueBounds: Rect? by mutableStateOf(null)
 
     /** Control corner radius used at the collapsed endpoint. */
@@ -97,8 +99,8 @@ class GlassPopupAnchor {
     /** Hides the whole transform anchor, or only the dropdown value, while the popup is open. */
     internal var contentHidden: Boolean by mutableStateOf(false)
 
-    /** Dropdown value opacity. */
-    internal var valueAlpha: Float by mutableFloatStateOf(1f)
+    /** Dropdown value opacity; a [State] so the fade only invalidates draw. */
+    internal var valueAlphaState: State<Float>? by mutableStateOf(null)
 
     /** Value opacity during predictive-back collapse. */
     internal val dropdownValueAlpha: Float
@@ -128,8 +130,9 @@ fun rememberGlassPopupAnchor(): GlassPopupAnchor {
         targetValue = if (anchor.contentHidden) 0f else 1f,
         animationSpec = GlassMotion.default(),
         label = "glassPopupAnchorValue",
-    ).value
-    SideEffect { anchor.valueAlpha = alpha }
+    )
+    // Publishing the State itself keeps the caller out of the fade's recomposition scope.
+    SideEffect { anchor.valueAlphaState = alpha }
     return anchor
 }
 
@@ -151,7 +154,7 @@ fun Modifier.glassPopupAnchor(
 ): Modifier = this
     .then(GlassPopupAnchorElement(anchor))
     .onGloballyPositioned {
-        anchor.containerBounds = it.boundsInRoot()
+        anchor.containerBounds = it.boundsInWindow()
         anchor.cornerRadius = cornerRadius
         anchor.floating = floating
     }
@@ -166,7 +169,7 @@ fun Modifier.glassPopupAnchor(
  * @param anchor Popup anchor.
  */
 @Stable
-fun Modifier.glassPopupAnchorContent(anchor: GlassPopupAnchor): Modifier = this.onGloballyPositioned { anchor.contentBounds = it.boundsInRoot() }
+fun Modifier.glassPopupAnchorContent(anchor: GlassPopupAnchor): Modifier = this.onGloballyPositioned { anchor.contentBounds = it.boundsInWindow() }
 
 /**
  * Reports row bounds for a [GlassDropdownPopup] without hiding the row.
@@ -174,7 +177,7 @@ fun Modifier.glassPopupAnchorContent(anchor: GlassPopupAnchor): Modifier = this.
  * @param anchor The anchor to report to.
  */
 @Stable
-fun Modifier.glassPopupAnchorRow(anchor: GlassPopupAnchor): Modifier = this.onGloballyPositioned { anchor.containerBounds = it.boundsInRoot() }
+fun Modifier.glassPopupAnchorRow(anchor: GlassPopupAnchor): Modifier = this.onGloballyPositioned { anchor.containerBounds = it.boundsInWindow() }
 
 /**
  * Reports a row's value bounds for dropdown positioning and fades it out while its choices are open.
@@ -186,9 +189,9 @@ fun Modifier.glassPopupAnchorRow(anchor: GlassPopupAnchor): Modifier = this.onGl
  */
 @Stable
 fun Modifier.glassPopupAnchorValue(anchor: GlassPopupAnchor): Modifier = this
-    .onGloballyPositioned { anchor.dropdownValueBounds = it.boundsInRoot() }
+    .onGloballyPositioned { anchor.dropdownValueBounds = it.boundsInWindow() }
     .graphicsLayer {
-        alpha = maxOf(anchor.valueAlpha, anchor.dropdownValueAlpha)
+        alpha = maxOf(anchor.valueAlphaState?.value ?: 1f, anchor.dropdownValueAlpha)
     }
 
 /**
@@ -200,7 +203,8 @@ fun Modifier.glassPopupAnchorValue(anchor: GlassPopupAnchor): Modifier = this
  *
  * @param show Whether the menu is open.
  * @param onDismissRequest Called when an outside tap or Back requests dismissal.
- * @param anchor Control used as the collapsed endpoint.
+ * @param anchor Control used as the collapsed endpoint; [glassPopupAnchor] reports its bounds in
+ *   window coordinates.
  * @param backdrop Scene sampled by the expanded menu, including bars but excluding the popup.
  *   `null` falls back to the button's backdrop. The collapsed endpoint uses the button's surface.
  * @param anchorContent Copy of the control, or the portion identified by [glassPopupAnchorContent].
@@ -325,6 +329,7 @@ fun BoxScope.GlassTransformPopup(
         iconMaterial = iconProgress(),
     )
     val travel = remember { TransformTravel() }
+    val hostOrigin = remember { mutableStateOf(Offset.Zero) }
 
     GlassPopupSurface(
         onDismissRequest = onDismissRequest,
@@ -348,11 +353,11 @@ fun BoxScope.GlassTransformPopup(
                 drawRect(maskColor.copy(alpha = maskColor.alpha * fraction))
             }
         },
-        frame = { end, page ->
+        frame = { end, windowBounds ->
             val frame = transformFrame(
                 anchor = startRect,
                 end = end,
-                page = page,
+                window = windowBounds,
                 margin = sizing.safeMargin.toPx(),
                 gap = gap.toPx(),
                 sizeFraction = geometryProgress(),
@@ -365,7 +370,7 @@ fun BoxScope.GlassTransformPopup(
                 startRect.translate(0f, gap.toPx()),
                 end,
                 sizing.safeMargin.toPx(),
-                page,
+                windowBounds,
                 layoutDirection,
             )
             travel.endCenterX = settled.rect.center.x
@@ -419,6 +424,8 @@ fun BoxScope.GlassTransformPopup(
     if (renderAnchorContent) {
         Box(
             modifier = Modifier
+                // Outside the placement modifier so it reports the host origin, not the copy offset.
+                .onGloballyPositioned { hostOrigin.value = it.positionInWindow() }
                 .layout { measurable, constraints ->
                     val placeable = measurable.measure(
                         Constraints.fixed(
@@ -427,7 +434,10 @@ fun BoxScope.GlassTransformPopup(
                         ),
                     )
                     layout(constraints.maxWidth, constraints.maxHeight) {
-                        placeable.place(iconRect.left.roundToInt(), iconRect.top.roundToInt())
+                        placeable.place(
+                            (iconRect.left - hostOrigin.value.x).roundToInt(),
+                            (iconRect.top - hostOrigin.value.y).roundToInt(),
+                        )
                     }
                 }
                 .graphicsLayer {
@@ -470,7 +480,7 @@ internal fun transformPanelAlpha(
 private fun transformFrame(
     anchor: Rect,
     end: Size,
-    page: Size,
+    window: Rect,
     margin: Float,
     gap: Float,
     sizeFraction: Float,
@@ -479,7 +489,7 @@ private fun transformFrame(
     endRadius: Dp,
     layoutDirection: androidx.compose.ui.unit.LayoutDirection,
 ): GlassPopupFrame {
-    val placement = placeGlassPopup(anchor.translate(0f, gap), end, margin, page, layoutDirection)
+    val placement = placeGlassPopup(anchor.translate(0f, gap), end, margin, window, layoutDirection)
     val width = anchor.width + (end.width - anchor.width) * sizeFraction
     val height = anchor.height + (end.height - anchor.height) * sizeFraction
     val centerX = anchor.center.x + (placement.rect.center.x - anchor.center.x) * positionFraction

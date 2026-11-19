@@ -37,6 +37,7 @@ internal object RootProcessCleanup {
             [ -r "/proc/${'$'}1/cmdline" ] && [ -r "/proc/${'$'}1/status" ] || return 1
             IFS= read -r comm <"/proc/${'$'}1/comm" 2>/dev/null || return 1
             case "${'$'}comm" in sh|ash|bash|busybox|timeout|app_process|app_process32|app_process64|wake-timer) ;; *) return 1 ;; esac
+            grep -Eq '^Uid:[[:space:]]+0([[:space:]]|$)' "/proc/${'$'}1/status" || return 1
             grep -Eq '^State:[[:space:]]+[XZ]' "/proc/${'$'}1/status" && return 1
             args=${'$'}(tr '\000' '\n' <"/proc/${'$'}1/cmdline" 2>/dev/null)
             printf '%s\n' "${'$'}args" | grep -Fxq "${'$'}script" && return 0
@@ -83,10 +84,12 @@ internal object RootProcessCleanup {
         fi
         ${if (includeRuntime) """
         { printf 'reamicro_tasks\n' >/sys/power/wake_unlock; } 2>/dev/null || :
-        rm -f "${'$'}state/daemon.pid" "${'$'}state/heartbeat" "${'$'}state/runner.pid" \
-            "${'$'}state/wake.pid" "${'$'}state/wake-at" "${'$'}state/wake-mode" "${'$'}state/wake-error"
         """ else ""}
-        ${if (clearState) """rm -rf "${'$'}state" && [ ! -e "${'$'}state" ] || exit 1""" else ""}
+        ${if (clearState) """rm -rf "${'$'}state" && [ ! -e "${'$'}state" ] && [ ! -L "${'$'}state" ] || exit 1"""
+        else if (includeRuntime) """
+        rm -f "${'$'}state/daemon.pid" "${'$'}state/heartbeat" "${'$'}state/runner.pid" "${'$'}state/daemon.log.tmp" \
+            "${'$'}state/wake.pid" "${'$'}state/wake-at" "${'$'}state/wake-mode" "${'$'}state/wake-error" || exit 1
+        """ else ""}
         exit 0
     """.trimIndent()
 }

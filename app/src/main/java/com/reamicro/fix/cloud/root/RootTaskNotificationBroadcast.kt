@@ -8,6 +8,12 @@ internal data class RootTaskNotificationBroadcast(
     val text: String,
     val result: String,
     val items: String,
+    val accountId: String = "",
+    val accountLabel: String = "",
+    val taskType: String = "",
+    val phase: String = "",
+    val eventAt: Long = 0L,
+    val accountGeneration: String = "",
 )
 
 /** 组件名必须是「包名/类名」，裸类名会让 am 直接抛 Bad component name。 */
@@ -26,7 +32,8 @@ internal fun rootTaskNotificationBroadcastArgs(message: RootTaskNotificationBroa
     amArgs(
         listOf("/system/bin/am", "broadcast", "--user", "0", "--include-stopped-packages", "-f", "0x01000000"),
         message,
-        moduleComponent(CloudTaskNotifications.RECEIVER_CLASS),
+        moduleComponent(if (message.phase.isBlank()) CloudTaskNotifications.RECEIVER_CLASS
+            else "com.reamicro.fix.notification.RootTaskProgressReceiver"),
     )
 
 /**
@@ -37,7 +44,8 @@ internal fun rootTaskNotificationActivityArgs(message: RootTaskNotificationBroad
     amArgs(
         listOf("/system/bin/am", "start-activity", "--user", "0", "-f", "0x10000000"),
         message,
-        moduleComponent(CloudTaskNotifications.ACTIVITY_CLASS),
+        moduleComponent(if (message.phase.isBlank()) CloudTaskNotifications.ACTIVITY_CLASS
+            else "com.reamicro.fix.notification.RootTaskProgressActivity"),
     )
 
 private fun amArgs(head: List<String>, message: RootTaskNotificationBroadcast, component: String): List<String> =
@@ -50,4 +58,10 @@ private fun notificationExtras(message: RootTaskNotificationBroadcast): List<Pai
     CloudTaskNotifications.EXTRA_TEXT to message.text,
     CloudTaskNotifications.EXTRA_RESULT to message.result,
     CloudTaskNotifications.EXTRA_ITEMS to message.items,
+    CloudTaskNotifications.EXTRA_ACCOUNT_ID to message.accountId,
+    CloudTaskNotifications.EXTRA_ACCOUNT_LABEL to message.accountLabel,
+    CloudTaskNotifications.EXTRA_ACCOUNT_GENERATION to message.accountGeneration,
+    CloudTaskNotifications.EXTRA_TASK_TYPE to message.taskType,
+    CloudTaskNotifications.EXTRA_PHASE to message.phase,
+    CloudTaskNotifications.EXTRA_EVENT_AT to message.eventAt.toString(),
 )

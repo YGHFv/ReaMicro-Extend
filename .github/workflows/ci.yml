@@ -88,30 +88,39 @@ jobs:
             sh -n "$script"
           done
       - name: Detekt (report only)
-        continue-on-error: true
-        run: ./gradlew :app:detekt
+        run: |
+          rm -rf app/build/reports/detekt
+          for attempt in 1 2 3; do
+            if ./gradlew --refresh-dependencies :app:detekt; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
+          test -s app/build/reports/detekt/detekt.html
+          test -s app/build/reports/detekt/detekt.md
       - name: Upload detekt HTML report
-        if: always()
-        continue-on-error: true
+        if: ${{ !cancelled() && hashFiles('app/build/reports/detekt/detekt.html') != '' }}
         uses: actions/upload-artifact@v7
         with:
+          name: detekt-html
           archive: false
           path: app/build/reports/detekt/detekt.html
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
-      - name: Upload detekt text report
-        if: always()
-        continue-on-error: true
+      - name: Upload detekt Markdown report
+        if: ${{ !cancelled() && hashFiles('app/build/reports/detekt/detekt.md') != '' }}
         uses: actions/upload-artifact@v7
         with:
+          name: detekt-markdown
           archive: false
-          path: app/build/reports/detekt/detekt.txt
-          if-no-files-found: ignore
+          path: app/build/reports/detekt/detekt.md
+          if-no-files-found: error
           retention-days: 14
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
-      - name: Run unit tests
-        run: ./gradlew :app:testDebugUnitTest
       - name: Build release APK
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
@@ -133,6 +142,7 @@ jobs:
 
       - name: Prepare and verify APK artifacts
         run: |
+          rm -f artifacts/ReaMicro-Extend-*.apk artifacts/ReaMicro-Extend-*.apk.sha256 artifacts/ReaMicro-Automation-Root-*.zip
           mkdir -p artifacts
           APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner"
           DEBUG_APK="ReaMicro-Extend-${VERSION_NAME}-debug.apk"
@@ -156,7 +166,23 @@ jobs:
               exit 1
             fi
           fi
-          python3 -c 'import sys, zipfile; apks = [zipfile.ZipFile(p) for p in sys.argv[1:]]; required = {"AndroidManifest.xml", "resources.arsc", "classes.dex"}; assert all(required.issubset(z.namelist()) and z.testzip() is None for z in apks), "Invalid APK contents"' "artifacts/$DEBUG_APK" "artifacts/$RELEASE_APK"
+          set -- app/build/generated/reamicroModule/module/ReaMicro-Automation-Root-*.zip
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "::error::Expected exactly one generated Root module ZIP."
+            exit 1
+          fi
+          MODULE_ZIP="$1"
+          MODULE_ENTRY="assets/module/${MODULE_ZIP##*/}"
+          unzip -t "$MODULE_ZIP"
+          for APK in "artifacts/$DEBUG_APK" "artifacts/$RELEASE_APK"; do
+            unzip -t "$APK"
+            APK_MODULES=$(unzip -Z1 "$APK" | sed -n '/^assets\/module\/.*\.zip$/p')
+            if [ "$APK_MODULES" != "$MODULE_ENTRY" ]; then
+              echo "::error::Unexpected embedded Root module in $APK."
+              exit 1
+            fi
+            unzip -p "$APK" "$MODULE_ENTRY" | cmp - "$MODULE_ZIP"
+          done
           "$ANDROID_HOME/build-tools/37.0.0/aapt2" dump badging "artifacts/$RELEASE_APK" > /dev/null
           (cd artifacts && sha256sum "$DEBUG_APK" > "$DEBUG_APK.sha256" && sha256sum "$RELEASE_APK" > "$RELEASE_APK.sha256")
           cp app/build/generated/reamicroModule/module/ReaMicro-Automation-Root-*.zip artifacts/

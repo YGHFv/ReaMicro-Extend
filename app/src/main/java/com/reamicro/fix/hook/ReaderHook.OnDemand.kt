@@ -59,7 +59,7 @@ internal fun ReaderHook.prefetchOnlineOnDemandChapter(
 ) {
     val generation = onDemandRefreshCoordinator.generation()
     if (activeReaderActivity() == null || !sameReaderBookRoot(currentEpubRoot(), bookDir)) return
-    val request = OnlineOnDemandBridge.pendingRequest(bookDir, chapterIndex)
+    val request = OnlineOnDemandBridge.pendingRequest(bookDir, chapterIndex, retryFailed = reason.contains("-retry-"))
         ?: return logOnDemandPrefetchDebug("skip:no-pending:$chapterIndex:$reason")
     val prefetchKey = "${request.bookDir.absolutePath}|${request.chapter.href}"
     var added = false
@@ -120,8 +120,7 @@ internal fun ReaderHook.scheduleOnDemandPrefetchRetry(
     var retry = 0
     if (!onDemandRefreshCoordinator.inGeneration(generation) {
         retry = (onDemandPrefetchRetryCount[prefetchKey] ?: 0) + 1
-        if (retry <= ON_DEMAND_PREFETCH_429_RETRIES) onDemandPrefetchRetryCount[prefetchKey] = retry
-        else onDemandPrefetchRetryCount.remove(prefetchKey)
+        onDemandPrefetchRetryCount[prefetchKey] = retry
     }) return
     if (retry > ON_DEMAND_PREFETCH_429_RETRIES) {
         HookRuntime.log("$LOG_PREFIX on-demand prefetch abandoned after rate limit index=${chapterIndex + 1}")
@@ -161,7 +160,7 @@ internal fun ReaderHook.interceptOnDemandChapterStep(
     val chapter = host.list("epub.chapters", epub).getOrNull(catalogIndex + step) ?: return false
     val href = host.text("chapter.href", chapter)
     val refreshKey = onDemandRefreshKey(bookDir, href)
-    val request = OnlineOnDemandBridge.pendingRequest(bookDir, href)
+    val request = OnlineOnDemandBridge.pendingRequest(bookDir, href, retryFailed = true)
         ?: if (refreshKey in onDemandRefreshPending) {
             OnlineOnDemandBridge.readyRequest(bookDir, href)
         } else {
@@ -188,7 +187,7 @@ internal fun ReaderHook.interceptOnDemandJump(param: HookCallback.Call, intent: 
     val chapter = lifecycle.field("JumpChapter.chapter").get(intent) ?: return false
     val href = host.text("chapter.href", chapter)
     val refreshKey = onDemandRefreshKey(bookDir, href)
-    val request = OnlineOnDemandBridge.pendingRequest(bookDir, href)
+    val request = OnlineOnDemandBridge.pendingRequest(bookDir, href, retryFailed = true)
         ?: if (refreshKey in onDemandRefreshPending) {
             OnlineOnDemandBridge.readyRequest(bookDir, href)
         } else {

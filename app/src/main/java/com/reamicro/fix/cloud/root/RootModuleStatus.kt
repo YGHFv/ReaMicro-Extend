@@ -52,6 +52,12 @@ internal data class RootModuleStatus(
         !ready -> R.string.execution_module_incomplete
         else -> R.string.root_module_ready
     }
+
+    fun daemonActiveDuringUpdate(requiredVersion: Int): Boolean =
+        rootAvailable && inspectionComplete && installed && pendingUpdate && stagedPresent && stagedReady &&
+            stagedVersion >= requiredVersion && !safeMode && !disabled && !pendingRemoval &&
+            !stagedDisabled && !stagedRemoval && !stopRequested && daemonRunning
+
     @StringRes
     fun stateResource(rootSelected: Boolean, now: Long): Int = when {
         !rootAvailable -> R.string.execution_root_unavailable
@@ -81,6 +87,6 @@ internal data class RootModuleStatus(
             stagedVersion == 0 && !stopRequested && !taskRunning && daemonRunning && wakeHelperRunning &&
             heartbeatAt > 0L &&
             now >= heartbeatAt && wakeAt >= heartbeatAt && wakeAt > 0L &&
-            wakeAt - now <= 900_000L &&
+            wakeAt - now <= (if (installedVersion >= 12) 6 * 60 * 60_000L else 900_000L) &&
             (wakeAt >= now || now - wakeAt <= 30_000L)
 }

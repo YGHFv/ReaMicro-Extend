@@ -29,6 +29,7 @@ if [ "$1" = start ]; then rm -f "$STATE/stop" || exit 1; fi
 [ -e "$STATE/stop" ] && exit 0
 
 reamicro_daemon_alive && exit 0
+reamicro_module_ready || { echo "ReaMicro: module/runtime version mismatch" >&2; exit 1; }
 
 # Remove any orphaned helper left by a killed/replaced daemon before restarting.
 reamicro_stop wake || exit 1

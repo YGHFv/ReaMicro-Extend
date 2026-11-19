@@ -28,8 +28,11 @@ internal fun onlineHttpRetryKind(error: Throwable): OnlineHttpRetryKind {
     }
 }
 
-internal fun isPermanentOnlineChapterFailure(error: Throwable): Boolean =
-    error.message.orEmpty().contains("unsupported crypt_status=NaN", ignoreCase = true)
+internal fun isPermanentOnlineChapterFailure(error: Throwable): Boolean {
+    val code = (error as? OnlineSourceHttpException)?.statusCode
+    return code != null && code in 400..499 && code !in setOf(408, 425, 429) ||
+        error.message.orEmpty().contains("unsupported crypt_status=NaN", ignoreCase = true)
+}
 
 internal fun onlineHttpRetryDelayMs(
     error: Throwable,

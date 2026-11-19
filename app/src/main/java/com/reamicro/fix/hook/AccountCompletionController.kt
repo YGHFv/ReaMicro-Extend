@@ -13,7 +13,6 @@ import android.util.JsonToken
 import com.reamicro.fix.core.HostAccountBindings
 import com.reamicro.fix.core.HostClasses
 import com.reamicro.fix.cloud.local.LocalTaskAccountBundle
-import com.reamicro.fix.cloud.local.LocalTaskMirror
 import com.reamicro.fix.cloud.local.LocalTaskStore
 import com.reamicro.fix.reader.ReaderTypographyPolicy
 import com.reamicro.fix.xposed.HookRuntime
@@ -942,10 +941,6 @@ class AccountCompletionController(
                     onProgress("正在恢复本地任务配置与记录")
                     // This is the final durable restore step: earlier import failures retain the old tasks.
                     taskStore.restoreAccountBundle(taskRestore) { AccountHostRuntime.isCurrent(identity, activity) }
-                    // The backup's enabled flags are retained; delivery acknowledgement is handled by the task bridge.
-                    runCatching { LocalTaskMirror.push(activity.applicationContext) }.onFailure {
-                        HookRuntime.logError("ReaMicro account local task mirror dispatch failed")
-                    }
                 }
                 ImportedAccountDataBundle(
                     account = AccountDisplayItem(

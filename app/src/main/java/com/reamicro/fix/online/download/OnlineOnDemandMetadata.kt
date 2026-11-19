@@ -28,6 +28,10 @@ internal data class OnlineOnDemandChapter(
     val attempts: Int = 0,
     val lastError: String = "",
 ) {
+    fun canRequestDownload(retryFailed: Boolean = false): Boolean =
+        state == OnlineChapterState.PENDING || state == OnlineChapterState.DOWNLOADING ||
+            retryFailed && state == OnlineChapterState.FAILED
+
     fun beginDownload(): OnlineOnDemandChapter = copy(
         state = OnlineChapterState.DOWNLOADING,
         attempts = attempts + 1,
@@ -81,6 +85,16 @@ internal data class OnlineOnDemandMetadata(
     fun recoverAfterProcessRestart(): OnlineOnDemandMetadata = copy(
         chapters = chapters.map(OnlineOnDemandChapter::recoverAfterProcessRestart),
     )
+
+    /** Chapter files can commit just before pause, process death, or the final state-index write. */
+    fun recoverPublishedChapters(hasReadyBody: (String) -> Boolean): OnlineOnDemandMetadata {
+        if (mode != OnlineBookDownloadMode.FULL) return this
+        return copy(chapters = chapters.map { chapter ->
+            if (chapter.state != OnlineChapterState.READY && hasReadyBody(chapter.href)) {
+                chapter.copy(state = OnlineChapterState.READY, lastError = "")
+            } else chapter
+        })
+    }
 
     companion object {
         const val CURRENT_VERSION = 2

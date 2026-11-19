@@ -63,8 +63,6 @@ class ReaMicroSettingsHook(
     @Volatile internal var lastKnownNavGraphScope: Any? = null
     internal var pendingModuleSettingsRequest = false
     internal var moduleSettingsRequestPosted = false
-    @Volatile internal var moduleActivationChanging = false
-    internal var moduleActivationRevision = 0L
     internal var activationRestartPending = false
     internal val moduleSettingsRequestHandler by lazy {
         com.reamicro.fix.reload.ModuleResources.handler(android.os.Looper.getMainLooper())
@@ -81,7 +79,6 @@ class ReaMicroSettingsHook(
     @Volatile internal var cloudAutomationCredentials: List<com.reamicro.fix.cloud.api.ReaMicroCredential> = emptyList()
     @Volatile internal var cloudAutomationUpdatingTaskTypes: Set<String> = emptySet()
     @Volatile internal var localAutomationVersionUiState: Any? = null
-    internal val localAutomationRequests = LocalAutomationRequestGate()
     @Volatile internal var localAutomationLoaded: Boolean = false
     @Volatile internal var localAutomationAccountId: String = ""
     @Volatile internal var localAutomationError: String = ""
@@ -153,7 +150,7 @@ class ReaMicroSettingsHook(
             if (activeInstance === this) activeInstance = null
         }
         HookRuntime.withManagementHooks {
-            HostSettingsDialogs.install(this)
+            HostSettingsDialogs.install(classLoader, activityProvider)
             if (!SemanticSettingsNavigation(this).install()) SemanticSettingsUiBridge(this).install()
             hookModuleSettingsIntent()
         }

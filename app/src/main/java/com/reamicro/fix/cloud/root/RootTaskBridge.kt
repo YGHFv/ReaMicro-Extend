@@ -72,7 +72,6 @@ internal object RootTaskBridge {
 
     @Synchronized
     fun enable(context: Context): String = LocalTaskRunner.withTaskControl {
-        check(com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) { "补全计划已关闭" }
         require(android.os.Process.myUid() / 100000 == 0) { context.moduleString(R.string.error_ksu_primary_user) }
         try {
             val access = inspect(context)
@@ -167,23 +166,26 @@ internal object RootTaskBridge {
         try {
             check(status.rootAvailable) { status.error.ifBlank { context.moduleString(R.string.execution_root_permission_hint) } }
             check(status.inspectionComplete) { status.error }
+            if (remove) {
+                val removal = handoff(context).remove(wasRoot && status.statePresent) {
+                    cleanupLegacyWake(context)
+                    lifecycle(context).remove()
+                }
+                val message = context.moduleString(if (removal.pendingReboot) R.string.root_removal_pending else R.string.root_disabled_done)
+                return@withTaskControl if (removal.progressSaved) message
+                    else "$message\n${context.moduleString(R.string.root_last_progress_unsaved)}"
+            }
             if (wasRoot) {
-
                 handoff(context).disable()
             } else if (status.statePresent) {
-
                 command(context, "disable", timeoutSeconds = 60)
             }
             cleanupLegacyWake(context)
             stopDaemon(context)
-            val pendingReboot = if (remove) lifecycle(context).remove() else {
-                lifecycle(context).pause()
-                false
-            }
+            lifecycle(context).pause()
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putString("status", STATUS_DISABLED).remove("statusError").commit()
-            if (!remove) return@withTaskControl context.moduleString(R.string.execution_module_paused)
-            context.moduleString(if (pendingReboot) R.string.root_removal_pending else R.string.root_disabled_done)
+            context.moduleString(R.string.execution_module_paused)
         } catch (error: Throwable) {
             recordFailure(context, error)
             throw error
@@ -203,33 +205,37 @@ internal object RootTaskBridge {
         val module = RootTaskRepository.MODULE_DIRECTORY
         val state = RootTaskRepository.STATE_DIRECTORY
         val stopped = RootCommandRunner.run(
-            "if [ -f '$module/stop.sh' ]; then sh '$module/stop.sh'; " +
-                "else if [ -d '$state' ]; then umask 077; touch '$state/stop' || exit 1; fi; " +
-                RootProcessCleanup.oldSupervisor() + "; fi",
+            "if [ -d '$state' ] && [ -f '$module/stop.sh' ]; then sh '$module/stop.sh'; else\n" +
+                RootProcessCleanup.oldSupervisor() + "\nfi",
             timeoutSeconds = 25,
         )
         check(stopped.exitCode == 0) { context.moduleString(R.string.error_root_stop) }
     }
 
     @Synchronized
-    fun synchronize(context: Context, force: Boolean = false, requested: LocalTaskKey? = null) {
-        if (!com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) return
-        if (!isEnabled(context)) return
+    fun synchronize(context: Context, force: Boolean = false, requested: LocalTaskKey? = null): Boolean {
+        if (!isEnabled(context)) return false
         prepareTransport(context)
         try {
             if (!context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("legacyWakeMigrated", false)) {
                 cleanupLegacyWake(context)
             }
-            val payload = LocalTaskStore { context }.executionPayload().put("enable", true)
-            val snapshot = command(context, "configure", payload)
-            applySnapshot(context, snapshot)
-            check(snapshot.optBoolean("moduleEnabled", true)) { context.moduleString(R.string.error_ksu_disabled) }
+            val payload = LocalTaskStore { context }.executionPayload()
+            if (!handoff(context).synchronize(payload)) {
+                check(!force && requested == null) { context.moduleString(R.string.root_sync_stopped) }
+                return false
+            }
             startDaemon(context)
             if (force || requested != null) {
                 command(context, "kick", JSONObject().put("force", force).apply {
-                    requested?.let { put("accountId", it.accountId); put("taskType", it.taskType) }
+                    requested?.let {
+                        put("accountId", it.accountId); put("taskType", it.taskType)
+                        put("accountGeneration", payload.optJSONObject("accounts")?.optJSONObject(it.accountId)
+                            ?.optString("accountGeneration").orEmpty())
+                    }
                 })
             }
+            return true
         } catch (error: Throwable) {
             recordFailure(context, error)
             throw error
@@ -247,7 +253,6 @@ internal object RootTaskBridge {
 
     @Synchronized
     fun reschedule(context: Context): Int {
-        if (!com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) return 0
         prepareTransport(context)
         val snapshot = command(context, "reschedule")
         applySnapshot(context, snapshot)
@@ -256,8 +261,10 @@ internal object RootTaskBridge {
 
     private fun startDaemon(context: Context) {
         val started = RootCommandRunner.run("sh ${RootTaskRepository.MODULE_DIRECTORY}/service.sh start </dev/null", timeoutSeconds = 20)
-        check(started.exitCode == 0) {
-            context.moduleString(R.string.error_ksu_daemon) + ": " + started.diagnosticOutput.takeLast(400)
+        if (started.exitCode != 0) {
+            if (started.diagnosticOutput.contains("module/runtime version mismatch") &&
+                inspect(context, authorizationTimeoutSeconds = 15).daemonActiveDuringUpdate(BuildConfig.ROOT_MODULE_VERSION_CODE)) return
+            error(context.moduleString(R.string.error_ksu_daemon) + ": " + started.diagnosticOutput.takeLast(400))
         }
     }
 
@@ -267,10 +274,6 @@ internal object RootTaskBridge {
     }
 
     fun requestSync(context: Context, onComplete: (() -> Unit)? = null) {
-        if (!com.reamicro.fix.cloud.local.ModuleTaskActivation.isEnabled(context)) {
-            onComplete?.invoke()
-            return
-        }
         val appContext = context.applicationContext
         if (appContext.packageName != CloudTaskNotifications.MODULE_PACKAGE_NAME || !isEnabled(appContext)) {
             onComplete?.invoke()
@@ -332,7 +335,11 @@ internal object RootTaskBridge {
         val heartbeat = snapshot.optLong("heartbeatAt")
         val alive = heartbeat > 0L && System.currentTimeMillis() - heartbeat in 0..120_000L
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("status",
-            if (alive) STATUS_RUNNING else STATUS_NO_HEARTBEAT).commit()
+            when {
+                !snapshot.optBoolean("enabled") || !snapshot.optBoolean("moduleEnabled", true) -> STATUS_DISABLED
+                alive -> STATUS_RUNNING
+                else -> STATUS_NO_HEARTBEAT
+            }).commit()
         val pending = snapshot.optJSONArray("notifications") ?: return
         val delivered = JSONArray()
         for (index in 0 until pending.length()) {
@@ -341,7 +348,8 @@ internal object RootTaskBridge {
             if (id.isBlank()) continue
             val type = item.optString("taskType")
             val intent = CloudTaskNotifications.intent("ksu_$id", LocalTaskRunner.localTaskTitle(type) + if (item.optString("result") == "success") "" else "异常",
-                item.optString("message"), item.optString("result"), item.optString("items"))
+                item.optString("message"), item.optString("result"), item.optString("items"),
+                item.optString("accountId"), item.optString("accountLabel"), type, item.optString("accountGeneration"))
             if (CloudTaskNotifications.post(context, intent, source = "ksu-task-runner")) delivered.put(id)
         }
         if (delivered.length() > 0) runCatching { command(context, "ack", JSONObject().put("ids", delivered)) }

@@ -9,9 +9,10 @@ internal enum class RootVendorNetworkPolicy(val id: String) {
     fun shouldWake(state: RootNetworkState): Boolean = when (this) {
         NONE -> false
         XIAOMI -> state.probeError.isEmpty() && state.screen == false &&
-            state.airplaneMode == false && (state.offline || state.xiaomiSleep == true)
+            state.airplaneMode == false && (state.xiaomiSleep == true || state.offline)
         OPLUS -> state.probeError.isEmpty() && state.screen == false && state.airplaneMode == false &&
-            (state.oplusDeepSleep == true || state.oplusNetworkDisabled == true)
+            (state.oplusNetworkRestricted || (state.oplusNetworkType == null &&
+                (state.oplusDeepSleep == true || state.oplusNetworkDisabled == true)))
     }
 
     fun wakeCommand(): List<String>? = when (this) {

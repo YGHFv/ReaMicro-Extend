@@ -88,7 +88,7 @@ class HostNativeUi(private val loader: ClassLoader) {
     fun lazyRow(modifier: Any, content: Any, composer: Any) {
         ui.call("lazyRow", modifier, null, null, null, null, null, false, null, content, composer, 0, 254)
     }
-    fun weight(scope: Any, base: Any, value: Float = 1f): Any = requireNotNull(ui.instance("weight", scope, base, value))
+    fun weight(scope: Any, base: Any, value: Float = 1f): Any = ui.rowWeight(scope, base, value)
     fun spacer(modifier: Any, composer: Any) { ui.call("box", modifier, composer, 0) }
     fun emptyBox(modifier: Any, composer: Any) { ui.call("box", modifier, composer, 0) }
     fun addItem(scope: Any, key: Any?, content: Any) { ui.instance("item", scope, key, null, content) }

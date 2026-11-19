@@ -86,7 +86,6 @@
     <string name="pref_pager_gesture_summary">Scroll response when swiping pages</string>
     <string name="pager_gesture_default">Default</string>
     <string name="pager_gesture_cross">Cross-axis</string>
-    <string name="pager_gesture_ios">iOS-style</string>
 
     <string name="task_daily_lore">Daily lore</string>
     <string name="task_auto_wish">Auto wish</string>
@@ -136,8 +135,8 @@
     <string name="records_empty_description">Tap “Run” on a task card in Tasks to run it once. Tap a record for details, including blessings, rewards, and merchant events.</string>
     <string name="task_overview_title">Task overview</string>
     <string name="tasks_empty_title">No local tasks yet</string>
-    <string name="tasks_empty_description">Enable tasks in ReaMicro settings, then configure them here.</string>
-    <string name="tasks_sync_note">Local tasks run in the module process. Syncing with ReaMicro keeps the latest settings; older snapshots will not overwrite newly saved choices.</string>
+    <string name="tasks_empty_description">Import credentials from Manage accounts, then configure and enable tasks for each account.</string>
+    <string name="tasks_sync_note">Accounts, settings and records here are stored independently. Scheduled execution requires Root enhancement. Embedded host tasks run once when ReaMicro opens.</string>
     <string name="refresh_pull">Pull to refresh</string>
     <string name="refresh_release">Release to refresh</string>
     <string name="refresh_running">Refreshing…</string>
@@ -330,15 +329,16 @@
     <string name="root_last_error">Last operation details</string>
     <string name="root_checked_at">Last checked: %1$s</string>
     <string name="root_staged_older">The pending module is older than the version bundled with the app. Tap Install / Update module, then reboot as instructed by your manager. This is not a Root authorization failure.</string>
-    <string name="root_install_hint">Install the companion module through your current Root manager without enabling enhancement automatically</string>
+    <string name="root_install_hint">Install through your Root manager. Updates keep your existing task settings.</string>
     <string name="root_uninstall">Uninstall module</string>
-    <string name="root_uninstall_hint">Stop background tasks and save progress, then request module removal</string>
+    <string name="root_uninstall_hint">Remove the Root executor and its private data. Tasks in the app are kept.</string>
+    <string name="root_last_progress_unsaved">The last Root progress update could not be synced. The app kept the previously synced progress.</string>
     <string name="root_enable_action">Confirm enable</string>
     <string name="root_disable_action">Confirm disable</string>
     <string name="root_confirmation_title">Confirm operation</string>
     <string name="root_confirm_enable">Root permission will be checked and the companion module installed or updated. If a reboot is required, reboot the device and check again before enabling enhancement.\n\nThe module runs local automatic tasks in a separate background process without periodically opening the ReaMicro interface. Tasks may be delayed during deep sleep. If the system stops the background task service, try Sync tasks to restart it or reboot the device.</string>
     <string name="root_confirm_disable">New automatic tasks will stop, and the current task will be allowed to finish safely before progress is saved back to the app. The copy of account credentials stored by the Root module will then be cleared and the companion module disabled in the manager.\n\nModule files and in-app task data are retained. Tasks can only run manually afterward; no alternative automatic wake method is enabled.</string>
-    <string name="root_confirm_uninstall">Automatic tasks will be stopped and progress saved. Pending module installation or updates will then be cancelled, and removal requested through your current Root manager.\n\nModule removal usually requires a device reboot. Follow the manager instructions. In-app task data is retained, and this app will not reboot the device automatically.</string>
+    <string name="root_confirm_uninstall">Root tasks will stop. Any staged installation or update, the private Root folder, and its credentials will be removed. Your tasks and synced progress stay in the app.\n\nIf the manager marks the module for removal, reboot to finish.</string>
     <string name="root_disabled_done">Root enhancement is disabled and the companion module has been removed. In-app task data is retained.</string>
     <string name="root_removal_pending">Root enhancement has stopped and the companion module is pending removal. Reboot as instructed by your Root manager.</string>
     <string name="root_notification_hint">Controls result notifications only; creates no automatic wake-up</string>
@@ -363,6 +363,7 @@
     <string name="root_module_busy">Processing the module operation…</string>
     <string name="root_sync_running">Sending task settings and retrieving progress and results…</string>
     <string name="root_sync_success">Task settings, progress, and results synced.</string>
+    <string name="root_sync_stopped">Root execution is stopped. Progress and records have been restored; enable Root enhancement again to resume background tasks.</string>
     <string name="root_sync_failed">Sync failed: %1$s</string>
     <string name="root_synced_at">Last synced: %1$s</string>
     <string name="root_module_bundled_version">Bundled version: %1$d</string>
@@ -372,7 +373,7 @@
     <string name="root_wake_scheduled">Next wake scheduled</string>
     <string name="root_wake_at">Next wake scheduled: %1$s</string>
     <string name="root_wake_polling">Waiting until the next task without a wake alarm; tasks may be delayed during deep sleep</string>
-    <string name="root_module_upgrade_for_wake">The current module is ready. Install / Update module to enable scheduled wake.</string>
+    <string name="root_module_update_available">The current module is ready. Bundled version %1$d is available.</string>
     <string name="about_qiji_font_credit">Splash screen font</string>
     <plurals name="records_selected_count">
         <item quantity="one">%1$d selected</item>
@@ -401,4 +402,27 @@
     <string name="task_order_save_failed">Could not save task order. Please retry.</string>
     <string name="task_auto_read_config">Read %1$d min · Daily %2$s</string>
     <string name="task_last_execution">Last run: %1$s</string>
+    <string name="accounts_all">All accounts</string>
+    <string name="accounts_filter">Choose account</string>
+    <string name="accounts_manage">Manage accounts</string>
+    <string name="accounts_remark">Account remark</string>
+    <string name="accounts_remark_hint">Up to 80 characters; leave blank to use nickname</string>
+    <string name="accounts_description">Each account has its own task settings. Tap an account to edit its remark. Importing it again updates its credential and preserves settings and records.</string>
+    <string name="accounts_import">Import credentials</string>
+    <string name="accounts_import_description">Paste credentials exported from ReaMicro account management, or choose a single-account or account bundle file. Tasks for new accounts start disabled.</string>
+    <string name="accounts_credential_hint">Paste account credentials</string>
+    <string name="accounts_choose_file">Import from file</string>
+    <string name="accounts_saving">Saving…</string>
+    <string name="accounts_imported">Imported %1$d accounts</string>
+    <string name="accounts_import_failed">Could not import credentials</string>
+    <string name="accounts_file_too_large">Credential files must be no larger than 1 MiB</string>
+    <string name="accounts_file_unavailable">Could not read the credential file</string>
+    <string name="accounts_delete">Delete account</string>
+    <string name="accounts_delete_action">Delete</string>
+    <string name="accounts_delete_named">Delete account %1$s</string>
+    <string name="accounts_delete_confirm">Delete %1$s and its credentials, task settings, and task records in this app? Background tasks will stop. You can import the credentials again later. Data and local tasks in the ReaMicro host app are unaffected.</string>
+    <string name="accounts_deleting">Deleting…</string>
+    <string name="accounts_deleted">Deleted account %1$s</string>
+    <string name="accounts_delete_failed">Could not delete the account. Please try again.</string>
+    <string name="accounts_delete_sync_failed">The account was removed from this app, but Root background cleanup failed: %1$s. Sync again in Root settings.</string>
 </resources>

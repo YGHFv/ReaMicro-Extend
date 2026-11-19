@@ -137,13 +137,13 @@ internal object LocalTaskAccountBundle {
 
 /** A failed SharedPreferences commit can already have changed its in-memory value. */
 internal fun commitLocalTaskAccountRestore(
-    previous: String?, replacement: String, read: () -> String?, write: (String?) -> Boolean,
+    previous: String?, replacement: String?, read: () -> String?, write: (String?) -> Boolean,
 ) {
     try {
-        check(write(replacement)) { "本地任务恢复保存失败" }
+        check(write(replacement)) { "本地任务保存失败" }
     } catch (error: Throwable) {
         runCatching {
-            if (read() == replacement) check(write(previous)) { "本地任务恢复回滚保存失败" }
+            if (read() == replacement) check(write(previous)) { "本地任务回滚保存失败" }
         }.onFailure(error::addSuppressed)
         throw error
     }

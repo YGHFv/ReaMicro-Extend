@@ -137,14 +137,14 @@ internal object OnlineOnDemandBridge {
         abandoned.forEach { it() }
     }
 
-    fun pendingRequest(bookDir: File, href: String): OnlineOnDemandChapterRequest? {
+    fun pendingRequest(bookDir: File, href: String, retryFailed: Boolean = false): OnlineOnDemandChapterRequest? {
         val (storage, metadata) = requestData(bookDir) ?: return null
         if (metadata.mode != OnlineBookDownloadMode.ON_DEMAND) return null
         val normalizedHref = normalizeHref(href)
         val index = metadata.chapters.indexOfFirst { normalizeHref(it.href) == normalizedHref }
         if (index < 0) return null
         val chapter = metadata.chapters[index]
-        if (chapter.state == OnlineChapterState.READY) return null
+        if (!chapter.canRequestDownload(retryFailed)) return null
         return OnlineOnDemandChapterRequest(
             bookDir = storage.bookDir,
             chapterIndex = index,
@@ -158,11 +158,11 @@ internal object OnlineOnDemandBridge {
     fun readyRequest(bookDir: File, href: String): OnlineOnDemandChapterRequest? =
         requestForState(bookDir, href, OnlineChapterState.READY)
 
-    fun pendingRequest(bookDir: File, chapterIndex: Int): OnlineOnDemandChapterRequest? {
+    fun pendingRequest(bookDir: File, chapterIndex: Int, retryFailed: Boolean = false): OnlineOnDemandChapterRequest? {
         val (storage, metadata) = requestData(bookDir) ?: return null
         if (metadata.mode != OnlineBookDownloadMode.ON_DEMAND) return null
         val chapter = metadata.chapter(chapterIndex) ?: return null
-        if (chapter.state == OnlineChapterState.READY) return null
+        if (!chapter.canRequestDownload(retryFailed)) return null
         return OnlineOnDemandChapterRequest(
             bookDir = storage.bookDir,
             chapterIndex = chapterIndex,

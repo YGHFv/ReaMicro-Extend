@@ -12,37 +12,42 @@ import java.util.zip.ZipFile
 
 /** Owned by a query session: DEX bytes and indexes are released when that session closes. */
 internal class HostDexIndex(apk: String, apks: List<String> = listOf(apk)) {
-    val classes: List<ClassDef> = apks.flatMapIndexed { index, path ->
-        load(File(path), requireDex = index == 0)
-    }.also { classes ->
-        // DexKit queries all inputs, whereas ART resolves the first definition.
-        // Ambiguous duplicate classes must not silently produce a different binding.
-        require(classes.map { it.type }.toSet().size == classes.size) { "Duplicate host DEX class definitions" }
+    private val classesByType = buildMap<String, ClassDef> {
+        apks.forEachIndexed { index, path ->
+            for (type in load(File(path), requireDex = index == 0)) {
+                // DexKit searches every input, but ART resolves the first definition.
+                require(put(type.type, type) == null) { "Duplicate host DEX class: ${type.type}" }
+            }
+        }
     }
-    private val classesByType by lazy { classes.associateBy { it.type } }
+    fun classByType(type: String): ClassDef? = classesByType[type]
     private val ownerMethods = HashMap<String, Map<String, Method>>()
-    val methods: Map<String, Method> by lazy {
-        classes.asSequence().flatMap { it.methods.asSequence() }.associateBy(::descriptor)
-    }
     private val typeReferences: Map<String, List<String>> by lazy {
         val result = HashMap<String, MutableList<String>>()
-        methods.forEach { (id, method) ->
-            val types = (method.implementation?.instructions ?: emptyList()).mapNotNull { instruction ->
-                ((instruction as? ReferenceInstruction)?.reference as? TypeReference)?.type
-            }.toSet()
-            types.forEach { result.getOrPut(it) { ArrayList() }.add(id) }
+        for (type in classesByType.values) for (method in type.methods) {
+            val instructions = method.implementation?.instructions ?: continue
+            var methodId: String? = null
+            for (instruction in instructions) {
+                val target = ((instruction as? ReferenceInstruction)?.reference as? TypeReference)?.type ?: continue
+                val id = methodId ?: descriptor(method).also { methodId = it }
+                val callers = result.getOrPut(target) { ArrayList() }
+                // All instructions for this method are visited together.
+                if (callers.lastOrNull() != id) callers.add(id)
+            }
         }
         result
     }
 
-    fun method(id: String): Method {
+    fun findMethod(id: String): Method? {
         val owner = id.substringBefore("->")
         val entries = ownerMethods.getOrPut(owner) {
-            requireNotNull(classesByType[owner]) { "DEX owner unavailable: $owner" }
-                .methods.associateBy(::descriptor)
+            val type = classesByType[owner] ?: return null
+            type.methods.associateBy(::descriptor)
         }
-        return requireNotNull(entries[id]) { "DEX method unavailable: $id" }
+        return entries[id]
     }
+
+    fun method(id: String): Method = requireNotNull(findMethod(id)) { "DEX method unavailable: $id" }
 
     fun referencingType(type: String): List<String> = typeReferences[type].orEmpty()
 

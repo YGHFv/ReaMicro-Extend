@@ -7,6 +7,7 @@ if [ -e "$MODDIR/disable" ] || [ -e "$MODDIR/remove" ] || [ -e "$STATE/stop" ]; 
 [ -f "$STATE/state.json" ] || exit 0
 chmod 700 "$STATE" || exit 1
 . "$MODDIR/common.sh"
+reamicro_module_ready || exit 1
 reamicro_safe_mode && exit 0
 BUSYBOX=$(find_busybox) || exit 1
 export ASH_STANDALONE=1
@@ -17,15 +18,13 @@ fi
 shift
 exec 8>"$STATE/daemon.lock"
 "$BUSYBOX" flock -n 8 || exit 0
+. "$MODDIR/lifecycle.sh"
+reamicro_clear_runtime || exit 1
 printf '%s\n' "$$" >"$STATE/daemon.pid"
 CHILD_PID=
 PULSE_PID=
 child_alive() {
-  [ -n "$CHILD_PID" ] && [ -r "/proc/$CHILD_PID/status" ] || return 1
-  parent=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$CHILD_PID/status")
-  [ "$parent" = "$$" ] || return 1
-  grep -Eq '^State:[[:space:]]+[XZ]' "/proc/$CHILD_PID/status" && return 1
-  kill -0 "$CHILD_PID" 2>/dev/null
+  reamicro_child_alive "$CHILD_PID"
 }
 cleanup() {
 
@@ -40,7 +39,7 @@ cleanup() {
     # 不等待仍可能卡在内核里的子进程；停止路径继续清理执行器和唤醒锁。
     child_alive || wait "$CHILD_PID" 2>/dev/null
   fi
-  [ -n "$PULSE_PID" ] && kill "$PULSE_PID" 2>/dev/null
+  reamicro_child_alive "$PULSE_PID" && kill "$PULSE_PID" 2>/dev/null
   reamicro_release_wake_lock
   rm -f "$STATE/runner.pid" "$STATE/wake.pid" "$STATE/wake-at" "$STATE/wake-mode"
   if [ "$(cat "$STATE/daemon.pid" 2>/dev/null)" = "$$" ]; then
@@ -83,28 +82,36 @@ wake_pause() {
     module_active && pause 15
   fi
 }
+boot_wait=0
 while [ "$(getprop sys.boot_completed)" != 1 ]; do
   module_active || exit 0
+  if [ "$boot_wait" -ge 120 ]; then
+    printf '%s boot_timeout wait_seconds=600\n' "$(date +%s)" >>"$STATE/daemon.log"
+    exit 1
+  fi
   pause 5
+  boot_wait=$((boot_wait + 1))
 done
 last_probe=0
 last_now=0
 retry_after=0
+probe_interval=900
 while module_active; do
   reamicro_acquire_wake_lock || :
   now=$(date +%s)
   if [ "$now" -lt "$last_now" ]; then last_probe=0; retry_after=0; fi
   last_now=$now
   printf '%s\n' "$now" >"$STATE/heartbeat"
-  next=$(reamicro_read_next)
+  next=$(reamicro_read_next) || probe_interval=900
   if [ -f "$STATE/state.json" ] && [ "$now" -ge "$retry_after" ] &&
-      { { [ "$next" -gt 0 ] && [ "$next" -le "$now" ]; } || [ "$now" -ge "$((last_probe + 900))" ]; }; then
+      { [ "$retry_after" -gt 0 ] || { [ "$next" -gt 0 ] && [ "$next" -le "$now" ]; } ||
+        [ "$now" -ge "$((last_probe + probe_interval))" ]; }; then
     last_probe=$now
-    "$BUSYBOX" timeout -k 15 -s TERM 240 "$BUSYBOX" sh "$MODDIR/runner.sh" run 8>&- </dev/null >/dev/null 2>&1 &
+    "$BUSYBOX" timeout -k 15 -s TERM 240 "$BUSYBOX" sh "$MODDIR/runner.sh" run --watchdog 8>&- </dev/null >/dev/null 2>&1 &
     CHILD_PID=$!
     printf '%s\n' "$CHILD_PID" >"$STATE/runner.pid"
 
-    while kill -0 "$CHILD_PID" 2>/dev/null; do
+    while child_alive; do
       printf '%s\n' "$(date +%s)" >"$STATE/heartbeat"
       module_active || { kill "$CHILD_PID" 2>/dev/null; break; }
       sleep 2 8>&- &
@@ -114,6 +121,13 @@ while module_active; do
     done
     wait "$CHILD_PID"
     result=$?
+    probe_interval=900
+    if [ "$result" -eq 10 ]; then
+      # The APK completed recovery and confirmed an empty notification outbox.
+      # Changes to the plan or to the module still interrupt the helper immediately.
+      probe_interval=21600
+      result=0
+    fi
     CHILD_PID=
     rm -f "$STATE/runner.pid"
     printf '%s runner_exit=%s\n' "$now" "$result" >>"$STATE/daemon.log"
@@ -127,7 +141,11 @@ while module_active; do
   fi
   # Execution publishes next-run-at atomically; read it again before arming.
   now=$(date +%s)
-  next=$(reamicro_read_next)
-  delay=$(reamicro_wait_seconds "$now" "$next" "$last_probe" "$retry_after")
-  wake_pause "$delay" "$next" "$((now + delay))"
+  next=$(reamicro_read_next) || probe_interval=900
+  delay=$(reamicro_wait_seconds "$now" "$next" "$last_probe" "$retry_after" "$probe_interval")
+  # The helper takes 1..900 as its relative argument and arms the supplied absolute
+  # deadline on both alarm clocks and the non-wakeup fallback.
+  relative=$delay
+  [ "$relative" -le 900 ] || relative=900
+  wake_pause "$relative" "$next" "$((now + delay))"
 done

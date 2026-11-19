@@ -11,24 +11,22 @@ import java.io.File
 import kotlin.system.exitProcess
 
 object RootTaskMain {
+    // Private reply to watchdog.sh. Older APKs return 0 and keep the 15-minute recovery probe.
+    private const val WATCHDOG_QUEUE_CLEAR = 10
+
     @JvmStatic
     fun main(arguments: Array<String>) {
         try {
             val command = arguments.firstOrNull().orEmpty()
             check(Process.myUid() == 0) { "需要 Root" }
             val repository = RootTaskRepository(File(RootTaskRepository.STATE_DIRECTORY)) {
-                File(RootTaskRepository.MODULE_DIRECTORY).isDirectory &&
+                File(RootTaskRepository.MODULE_DIRECTORY, "runner.sh").isFile &&
                     !File(RootTaskRepository.MODULE_DIRECTORY, "disable").exists() &&
                     !File(RootTaskRepository.MODULE_DIRECTORY, "remove").exists()
             }
             when (command) {
-                "enable" -> {
-                    val input = readInput()
-                    check(repository.withExecutionLock { repository.configure(input, enable = true); true } == true) { "任务正在执行" }
-                }
-                "configure" -> readInput().let { input ->
-                    repository.configure(input, enable = input.optBoolean("enable", false))
-                }
+                "enable" -> repository.enable(readInput())
+                "configure" -> repository.configure(readInput())
                 "snapshot" -> Unit
                 "reschedule" -> {
                     check(repository.executionEnabled()) { "Root 后台任务未启用" }
@@ -49,25 +47,12 @@ object RootTaskMain {
                     repository.disable()
                     repository.withExecutionLock(wait = true) { repository.clearCredentials() }
                 }
-                "run" -> repository.withExecutionLock {
-                    if (repository.executionEnabled()) {
-                        RootNightDiagnostics.begin()
-                        val request = repository.takeRequest()
-                        val accountId = request?.optString("accountId").orEmpty()
-                        val taskType = request?.optString("taskType").orEmpty()
-                        val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
-                        val network = RootTaskNetwork.preparation { !repository.executionEnabled() }
-                        val completed = try {
-                            LocalTaskEngine(repository, beforeExecute = network::ensureReady)
-                                .runDue(force = request?.optBoolean("force") == true, requested = key)
-                        } catch (error: Throwable) {
-                            RootNightDiagnostics.abort(error)
-                            throw error
-                        }
-                        RootNightDiagnostics.finish(completed)
-                        if (!Thread.currentThread().isInterrupted) {
-                            repository.snapshot().optJSONArray("notifications")?.takeIf { it.length() > 0 }?.let(::notifyModule)
-                        }
+                "run" -> {
+                    val queueClear = repository.withExecutionLock { runTasks(repository) }
+                    if (arguments.getOrNull(1) == "--watchdog") {
+                        if (queueClear == null || Thread.currentThread().isInterrupted) exitProcess(1)
+                        if (queueClear) exitProcess(WATCHDOG_QUEUE_CLEAR)
+                        return
                     }
                 }
                 else -> error("不支持的 Root 指令")
@@ -81,6 +66,37 @@ object RootTaskMain {
                 .put("error", if (detail.isBlank()) error.javaClass.simpleName else "${error.javaClass.simpleName}: $detail"))
             exitProcess(1)
         }
+    }
+
+    private fun runTasks(repository: RootTaskRepository): Boolean {
+        if (!repository.executionEnabled()) return false
+        val request = repository.takeRequest()
+        val accountId = request?.optString("accountId").orEmpty()
+        val taskType = request?.optString("taskType").orEmpty()
+        val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
+        val network = RootTaskNetwork.preparation { !repository.executionEnabled() }
+        RootNightDiagnostics.begin()
+        val completed = try {
+            LocalTaskEngine(repository,
+                beforeExecute = { id, task ->
+                    notifyProgress(repository, id, task.taskType, "waking")
+                    network.ensureReady()
+                },
+                onExecuting = { id, task -> notifyProgress(repository, id, task.taskType, "running") },
+                onFinished = { id, task -> notifyProgress(repository, id, task.taskType, "finished") },
+            )
+                .runDue(force = request?.optBoolean("force") == true, requested = key,
+                    expectedAccountGeneration = request?.optString("accountGeneration"))
+        } catch (error: Throwable) {
+            RootNightDiagnostics.abort(error)
+            throw error
+        }
+        RootNightDiagnostics.finish(completed)
+        if (Thread.currentThread().isInterrupted) return false
+        val pending = repository.pendingNotifications() ?: return false
+        if (pending.length() == 0) return true
+        notifyModule(pending)
+        return false
     }
 
     private fun readInput(): JSONObject {
@@ -115,23 +131,12 @@ object RootTaskMain {
                 text = item.optString("message"),
                 result = result,
                 items = item.optString("items"),
+                accountId = item.optString("accountId"),
+                accountLabel = item.optString("accountLabel"),
+                taskType = taskType,
+                accountGeneration = item.optString("accountGeneration"),
             )
-            val delivery = runCatching {
-                val broadcast = runCatching {
-                    RootCommandRunner.execute(
-                        ProcessBuilder(rootTaskNotificationBroadcastArgs(message)), timeoutSeconds = 10,
-                    )
-                }.getOrNull()
-                // 广播被系统冻结时 am 依旧返回 0，只有接收器回执 result=-1 才算真的落地。
-                if (broadcast != null && broadcast.exitCode == 0 && rootTaskBroadcastConfirmed(broadcast.output)) return@runCatching
-                val activity = RootCommandRunner.execute(
-                    ProcessBuilder(rootTaskNotificationActivityArgs(message)), timeoutSeconds = 10,
-                )
-                check(activity.exitCode == 0) {
-                    "broadcast=${broadcast?.exitCode ?: -1} activity=${activity.exitCode} " +
-                        ((broadcast?.diagnosticOutput.orEmpty() + activity.diagnosticOutput).take(200))
-                }
-            }
+            val delivery = deliverNotification(message)
             // 直投失败时保留待发队列，交给后续 Root 同步兜底，并在状态目录留痕便于排查。
             delivery.exceptionOrNull()?.let { failure ->
                 logFailure("notify_failed $id ${failure.message?.take(200) ?: failure.javaClass.simpleName}")
@@ -143,6 +148,34 @@ object RootTaskMain {
                 "-f", "0x01000000",
                 "-a", RootTaskRepository.SYNC_ACTION, "-n", RootTaskRepository.SYNC_COMPONENT), timeoutSeconds = 10)
         }.onFailure { logFailure("sync_broadcast ${it.message?.take(200) ?: it.javaClass.simpleName}") }
+    }
+
+    private fun notifyProgress(repository: RootTaskRepository, accountId: String, type: String, phase: String) {
+        runCatching {
+            deliverNotification(RootTaskNotificationBroadcast(
+                id = "progress:$accountId:$type", title = "", text = "", result = "", items = "",
+                accountId = accountId, accountLabel = repository.accountLabel(accountId), taskType = type,
+                phase = phase, eventAt = System.currentTimeMillis(),
+                accountGeneration = repository.accountGeneration(accountId),
+            )).getOrThrow()
+        }.onFailure { logFailure("progress_failed account=$accountId type=$type phase=$phase") }
+    }
+
+    private fun deliverNotification(message: RootTaskNotificationBroadcast) = runCatching {
+        val broadcast = runCatching {
+            RootCommandRunner.execute(
+                ProcessBuilder(rootTaskNotificationBroadcastArgs(message)), timeoutSeconds = if (message.phase.isBlank()) 10 else 3,
+            )
+        }.getOrNull()
+        // 广播被系统冻结时 am 依旧返回 0，只有接收器回执 result=-1 才算真的落地。
+        if (broadcast != null && broadcast.exitCode == 0 && rootTaskBroadcastConfirmed(broadcast.output)) return@runCatching
+        val activity = RootCommandRunner.execute(
+            ProcessBuilder(rootTaskNotificationActivityArgs(message)), timeoutSeconds = if (message.phase.isBlank()) 10 else 3,
+        )
+        check(activity.exitCode == 0) {
+            "broadcast=${broadcast?.exitCode ?: -1} activity=${activity.exitCode} " +
+                ((broadcast?.diagnosticOutput.orEmpty() + activity.diagnosticOutput).take(200))
+        }
     }
 
     /** 把 Root 侧异常写进状态目录日志，避免静默丢通知后无从排查。 */

@@ -1,6 +1,5 @@
 package com.reamicro.fix.core
 
-import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.*
 import com.android.tools.smali.dexlib2.iface.reference.*
 import java.lang.reflect.Modifier
@@ -528,8 +527,11 @@ internal object HostStorageQueries {
             val composer = out.type("composer", requireNotNull(content.paramTypes[3]))
             out.type("scope", requireNotNull(content.paramTypes[0]))
             val receiver = out.type("receiver", requireNotNull(content.paramTypes[1]))
-            out.method("local", sheet.methods.filter { Modifier.isStatic(it.modifiers) && it.paramTypeNames ==
-                listOf(function.name, composer.name, "int") && it.returnTypeName == "void" }.one("local import row"))
+            val localId = base["method:$SHEET#LocalLibrary"]
+            val localRows = if (localId == null) sheet.methods else listOf(method(localId))
+            out.method("local", localRows.filter { it.className == sheet.name && Modifier.isStatic(it.modifiers) &&
+                it.paramTypeNames == listOf(function.name, composer.name, "int") && it.returnTypeName == "void"
+            }.one("local import row"))
             out.method("authorized", method(base.getValue("method:$SHEET#CloudAuthorizedRow")))
             val unauthorized = out.method("unauthorized", method(base.getValue("method:$SHEET#CloudUnauthRow")))
             val nativeFolder = method(base.getValue("method:${ACCOUNT_SCREENS.getValue("local")}#DefaultFolder"))
@@ -714,13 +716,13 @@ internal object HostStorageQueries {
 
     /** Only the small bytecode facts not exposed by DexKit's reference graph are interpreted here. */
     private class StorageCode(apk: String) {
-        private val methods: Map<String, Method> = HostDexIndex.forApk(apk).methods
-        fun hasMethod(id: String): Boolean = id in methods
-        fun classTokens(id: String): Set<String> = (methods.getValue(id).implementation?.instructions ?: emptyList()).mapNotNull {
+        private val index = HostDexIndex.forApk(apk)
+        fun hasMethod(id: String): Boolean = index.findMethod(id) != null
+        fun classTokens(id: String): Set<String> = (index.method(id).implementation?.instructions ?: emptyList()).mapNotNull {
             if (it.opcode.toString() == "CONST_CLASS") ((it as? ReferenceInstruction)?.reference as? TypeReference)?.type else null
         }.toSet()
         fun constructorOrigins(id: String): Map<String, Int> {
-            val method = methods.getValue(id); val body = requireNotNull(method.implementation)
+            val method = index.method(id); val body = requireNotNull(method.implementation)
             val instructions = body.instructions.toList()
             if (body.tryBlocks.isNotEmpty() || instructions.any { it is OffsetInstruction }) return emptyMap()
             val registers = HashMap<Int, Int>()
@@ -746,7 +748,7 @@ internal object HostStorageQueries {
             return result
         }
         fun defaultMaskBits(id: String, parameter: Int): Set<Int> {
-            val method = methods.getValue(id); val body = requireNotNull(method.implementation)
+            val method = index.method(id); val body = requireNotNull(method.implementation)
             var register = body.registerCount - (if (method.accessFlags and 8 == 0) 1 else 0) -
                 method.parameterTypes.sumOf { if (it.toString() in setOf("J", "D")) 2 else 1 }
             if (method.accessFlags and 8 == 0) register++
@@ -767,7 +769,7 @@ internal object HostStorageQueries {
                 reference is StringReference && reference.string == text
             }
         private fun branchMatches(id: String, discriminator: String, tag: Int, matches: (Instruction) -> Boolean): Boolean {
-            val body = requireNotNull(methods.getValue(id).implementation); val code = body.instructions.toList()
+            val body = requireNotNull(index.method(id).implementation); val code = body.instructions.toList()
             val offsets = IntArray(code.size); var offset = 0
             code.forEachIndexed { index, instruction -> offsets[index] = offset; offset += instruction.codeUnits }
             val at = offsets.withIndex().associate { it.value to it.index }

@@ -12,6 +12,7 @@ class CloudTaskNotificationReceiver : BroadcastReceiver() {
         ModuleLogState.applyFromIntent(intent)
         ModuleLogBuffer.attach(context.applicationContext)
         if (intent.action != CloudTaskNotifications.ACTION_POST) return
+        if (!intent.getStringExtra(CloudTaskNotifications.EXTRA_PHASE).isNullOrBlank()) return
         val posted = CloudTaskNotifications.post(context.applicationContext, intent, source = "receiver")
 
         if (posted) setResultCode(Activity.RESULT_OK)

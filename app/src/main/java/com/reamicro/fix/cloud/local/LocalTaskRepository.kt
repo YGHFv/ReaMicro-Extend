@@ -10,6 +10,7 @@ interface LocalTaskRepository {
     fun list(accountId: String): List<LocalTask>
     fun get(accountId: String, taskType: String): LocalTask? = list(accountId).firstOrNull { it.taskType == taskType }
     fun token(accountId: String): String
+    fun accountGeneration(accountId: String): String = ""
     fun runtimeState(accountId: String, taskType: String): JSONObject
     fun recordState(accountId: String, taskType: String, state: JSONObject)
     fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean = true)
@@ -50,6 +51,11 @@ internal fun localTaskFromJson(taskType: String, obj: JSONObject): LocalTask {
     )
 }
 
+/** Compose and Root task switches own the full workflow; host preferences stay independent. */
+internal fun normalizeModuleMerchantConfig(account: JSONObject): JSONObject = account.apply {
+    optJSONObject("tasks")?.optJSONObject("traveling_merchant")?.put("merchantAutoComplete", true)
+}
+
 internal fun applyLocalTaskExecution(
     current: JSONObject, task: LocalTask, state: JSONObject, now: Long = System.currentTimeMillis(),
 ) = LocalTaskRuntimeMerge.complete(current, task.configUpdatedAt, state, now)
@@ -88,9 +94,26 @@ internal fun nextLocalTaskAt(task: LocalTask, state: JSONObject, checkin: JSONOb
 internal fun mergeLocalTaskSnapshot(current: JSONObject?, incoming: JSONObject): JSONObject =
     LocalTaskRuntimeMerge.snapshot(current, incoming)
 
+/** Root snapshots can update an imported account, but cannot recreate it after deletion. */
+internal fun applyExistingLocalTaskAccountSnapshot(current: JSONObject?, incoming: JSONObject) {
+    if (current == null || current.optString("accountGeneration") != incoming.optString("accountGeneration")) return
+    val tasks = incoming.optJSONObject("tasks") ?: return
+    val existing = current.optJSONObject("tasks") ?: JSONObject().also { current.put("tasks", it) }
+    tasks.keys().forEach { type ->
+        val task = tasks.optJSONObject(type) ?: return@forEach
+        existing.put(type, mergeLocalTaskSnapshot(existing.optJSONObject(type), task))
+    }
+    applyLocalTaskRecordsSnapshot(current, incoming)
+}
+
+internal fun localTaskAccountStateCurrent(account: JSONObject, state: JSONObject): Boolean =
+    !state.has(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT) ||
+        state.optString(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT) == account.optString("accountGeneration")
+
 internal fun rescheduleLocalTasks(store: LocalTaskRepository, now: Long): Int {
     var updated = 0
     for (accountId in store.accountIds()) {
+        val generation = store.accountGeneration(accountId)
         val checkin = store.runtimeState(accountId, "yeshe_checkin")
         for (task in store.list(accountId)) {
             val state = store.runtimeState(accountId, task.taskType)
@@ -105,7 +128,8 @@ internal fun rescheduleLocalTasks(store: LocalTaskRepository, now: Long): Int {
             val next = AutoReadTimeLock.clampNextAt(task, state, candidate, now)
             if (next == task.nextRunAt) continue
             store.recordState(accountId, task.taskType, JSONObject().put("nextRunAt", next)
-                .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt))
+                .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt)
+                .put(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT, generation))
             updated++
         }
     }

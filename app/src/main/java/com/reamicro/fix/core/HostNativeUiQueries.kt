@@ -167,16 +167,27 @@ internal object HostNativeUiQueries {
         field("center", boxCall.arguments[0])
         val spacing = anchor("Arrangement#spacedAligned(").declaredClass!!
         type("spacing", spacing.name)
-        val rowContents = row.callers
-        val weight = save("weight", find(MethodMatcher.create().usingEqStrings("invalid weight; must be greater than zero")
-            .paramTypes(modifier, "float").returnType(modifier)).filter { m ->
-                !Modifier.isStatic(m.modifiers) && rowContents.any { caller ->
-                    caller.usingFields.any { it.field.typeName == m.className }
-                }
-            }.one("row weight"))
+        val weights = find(MethodMatcher.create().usingEqStrings("invalid weight; must be greater than zero")
+            .returnType(modifier)).filter { !Modifier.isStatic(it.modifiers) }
+        val explicitFill = listOf("float", modifier, "boolean")
+        val columns = weights.filter { it.paramTypeNames == explicitFill }
+        val columnWeight = columns.singleOrNull() ?: columns.filter { candidate ->
+            candidate.declaredClass!!.methods.any { !Modifier.isStatic(it.modifiers) && it.returnTypeName == modifier &&
+                it.paramTypeNames == listOf(modifier, column.paramTypeNames[1]) }
+        }.one("column weight with horizontal alignment")
+        val rowCallers = row.callers.distinctBy { it.descriptor }
+        val implicitFill = listOf(modifier, "float")
+        val candidates = weights.filter { candidate ->
+            val legacy = candidate.paramTypeNames == implicitFill
+            (legacy || (candidate.paramTypeNames == explicitFill && candidate.className != columnWeight.className)) &&
+                rowCallers.any { caller -> caller.usingFields.any { access ->
+                    val field = access.field
+                    field.typeName == candidate.className &&
+                        (legacy || (Modifier.isStatic(field.modifiers) && field.declaredClassName == candidate.className))
+                } }
+        }
+        val weight = save("weight", candidates.one("row weight"))
         out["field:rowScope"] = weight.declaredClass!!.fields.single { Modifier.isStatic(it.modifiers) && it.typeName == weight.className }.descriptor
-        val columnWeight = find(MethodMatcher.create().usingEqStrings("invalid weight; must be greater than zero")
-            .paramTypes("float", modifier, "boolean").returnType(modifier)).one("column weight")
         out["field:columnScope"] = columnWeight.declaredClass!!.fields.single { Modifier.isStatic(it.modifiers) && it.typeName == columnWeight.className }.descriptor
         val fillWidth = save("fillWidth", title.invokes.filter {
             it.paramTypeNames == listOf(modifier, "float") && it.returnTypeName == modifier

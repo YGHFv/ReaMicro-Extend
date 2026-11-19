@@ -1,9 +1,10 @@
+import org.apache.tools.ant.filters.FixCrLfFilter
 import org.gradle.api.tasks.Sync
 import java.io.File
 import java.util.Properties
 
 plugins {
-    id("io.gitlab.arturbosch.detekt")
+    id("dev.detekt")
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
@@ -63,10 +64,37 @@ val generatedRootModuleRoot = generatedRootModuleDir.get().asFile
 val bundleModule by tasks.registering(Zip::class) {
     archiveFileName.set("ReaMicro-Automation-Root-$rootModuleVersion.zip")
     destinationDirectory.set(generatedRootModuleDir.map { it.dir("module") })
+    inputs.property("rootModuleVersionCode", rootModuleVersionCode)
+    outputs.dir(destinationDirectory).withPropertyName("rootModuleAssets")
+    outputs.upToDateWhen {
+        destinationDirectory.get().asFile.listFiles().orEmpty().none {
+            it.name.startsWith("ReaMicro-Automation-Root-") && it.extension == "zip" &&
+                it.name != archiveFileName.get()
+        }
+    }
 
     doFirst {
-        check(rootModuleSourceDir.file("bin/wake-timer").asFile.let { it.isFile && it.length() > 0 }) {
+        val moduleVersions = rootModulePropText.lineSequence()
+            .filter { it.startsWith("versionCode=") }.map { it.substringAfter('=') }.toList()
+        check(rootModuleVersionCode > 0 && moduleVersions == listOf(rootModuleVersionCode.toString())) {
+            "Root module.prop 必须包含唯一的正整数 versionCode，且不能包含前导零"
+        }
+        val runtimeVersions = rootModuleSourceDir.file("common.sh").asFile.readLines(Charsets.UTF_8)
+            .filter { it.startsWith("REAMICRO_MODULE_VERSION=") }
+            .map { it.substringAfter('=') }
+        check(runtimeVersions == listOf(rootModuleVersionCode.toString())) {
+            "Root 脚本与模块版本不匹配：module.prop versionCode=$rootModuleVersionCode，" +
+                "common.sh REAMICRO_MODULE_VERSION=$runtimeVersions；请同步版本后重新构建"
+        }
+        val wakeHelper = rootModuleSourceDir.file("bin/wake-timer").asFile
+        check(wakeHelper.isFile && wakeHelper.length() > 0) {
             "Root wake helper missing: module/reamicro-automation/bin/wake-timer"
+        }
+        val header = wakeHelper.inputStream().use { it.readNBytes(20) }
+        check(header.size == 20 &&
+            header.take(6) == listOf(0x7f, 0x45, 0x4c, 0x46, 2, 1).map { it.toByte() } &&
+            header[18] == 0xb7.toByte() && header[19] == 0.toByte()) {
+            "Root wake helper must be a little-endian arm64 ELF executable"
         }
         destinationDirectory.get().asFile.listFiles()?.filter {
             it.name.startsWith("ReaMicro-Automation-Root-") && it.extension == "zip" &&
@@ -75,9 +103,13 @@ val bundleModule by tasks.registering(Zip::class) {
     }
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    dirPermissions { unix("755") }
 
     from(rootModuleSourceDir) {
-        include("*.sh")
+        include("*.sh", "META-INF/com/google/android/update-binary")
+        filteringCharset = "UTF-8"
+        filter<FixCrLfFilter>("eol" to FixCrLfFilter.CrLf.newInstance("lf"))
         filePermissions { unix("755") }
     }
     from(rootModuleSourceDir) {
@@ -85,15 +117,9 @@ val bundleModule by tasks.registering(Zip::class) {
         filePermissions { unix("755") }
     }
     from(rootModuleSourceDir) {
-        include("META-INF/com/google/android/update-binary")
-        filePermissions { unix("755") }
-    }
-    from(rootModuleSourceDir) {
-        include("META-INF/com/google/android/updater-script")
-        filePermissions { unix("644") }
-    }
-    from(rootModuleSourceDir) {
-        include("module.prop")
+        include("module.prop", "META-INF/com/google/android/updater-script")
+        filteringCharset = "UTF-8"
+        filter<FixCrLfFilter>("eol" to FixCrLfFilter.CrLf.newInstance("lf"))
         filePermissions { unix("644") }
     }
 }
@@ -104,6 +130,8 @@ android {
     compileSdk = 37
 
     androidResources {
+        // Module OkHttp requests use NO_COOKIES and never query topPrivateDomain.
+        ignoreAssetsPatterns += "PublicSuffixDatabase.list"
         // 仅保留中英文资源及对应地区变体。
         localeFilters += listOf(
             "en", "en-rAU", "en-rCA", "en-rGB", "en-rIN", "en-rXC",
@@ -127,7 +155,6 @@ android {
 
     buildFeatures {
         buildConfig = true
-
         compose = true
     }
 
@@ -152,7 +179,6 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
-
             signingConfig = if (hasReleaseSigning) signingConfigs.getByName("release") else null
         }
     }
@@ -173,30 +199,28 @@ tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configu
 }
 
 detekt {
-    buildUponDefaultConfig = true
-    allRules = false
+    buildUponDefaultConfig.set(true)
+    allRules.set(false)
     config.setFrom(rootProject.files("config/detekt/detekt.yml"))
-    source.setFrom(files("src/main/java"))
-    ignoreFailures = true
-    parallel = true
+    source.setFrom(files("src/main/java", "src/main/kotlin"))
+    basePath.set(rootProject.layout.projectDirectory)
+    // Findings remain informational; configuration and execution errors must fail.
+    ignoreFailures.set(false)
+    failOnSeverity.set(dev.detekt.gradle.extensions.FailOnSeverity.Never)
+    parallel.set(true)
 }
 
-tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
-    jvmTarget = JavaVersion.VERSION_17.toString()
+tasks.withType<dev.detekt.gradle.Detekt>().configureEach {
+    jvmTarget.set(JavaVersion.VERSION_17.toString())
     reports {
         html.required.set(true)
-        txt.required.set(true)
-        xml.required.set(false)
+        markdown.required.set(true)
+        checkstyle.required.set(false)
         sarif.required.set(false)
-        md.required.set(false)
     }
 }
 
 dependencies {
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20260719")
-    testImplementation("org.xerial:sqlite-jdbc:3.49.1.0")
-
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation(project(":scripta-editor"))

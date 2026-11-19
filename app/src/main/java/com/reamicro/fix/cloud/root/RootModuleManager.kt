@@ -26,15 +26,15 @@ internal data class RootModuleManager(val kind: Kind, val executable: String) {
         else -> "${quote(executable)} module disable $MODULE_ID"
     }
 
-    fun cancelStaging(): String =
-        "test ! -L '$MODULE_DIRECTORY' && test ! -L '$UPDATE_DIRECTORY' && " +
-            "rm -rf '$UPDATE_DIRECTORY' && test ! -e '$UPDATE_DIRECTORY' && " +
-            "rm -f '$MODULE_DIRECTORY/update'"
-
     companion object {
         const val MODULE_ID = "reamicro_automation"
         const val MODULE_DIRECTORY = "/data/adb/modules/$MODULE_ID"
         const val UPDATE_DIRECTORY = "/data/adb/modules_update/$MODULE_ID"
+
+        fun cancelStaging(): String =
+            "test ! -L '$MODULE_DIRECTORY' && test ! -L '$UPDATE_DIRECTORY' && " +
+                "rm -rf '$UPDATE_DIRECTORY' && test ! -e '$UPDATE_DIRECTORY' && " +
+                "rm -f '$MODULE_DIRECTORY/update'"
 
         fun quote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 

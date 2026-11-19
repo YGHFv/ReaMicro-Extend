@@ -189,6 +189,8 @@ class ReaMicroLibXposedEntry : XposedModule() {
                 com.reamicro.fix.core.HookInstallReport.install("Entry", "NativeThemeCapture") {
                     HookRuntime.withManagementHooks { HostThemeColors.install(classLoader) }
                 }
+                HookRuntime.withManagementHooks { HostSettingsDialogs.install(classLoader, hookEntry.activityProvider) }
+                DexKitUpdateScan.onUiReady()
             },
         )
         HookRuntime.log("ReaMicro API102 entry ready: package=$packageName, " +

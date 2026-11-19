@@ -38,19 +38,23 @@ internal object HostSettingsDialogs {
     private val applicationThemeContents = WeakHashMap<Any, Boolean>()
     private val dialogs = linkedSetOf<NativeDialog>()
     private var retirementFailure: String? = null
-    private var installed = false
+    @Volatile private var installed = false
     private var rendering = 0
     private val sentences = ThreadLocal<ArrayDeque<NativeDialog>>()
 
     fun markTitle(view: TextView) { view.tag = TitleTag }
     fun markTitleRow(view: ViewGroup) { view.tag = TitleRowTag }
     fun markCard(view: View) { view.tag = CardTag }
+    val ready: Boolean get() = installed
 
-    fun install(hook: ReaMicroSettingsHook): Boolean {
+    @Synchronized fun install(loader: ClassLoader, activityProvider: () -> Activity?): Boolean {
         if (installed) return true
         return HookInstallReport.install("ReaMicroSettingsHook", "nativeSettingsDialogs") {
             val ui = requireNotNull(HostUiBindings.current)
             val native = requireNotNull(HostDialogBindings.current)
+            requireNotNull(HostTypographyBindings.current)
+            requireNotNull(com.reamicro.fix.core.HostIntegrationBindings.androidView)
+            requireNotNull(com.reamicro.fix.core.HostRuntimeBindings.coroutines)
             val textParameters = ui.method("text").parameterTypes
             val titleStyleSlot = textParameters.indices.single {
                 textParameters[it] == ui.field("typography.labelLarge").type
@@ -59,7 +63,7 @@ internal object HostSettingsDialogs {
                 textParameters[it] == ui.composerClass
             }
             val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
-            val themedContent = HostThemedPopupContent { composer -> capture(hook, composer) }
+            val themedContent = HostThemedPopupContent { composer -> capture(loader, activityProvider(), composer) }
             try {
                 handles += HookRuntime.hookMethod(native.method("theme"), object : HookCallback() {
                     override fun before(param: Call) {
@@ -85,7 +89,7 @@ internal object HostSettingsDialogs {
                                 owner.titleContent?.let { content ->
                                     val composer = requireNotNull(param.args[textComposerSlot])
                                     val modifier = param.args.getOrNull(1) ?: ui.value("modifier")
-                                    HostAndroidViews(hook.classLoader).render(
+                                    HostAndroidViews(loader).render(
                                         ui.function(ui.type("function1")) { content }, modifier, composer,
                                     )
                                     param.result = null
@@ -109,7 +113,7 @@ internal object HostSettingsDialogs {
                         val composer = requireNotNull(param.args[native.number("sentenceFieldComposer")])
                         val modifier = requireNotNull(param.args[native.number("sentenceFieldModifier")])
                         val content = requireNotNull(owner.form)
-                        HostAndroidViews(hook.classLoader).render(
+                        HostAndroidViews(loader).render(
                             ui.function(ui.type("function1")) { content }, modifier, composer,
                         )
                         param.result = null
@@ -129,7 +133,7 @@ internal object HostSettingsDialogs {
                             try {
                                 for (index in first until end) {
                                     val action = owner.actions[index]
-                                    HostAndroidViews(hook.classLoader).render(
+                                    HostAndroidViews(loader).render(
                                         ui.function(ui.type("function1")) {
                                             TextView(owner.owner).apply {
                                                 text = action.title
@@ -167,7 +171,7 @@ internal object HostSettingsDialogs {
                         val dismiss = param.args.getOrNull(0) ?: return
                         HostDialogCancellation.bindWindow(window, dismiss)
                         (window as? Dialog)?.window?.let { actual ->
-                            hook.activityProvider()?.let { inheritScanSystemBars(actual, it) }
+                            activityProvider()?.let { inheritScanSystemBars(actual, it) }
                         }
                     }
                 })
@@ -180,7 +184,7 @@ internal object HostSettingsDialogs {
                 handles += HookRuntime.hookMethod(updateWindow, object : HookCallback() {
                     override fun after(param: Call) {
                         val dialog = param.thisObject as? Dialog ?: return
-                        val activity = hook.activityProvider() ?: return
+                        val activity = activityProvider() ?: return
                         dialog.window?.let { inheritScanSystemBars(it, activity) }
                     }
                 })
@@ -192,7 +196,7 @@ internal object HostSettingsDialogs {
                         val name = dialog.javaClass.name
                         if (dialog.javaClass.classLoader !== HostSettingsDialogs::class.java.classLoader ||
                             !(name.endsWith(".DialogWrapper") || name.endsWith(".ModalBottomSheetDialog"))) return
-                        val activity = hook.activityProvider() ?: return
+                        val activity = activityProvider() ?: return
                         dialog.window?.let { com.reamicro.fix.ui.DialogWindowStyle.apply(it, activity.window) }
                     }
                 })
@@ -244,9 +248,12 @@ internal object HostSettingsDialogs {
     }
 
     /** Must run while a themed host composable is executing, before leaving its slot. */
-    fun capture(hook: ReaMicroSettingsHook, composer: Any) {
+    fun capture(hook: ReaMicroSettingsHook, composer: Any) =
+        capture(hook.classLoader, hook.activityProvider(), composer)
+
+    private fun capture(loader: ClassLoader, activity: Activity?, composer: Any) {
         if (rendering != 0) return
-        val activity = hook.activityProvider() ?: return
+        if (activity == null) return
         val native = HostDialogBindings.current ?: return
         val ui = HostUiBindings.current ?: return
         if (!native.type("composer").isInstance(composer)) return
@@ -262,11 +269,14 @@ internal object HostSettingsDialogs {
             } finally {
                 ui.instance("endGroup", composer, false)
             }
-            EmbeddedHostUi.captureTypography(hook.classLoader, composer)
+            EmbeddedHostUi.captureTypography(loader, composer)
         }.onFailure { HookRuntime.logError("ReaMicro native popup parent capture failed", it) }
     }
 
-    fun create(hook: ReaMicroSettingsHook, activity: Activity): Dialog = NativeDialog(hook, activity)
+    fun create(activity: Activity): Dialog {
+        check(ready) { "Native popup hooks unavailable" }
+        return NativeDialog(activity)
+    }
 
     /** Results must outlive the route which happened to compose while the scan was running. */
     fun useApplicationTheme(dialog: Dialog) {
@@ -277,6 +287,12 @@ internal object HostSettingsDialogs {
     fun inheritSystemBars(dialog: Dialog) {
         check(dialog is NativeDialog && !dialog.isShowing)
         dialog.inheritSystemBars = true
+    }
+
+    /** Resolve Android content inside this window's host theme, including the first cold scan. */
+    fun bindTheme(dialog: Dialog, apply: (HostThemeColors.Snapshot) -> Unit) {
+        check(dialog is NativeDialog && !dialog.isShowing)
+        dialog.themeObserver = apply
     }
 
     fun setActions(dialog: Dialog, actions: List<Action>) {
@@ -383,7 +399,6 @@ internal object HostSettingsDialogs {
     }
 
     private class NativeDialog(
-        private val hook: ReaMicroSettingsHook,
         val owner: Activity,
     ) : Dialog(owner) {
         var titleText = "提示"; private set
@@ -393,6 +408,7 @@ internal object HostSettingsDialogs {
         var actions: List<Action> = emptyList()
         var applicationTheme = false
         var inheritSystemBars = false
+        var themeObserver: ((HostThemeColors.Snapshot) -> Unit)? = null
         var actionSlot = 0
         var renderingActions = false
         private var root: ViewGroup? = null
@@ -501,7 +517,15 @@ internal object HostSettingsDialogs {
                 ui.instance("startGroup", composer, 0x524D5044)
                 rendering++
                 try {
-                    if (ui.stateValue(state) == true) native.renderSentence(dismiss, slot, composer)
+                    if (ui.stateValue(state) == true) {
+                        themeObserver?.let { apply ->
+                            runCatching {
+                                EmbeddedHostUi.captureTypography(ui.loader, composer)
+                                HostThemeColors.readerSnapshot(requireNotNull(ui.call("colorScheme", composer)))?.let(apply)
+                            }.onFailure { HookRuntime.logError("ReaMicro native dialog theme unavailable", it) }
+                        }
+                        native.renderSentence(dismiss, slot, composer)
+                    }
                     val committedVisible = ui.stateValue(state) == true
                     native.onCommit(ui.callback(ui.type("function0")) commit@{
                         if (!showing || root !== mount) return@commit
@@ -630,6 +654,7 @@ internal object HostSettingsDialogs {
             }
             root = null
             titleContent = null
+            themeObserver = null
             actions = emptyList()
             cancellation.release()
             synchronized(dialogs) { dialogs -= this }

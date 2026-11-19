@@ -30,6 +30,9 @@ internal object DexKitUpdateScan {
     private var dialog: Dialog? = null
     private var displayedSession: Session? = null
     private var displayedFinished = false
+    private var displayedNative = false
+    private var displayedHook: ReaMicroSettingsHook? = null
+    private var uiReadyChecked = false
     @Volatile private var session: Session? = null
     private var attempted: HostScanUpdateStamp? = null
     private val readiness = HostScanReadiness()
@@ -102,6 +105,13 @@ internal object DexKitUpdateScan {
     fun onStartupResume(activity: Activity) {
         resumed = WeakReference(activity)
         if (startupRunning || session != null) showSession()
+    }
+
+    fun onUiReady() {
+        main.post {
+            uiReadyChecked = true
+            showSession()
+        }
     }
 
     fun finishStartup(context: Context, report: HostAutoScanner.Report?, failure: Throwable? = null) {
@@ -343,12 +353,13 @@ internal object DexKitUpdateScan {
     private fun showSession(): Boolean {
         val activity = liveActivity() ?: return false
         val current = session ?: return false
-        // 查询陆续就绪和页面恢复会重复请求展示；同一次扫描只在完成时切换窗口。
+        // 早期保留系统启动画面，UI 查询就绪后再展示宿主弹窗。
+        if (startupRunning && !uiReadyChecked) return false
+        val nativeReady = HostSettingsDialogs.ready
+        val hook = ReaMicroSettingsHook.activeInstanceOrNull()?.takeIf { nativeReady && current.finished }
         if (dialog?.isShowing == true && displayedSession === current &&
-            displayedFinished == current.finished) return true
-        val hook = ReaMicroSettingsHook.activeInstanceOrNull()
-        val nativeReady = hook != null && com.reamicro.fix.core.HostDialogBindings.current != null &&
-            com.reamicro.fix.core.HostUiBindings.current != null
+            displayedFinished == current.finished && displayedNative == nativeReady &&
+            displayedHook === hook) return true
         val onClose = {
             if (session === current && current.finished) {
                 val prefs = activity.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -360,24 +371,25 @@ internal object DexKitUpdateScan {
                 HookRuntime.logAlways("ReaMicro DexKit startup result acknowledged")
             }
         }
-        fun fallback(): Dialog = showStartupScanProgress(activity,
-            if (current.finished) listOfNotNull(current.error, current.report?.summary())
-                .joinToString("\n").ifBlank { "扫描未完成，请重载后重试" } else null) {
+        val resultText = if (current.finished) listOfNotNull(current.error, current.report?.summary())
+            .joinToString("\n").ifBlank { "扫描未完成，请重载后重试" } else null
+        val reload = {
             if (session === current && current.finished) {
                 onClose()
                 main.post { com.reamicro.fix.reload.HostHotReload.request(activity) }
             }
         }
+        var actualNative = nativeReady
         val replacement = runCatching {
-            // 扫描中保持独立标题行，避免宿主提取标题后把右上角进度圈挪到内容区。
-            if (!current.finished || !nativeReady || hook == null) return@runCatching fallback()
+            if (hook == null) return@runCatching showStartupScanProgress(activity, resultText, reload)
             hook.showDexKitUpdateDialog(
                 activity, current.reason, current.finished, current.report, current.error,
                 onClose,
             )
         }.recoverCatching {
             HookRuntime.logError("ReaMicro DexKit update dialog failed", it)
-            fallback()
+            actualNative = false
+            showFallbackStartupScanProgress(activity, resultText, reload)
         }.getOrElse {
             // 新窗口未能显示时保留旧窗口，不让扫描过程或结果无提示地消失。
             HookRuntime.logError("ReaMicro DexKit fallback dialog failed", it)
@@ -387,6 +399,8 @@ internal object DexKitUpdateScan {
         dialog = replacement
         displayedSession = current
         displayedFinished = current.finished
+        displayedNative = actualNative
+        displayedHook = hook
         runCatching { previous?.dismiss() }
         HookRuntime.logAlways("ReaMicro DexKit result dialog shown: finished=${current.finished}")
         return true
@@ -397,6 +411,8 @@ internal object DexKitUpdateScan {
         dialog = null
         displayedSession = null
         displayedFinished = false
+        displayedNative = false
+        displayedHook = null
         runCatching { previous?.dismiss() }
     }
 

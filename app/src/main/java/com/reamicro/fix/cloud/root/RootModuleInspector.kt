@@ -58,7 +58,7 @@ internal object RootModuleInspector {
         module='${RootTaskRepository.MODULE_DIRECTORY}'
         state='${RootTaskRepository.STATE_DIRECTORY}'
         staged='${RootModuleManager.UPDATE_DIRECTORY}'
-        [ ! -L "${'$'}module" ] && [ ! -L "${'$'}staged" ] || exit 73
+        [ ! -L "${'$'}module" ] && [ ! -L "${'$'}staged" ] && [ ! -L "${'$'}state" ] || exit 73
         if [ "${'$'}(getprop persist.sys.safemode 2>/dev/null)" = 1 ] ||
            [ "${'$'}(getprop ro.sys.safemode 2>/dev/null)" = 1 ]; then echo safeMode=1; fi
         [ -d "${'$'}staged" ] && echo stagedPresent=1
@@ -72,8 +72,7 @@ internal object RootModuleInspector {
         [ -f "${'$'}module/update" ] && echo update=1
         [ -f "${'$'}state/stop" ] && echo stopped=1
         module_version() {
-            version=${'$'}(sed -n 's/^REAMICRO_MODULE_VERSION=//p' "${'$'}1/common.sh" 2>/dev/null | head -n 1)
-            [ -n "${'$'}version" ] || version=${'$'}(sed -n 's/^versionCode=//p' "${'$'}1/module.prop" 2>/dev/null | head -n 1)
+            version=${'$'}(sed -n 's/^versionCode=//p' "${'$'}1/module.prop" 2>/dev/null)
             case "${'$'}version" in ''|*[!0-9]*) version=0 ;; esac
             printf '%s' "${'$'}version"
         }
@@ -83,21 +82,31 @@ internal object RootModuleInspector {
                 [ -f "${'$'}1/${'$'}part" ] && [ -s "${'$'}1/${'$'}part" ] &&
                     [ -r "${'$'}1/${'$'}part" ] && [ ! -L "${'$'}1/${'$'}part" ] || return 1
             done
+            expected_version=${'$'}(module_version "${'$'}1")
+            [ "${'$'}expected_version" -gt 0 ] || return 1
+            runtime_version=${'$'}(sed -n 's/^REAMICRO_MODULE_VERSION=//p' "${'$'}1/common.sh" 2>/dev/null)
+            [ "${'$'}runtime_version" = "${'$'}expected_version" ] || return 1
             for part in action.sh runner.sh service.sh watchdog.sh stop.sh uninstall.sh; do
                 [ -x "${'$'}1/${'$'}part" ] || return 1
             done
-            if [ "${'$'}(module_version "${'$'}1")" -ge 10 ]; then
+            if [ "${'$'}expected_version" -ge 10 ]; then
                 [ -f "${'$'}1/bin/wake-timer" ] && [ -s "${'$'}1/bin/wake-timer" ] &&
                     [ -x "${'$'}1/bin/wake-timer" ] && [ ! -L "${'$'}1/bin/wake-timer" ] || return 1
             fi
+            if [ "${'$'}expected_version" -ge 12 ]; then
+                [ -f "${'$'}1/busybox.path" ] && [ -r "${'$'}1/busybox.path" ] &&
+                    [ ! -L "${'$'}1/busybox.path" ] || return 1
+                busybox_path=${'$'}(cat "${'$'}1/busybox.path" 2>/dev/null)
+                case "${'$'}busybox_path" in /*) ;; *) return 1 ;; esac
+                [ -f "${'$'}busybox_path" ] && [ -x "${'$'}busybox_path" ] || return 1
+            fi
         }
-        staged_version=${'$'}(sed -n 's/^versionCode=//p' "${'$'}staged/module.prop" 2>/dev/null | head -n 1)
-        [ "${'$'}(module_version "${'$'}staged")" = "${'$'}staged_version" ] &&
-            complete_module "${'$'}staged" && echo stagedReady=1
+        staged_version=${'$'}(module_version "${'$'}staged")
+        complete_module "${'$'}staged" && echo stagedReady=1
         complete_module "${'$'}module" && echo ready=1
         version=${'$'}(module_version "${'$'}module")
         printf 'version=%s\n' "${'$'}version"
-        printf 'staged='; sed -n 's/^versionCode=//p' "${'$'}staged/module.prop" 2>/dev/null | head -n 1; echo
+        printf 'staged=%s\n' "${'$'}staged_version"
         printf 'heartbeat='; cat "${'$'}state/heartbeat" 2>/dev/null; echo
         wake_mode=${'$'}(head -n 1 "${'$'}state/wake-mode" 2>/dev/null)
         case "${'$'}wake_mode" in realtime_alarm|boottime_alarm|unavailable) ;; *) wake_mode=unknown ;; esac
@@ -109,6 +118,7 @@ internal object RootModuleInspector {
             case "${'$'}pid" in ''|*[!0-9]*) return 1 ;; esac
             [ -r "/proc/${'$'}pid/cmdline" ] || return 1
             [ -r "/proc/${'$'}pid/status" ] || return 1
+            grep -Eq '^Uid:[[:space:]]+0([[:space:]]|$)' "/proc/${'$'}pid/status" || return 1
             grep -Eq '^State:[[:space:]]+[XZ]' "/proc/${'$'}pid/status" && return 1
             tr '\000' '\n' <"/proc/${'$'}pid/cmdline" 2>/dev/null | grep -Fxq "${'$'}2"
         }

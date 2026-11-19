@@ -52,6 +52,74 @@ data class LocalTaskRecord(
 
 class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRepository {
 
+    internal fun accountLabel(accountId: String): String =
+        readAccount(accountId)?.let { localTaskAccount(accountId, it).label } ?: accountId
+
+    internal fun importCredentials(credentials: List<LocalTaskAccountCredential>) {
+        require(credentials.isNotEmpty()) { "凭证中没有账号" }
+        // Prepare every ciphertext before publishing any account from the import.
+        val encrypted = credentials.associate { it.account.id to encrypt(it.token) }
+        synchronized(WRITE_LOCK) {
+            val preferences = prefs() ?: error("本地任务状态不可用")
+            require((storedAccountIds() + encrypted.keys).toSet().size <= LocalTaskCredentials.MAX_ACCOUNTS) {
+                "最多支持 50 个账号"
+            }
+            val previous = encrypted.keys.associateWith { preferences.getString(accountKey(it), null) }
+            val editor = preferences.edit()
+            for (credential in credentials) {
+                val id = credential.account.id
+                val account = prepareCredentialImport(previous[id]?.let(::JSONObject), credential, encrypted.getValue(id))
+                editor.putString(accountKey(id), account.toString())
+            }
+            if (!editor.commit()) {
+                val rollback = preferences.edit()
+                previous.forEach { (id, value) ->
+                    if (value == null) rollback.remove(accountKey(id)) else rollback.putString(accountKey(id), value)
+                }
+                check(rollback.commit()) { "凭证保存失败，回滚失败，请重新导入" }
+                error("凭证保存失败，请重试")
+            }
+        }
+        syncRootConfiguration()
+    }
+
+    internal fun prepareCredentialImport(previous: JSONObject?, credential: LocalTaskAccountCredential, ciphertext: String): JSONObject {
+        val account = previous?.let { JSONObject(it.toString()) } ?: JSONObject()
+        if (previous == null) account.put("accountGeneration", java.util.UUID.randomUUID().toString())
+        account.put(KEY_TOKEN, ciphertext)
+        if (credential.account.nickname.isNotBlank()) account.put("nickname", credential.account.nickname)
+        val tasks = account.optJSONObject(KEY_TASKS) ?: JSONObject()
+        for (type in LocalTaskCredentials.taskTypes) {
+            if (!tasks.has(type)) tasks.put(type, writeTaskConfig(LocalTask(type,
+                forbiddenPawnPropIds = if (type == "pawn") CloudTaskLocalRunner.PROHIBITED_PAWN_PROP_HINTS.keys else emptySet()))
+                .put(KEY_CONFIG_UPDATED_AT, System.currentTimeMillis()))
+        }
+        return normalizeModuleMerchantConfig(account.put(KEY_TASKS, tasks))
+    }
+
+    internal fun setAccountRemark(accountId: String, remark: String) {
+        val normalized = remark.trim()
+        require(normalized.length <= 80 && normalized.none(Char::isISOControl)) { "备注最多 80 个字符，不能包含换行" }
+        check(readAccount(accountId) != null) { "账号不存在，请刷新后重试" }
+        editAccount(accountId, requireExisting = true) { root, _ -> root.put("remark", normalized) }
+        syncRootConfiguration()
+    }
+
+    internal fun deleteAccount(accountId: String) {
+        require(accountId.isNotBlank()) { "账号不可用" }
+        synchronized(WRITE_LOCK) {
+            val preferences = prefs() ?: error("本地任务状态不可用")
+            val key = accountKey(accountId)
+            val previous = preferences.getString(key, null) ?: return
+            commitLocalTaskAccountRestore(previous, null, { preferences.getString(key, null) }) { value ->
+                val editor = preferences.edit()
+                if (value == null) editor.remove(key) else editor.putString(key, value)
+                editor.commit()
+            }
+        }
+        syncRootConfiguration()
+    }
+
     override fun list(accountId: String): List<LocalTask> {
         if (accountId.isBlank()) return emptyList()
         val root = readAccount(accountId) ?: return emptyList()
@@ -76,7 +144,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     private fun saveTaskInternal(accountId: String, task: LocalTask, token: String, expected: LocalTask?, checkVersion: Boolean) {
         require(accountId.isNotBlank()) { "账号不可用，请重新登录" }
-        editAccount(accountId) { root, tasks ->
+        editAccount(accountId, create = com.reamicro.fix.core.HostPackages.contains(contextProvider()?.packageName.orEmpty()),
+            requireExisting = true) { root, tasks ->
             val existing = tasks.optJSONObject(task.taskType)
             if (checkVersion) {
                 check(if (expected == null) existing == null else existing != null &&
@@ -103,7 +172,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     fun setEnabled(accountId: String, taskType: String, enabled: Boolean, token: String = "") {
         if (accountId.isBlank()) return
-        editAccount(accountId) { root, tasks ->
+        editAccount(accountId, create = com.reamicro.fix.core.HostPackages.contains(contextProvider()?.packageName.orEmpty()),
+            requireExisting = true) { root, tasks ->
             val obj = tasks.optJSONObject(taskType) ?: JSONObject().put(KEY_TASK_TYPE, taskType)
             val now = System.currentTimeMillis()
             obj.put(KEY_CONFIG_UPDATED_AT, maxOf(now, obj.optLong(KEY_CONFIG_UPDATED_AT) + 1L))
@@ -117,7 +187,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     override fun recordState(accountId: String, taskType: String, state: JSONObject) {
         if (accountId.isBlank()) return
-        editAccount(accountId) { _, tasks ->
+        editAccount(accountId) { root, tasks ->
+            if (!localTaskAccountStateCurrent(root, state)) return@editAccount
             val obj = tasks.optJSONObject(taskType) ?: return@editAccount
             LocalTaskRuntimeMerge.patch(obj, state)
             tasks.put(taskType, obj)
@@ -129,10 +200,14 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         return decrypt(root.optString(KEY_TOKEN))
     }
 
+    override fun accountGeneration(accountId: String): String =
+        readAccount(accountId)?.optString("accountGeneration").orEmpty()
+
     fun refreshToken(accountId: String, token: String) {
         require(accountId.isNotBlank()) { "账号不可用，请重新登录" }
         require(token.isNotBlank()) { "当前阅微登录密钥为空，请重新登录阅微" }
-        editAccount(accountId) { root, _ -> root.put(KEY_TOKEN, encrypt(token)) }
+        editAccount(accountId, create = com.reamicro.fix.core.HostPackages.contains(contextProvider()?.packageName.orEmpty()),
+            requireExisting = true) { root, _ -> root.put(KEY_TOKEN, encrypt(token)) }
     }
 
     override fun runtimeState(accountId: String, taskType: String): JSONObject {
@@ -146,21 +221,21 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     fun recoverPendingAutomationTasks(now: Long = System.currentTimeMillis()) {
         for (accountId in storedAccountIds()) {
+            val generation = accountGeneration(accountId)
             for (task in list(accountId)) {
                 if (!task.enabled) continue
                 val state = recoveredAutomationState(task.taskType, runtimeState(accountId, task.taskType), now) ?: continue
                 recordState(accountId, task.taskType, state
-                    .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt))
+                    .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt)
+                    .put(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT, generation))
             }
         }
     }
 
     override fun accountIds(): List<String> = storedAccountIds()
-    override fun executionEnabled(): Boolean = contextProvider()?.let(ModuleTaskActivation::isEnabled) ?: true
 
     fun rescheduleEnabledTasks(now: Long = System.currentTimeMillis()): Int {
         val context = contextProvider()
-        if (context != null && !ModuleTaskActivation.isEnabled(context)) return 0
         if (context != null && com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(context)) {
             return com.reamicro.fix.cloud.root.RootTaskBridge.reschedule(context)
         }
@@ -230,39 +305,6 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         editAccount(accountId) { root, _ ->
             clearLocalTaskRecordsBefore(root, maxOf(System.currentTimeMillis(), root.optLong("recordsClearedAt") + 1L))
         }
-        val context = contextProvider() ?: return
-        if (context.packageName == LocalTaskMirror.MODULE_PACKAGE) syncRootConfiguration()
-        else LocalTaskMirror.push(context)
-    }
-
-    fun mirrorPayload(): JSONObject {
-        val prefs = prefs() ?: return JSONObject()
-        val accounts = JSONObject()
-        for (storageKey in prefs.all.keys) {
-            val accountId = accountIdFromStorageKey(storageKey) ?: continue
-            val root = runCatching { JSONObject(prefs.getString(storageKey, null) ?: "") }.getOrNull() ?: continue
-            accounts.put(
-                accountId,
-                JSONObject()
-                    .put(KEY_TOKEN, decrypt(root.optString(KEY_TOKEN)))
-                    .put("recordsClearedAt", root.optLong("recordsClearedAt"))
-                    .put(KEY_TASKS, root.optJSONObject(KEY_TASKS) ?: JSONObject()),
-            )
-        }
-        return JSONObject().put(KEY_ACCOUNTS, accounts)
-    }
-
-    fun applyMirror(accountId: String, tasks: JSONObject, token: String, recordsClearedAt: Long = 0L) {
-        if (accountId.isBlank()) return
-        editAccount(accountId) { root, existing ->
-            tasks.keys().forEach { taskType ->
-                val incoming = tasks.optJSONObject(taskType) ?: return@forEach
-                val current = existing.optJSONObject(taskType)
-                existing.put(taskType, mergeMirroredTask(taskType, current, incoming, System.currentTimeMillis()).put(KEY_TASK_TYPE, taskType))
-            }
-            if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
-            clearLocalTaskRecordsBefore(root, recordsClearedAt)
-        }
         syncRootConfiguration()
     }
 
@@ -278,6 +320,9 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             for (index in (records.length() - limit).coerceAtLeast(0) until records.length()) recent.put(records.get(index))
             accounts.put(accountId, JSONObject()
                 .put(KEY_TASKS, root.optJSONObject(KEY_TASKS) ?: JSONObject())
+                .put("nickname", root.optString("nickname"))
+                .put("remark", root.optString("remark"))
+                .put("accountGeneration", root.optString("accountGeneration"))
                 .put("recordsClearedAt", root.optLong("recordsClearedAt"))
                 .apply { if (limit > 0) put(KEY_RECORDS, recent) })
         }
@@ -288,20 +333,15 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         val accounts = payload.optJSONObject(KEY_ACCOUNTS) ?: return
         accounts.keys().forEach { accountId ->
             val account = accounts.optJSONObject(accountId) ?: return@forEach
-            val incomingTasks = account.optJSONObject(KEY_TASKS) ?: return@forEach
-            editAccount(accountId) { root, existing ->
-                incomingTasks.keys().forEach taskLoop@ { taskType ->
-                    val incoming = incomingTasks.optJSONObject(taskType) ?: return@taskLoop
-                    val current = existing.optJSONObject(taskType)
-                    existing.put(taskType, mergeLocalTaskSnapshot(current, incoming))
-                }
-                applyLocalTaskRecordsSnapshot(root, account)
+            editAccount(accountId) { root, _ ->
+                applyExistingLocalTaskAccountSnapshot(root, account)
             }
         }
     }
 
     override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean) {
         editAccount(accountId) { root, tasks ->
+            if (!localTaskAccountStateCurrent(root, state)) return@editAccount
             val current = tasks.optJSONObject(task.taskType) ?: return@editAccount
             applyLocalTaskExecution(current, task, state)
             appendLocalTaskRecord(root, record)
@@ -324,16 +364,17 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             root.put("notifications", remaining)
         }
     }
-    internal fun executionPayload(): JSONObject {
+    internal fun executionPayload(): JSONObject = synchronized(WRITE_LOCK) {
+        check(prefs() != null) { "本地任务状态不可用，未同步 Root 配置" }
         val accounts = JSONObject()
         for (accountId in accountIds()) {
-            val root = readAccount(accountId) ?: continue
+            val root = readAccount(accountId) ?: error("账号 $accountId 配置无法读取，未同步 Root 配置")
             accounts.put(accountId, root.apply {
                 remove("notifications")
                 put(KEY_TOKEN, decrypt(optString(KEY_TOKEN)))
             })
         }
-        return JSONObject().put(KEY_ACCOUNTS, accounts)
+        JSONObject().put(KEY_ACCOUNTS, accounts)
     }
 
 
@@ -379,7 +420,9 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     private fun syncRootConfiguration() {
         contextProvider()?.let { context ->
-            com.reamicro.fix.cloud.root.RootTaskBridge.requestSync(context)
+            if (context.packageName == com.reamicro.fix.notification.CloudTaskNotifications.MODULE_PACKAGE_NAME) {
+                com.reamicro.fix.cloud.root.RootTaskBridge.requestSync(context)
+            }
         }
     }
 
@@ -401,18 +444,32 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     private fun readAccount(accountId: String): JSONObject? {
         val raw = prefs()?.getString(accountKey(accountId), null) ?: return null
-        return runCatching { JSONObject(raw) }.getOrNull()
+        return runCatching { JSONObject(raw).also(::normalizeAccountConfig) }.getOrNull()
     }
 
-    private inline fun editAccount(accountId: String, block: (root: JSONObject, tasks: JSONObject) -> Unit) {
+    private fun normalizeAccountConfig(account: JSONObject) {
+        if (contextProvider()?.packageName == com.reamicro.fix.notification.CloudTaskNotifications.MODULE_PACKAGE_NAME) {
+            normalizeModuleMerchantConfig(account)
+        }
+    }
+
+    private inline fun editAccount(
+        accountId: String, create: Boolean = false, requireExisting: Boolean = false,
+        block: (root: JSONObject, tasks: JSONObject) -> Unit,
+    ) {
         synchronized(WRITE_LOCK) {
             val prefs = prefs() ?: return
             val stored = prefs.getString(accountKey(accountId), null)
+            if (stored == null && !create) {
+                check(!requireExisting) { "账号不存在，请刷新后重试" }
+                return
+            }
             val root = stored?.let(::JSONObject) ?: JSONObject()
             val tasks = root.optJSONObject(KEY_TASKS) ?: JSONObject().also { root.put(KEY_TASKS, it) }
             val before = root.toString()
             block(root, tasks)
             root.put(KEY_TASKS, tasks)
+            normalizeAccountConfig(root)
             val after = root.toString()
             if (after != before) {
                 check(prefs.edit().putString(accountKey(accountId), after).commit()) { "本地任务状态保存失败" }
@@ -494,6 +551,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             "dailyCounterDate", "dailyCounter", "lastDrawItems", "lastDrawResult", "lastDrawAt",
             "drawPending", "drawRewardLoreId",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
+            CloudTaskLocalRunner.KEY_READ_PENDING_BATCH,
             "lastPawnDate", "pawnUsedToday", "pawnLastCoin",
 
             CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG,

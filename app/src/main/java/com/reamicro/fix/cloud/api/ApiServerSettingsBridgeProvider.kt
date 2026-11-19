@@ -6,7 +6,6 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
 import android.os.Binder
-import com.reamicro.fix.cloud.local.LocalTaskBridgeRuntime
 import com.reamicro.fix.xposed.HookRuntime
 
 class ApiServerSettingsBridgeProvider : ContentProvider() {
@@ -15,22 +14,9 @@ class ApiServerSettingsBridgeProvider : ContentProvider() {
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         val appContext = context?.applicationContext ?: return null
         val caller = callingPackage
-        if (caller !in ALLOWED_CALLERS || !LocalTaskBridgeRuntime.trustedUid(appContext, Binder.getCallingUid())) {
+        if (caller !in ALLOWED_CALLERS || !ApiServerBridgeAccess.trustedUid(appContext, Binder.getCallingUid())) {
             HookRuntime.log("ReaMicro API settings mirror rejected caller=$caller method=$method")
             return Bundle().apply { putBoolean("saved", false) }
-        }
-        if (method == LocalTaskBridgeRuntime.PROVIDER_EXCHANGE) {
-            val identity = Binder.clearCallingIdentity()
-            try {
-                return runCatching {
-                    val request = LocalTaskBridgeRuntime.request(extras ?: Bundle())
-                    LocalTaskBridgeRuntime.replyBundle(LocalTaskBridgeRuntime.execute(appContext, request))
-                }.getOrElse {
-                    Bundle().apply { putString(LocalTaskBridgeRuntime.ERROR, "processing_failed") }
-                }
-            } finally {
-                Binder.restoreCallingIdentity(identity)
-            }
         }
         if (method != METHOD_SAVE) return Bundle().apply { putBoolean("saved", false) }
         val settings = extras?.toSettings() ?: return null

@@ -23,22 +23,35 @@ internal class ScrimBackdrop(
     private val scale: State<Float>? = null,
 ) : Backdrop by backdrop {
 
+    // Reused: recordings without a layerBlock must not allocate one per frame.
+    private val scaleOnlyLayerBlock: GraphicsLayerScope.() -> Unit = {
+        scale?.let {
+            // The host already applies this scale. Only invert it during sampling.
+            scaleX *= it.value
+            scaleY *= it.value
+        }
+    }
+
     override fun DrawScope.drawBackdrop(
         density: Density,
         coordinates: LayoutCoordinates?,
         layerBlock: (GraphicsLayerScope.() -> Unit)?,
-        downscaleFactor: Int,
+        downscaleFactor: Float,
     ) {
         with(backdrop) {
             drawBackdrop(
                 density = density,
                 coordinates = coordinates,
-                layerBlock = {
-                    layerBlock?.invoke(this)
-                    // The host already applies this scale. Only invert it during sampling.
-                    scale?.let {
-                        scaleX *= it.value
-                        scaleY *= it.value
+                layerBlock = when {
+                    scale == null -> layerBlock
+
+                    layerBlock == null -> scaleOnlyLayerBlock
+
+                    else -> {
+                        {
+                            layerBlock.invoke(this)
+                            scaleOnlyLayerBlock.invoke(this)
+                        }
                     }
                 },
                 downscaleFactor = downscaleFactor,
@@ -47,11 +60,8 @@ internal class ScrimBackdrop(
         val color = scrimColor.value
         if (color.alpha > 0f) {
             val padding = (density as? BackdropEffectScope)?.padding ?: 0f
-            val scaledPadding = if (downscaleFactor > 1) {
-                (padding / downscaleFactor).toInt().toFloat()
-            } else {
-                padding
-            }
+            // Exact padding: the recording offsets by `padding / level`, so rounding leaves a strip.
+            val scaledPadding = padding / downscaleFactor
             // Cover recording padding; SrcAtop preserves transparent scene pixels to prevent halos.
             drawRect(color, topLeft = Offset(-scaledPadding, -scaledPadding), size = size, blendMode = BlendMode.SrcAtop)
         }

@@ -122,6 +122,14 @@ internal class OnlineDownloadControl(val cancellation: TaskCancellation = TaskCa
         stage = Stage.COMMITTED
     }
 
+    /** A committed first batch stays in the library while the remaining chapters can still stop. */
+    @Synchronized
+    fun resumeAfterCheckpoint() {
+        check(stage == Stage.COMMITTED && !paused) { "首批导入尚未完成" }
+        cancellation.check()
+        stage = Stage.RUNNING
+    }
+
     @Synchronized
     fun finish() { stage = Stage.FINISHED }
 }

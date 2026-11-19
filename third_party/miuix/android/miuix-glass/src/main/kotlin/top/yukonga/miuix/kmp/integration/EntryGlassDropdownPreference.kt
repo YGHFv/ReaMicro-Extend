@@ -20,10 +20,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -122,8 +120,7 @@ fun EntryGlassDropdownPreference(
         exitTransition = ExitTransition.None,
         renderInRootScaffold = renderInRootScaffold,
     ) {
-        var origin by remember { mutableStateOf(Offset.Zero) }
-        Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot() }) {
+        Box(Modifier.fillMaxSize()) {
             GlassDropdownPopupContent(
                 show = expanded && actualEnabled,
                 onDismissRequest = { setExpanded(false) },
@@ -131,7 +128,6 @@ fun EntryGlassDropdownPreference(
                 backdrop = backdrop,
                 anchor = anchor,
                 sizing = sizing,
-                coordinateOrigin = origin,
                 onDismissFinished = { mounted.value = false },
             ) {
                 entry.items.forEach { item ->

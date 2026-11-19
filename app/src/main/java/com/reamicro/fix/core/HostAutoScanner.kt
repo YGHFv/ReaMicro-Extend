@@ -189,7 +189,7 @@ object HostAutoScanner {
                 if (cacheOnly && keys.any { session.cached(it) == null }) return@use null
                 if (cacheOnly && session.cached("symbols.records") == null) return@use null
                 val types = session.query("symbols.types", force,
-                    validate = { HostQuerySession.validateDescriptors(it, activeLoader) },
+                    validate = session::validateDescriptors,
                     find = HostSemanticQueries::queryTypes)
                 val values = types.values.toMutableMap()
                 val queryErrors = linkedSetOf<String>()
@@ -197,7 +197,7 @@ object HostAutoScanner {
                 HostSemanticQueries.groups.forEach { group ->
                     runCatching {
                         session.query("symbols.$group", force,
-                            validate = { HostQuerySession.validateDescriptors(it, activeLoader) },
+                            validate = session::validateDescriptors,
                             find = { bridge -> HostSemanticQueries.queryGroup(bridge, types.values, group) })
                     }.onSuccess { result ->
                         values.putAll(result.values)
@@ -210,7 +210,7 @@ object HostAutoScanner {
                 }
                 runCatching {
                     session.query("symbols.records", force,
-                        validate = { HostQuerySession.validateDescriptors(it, activeLoader) },
+                        validate = session::validateDescriptors,
                         find = { HostRecordQueries.query(apk, values) })
                 }.onSuccess { result ->
                     // Exact field dataflow may supply missing accessors, never replace a proven method query.

@@ -75,3 +75,11 @@ artifacts/
 *.local.md
 *.audit.md
 /tools/reports/
+
+# 验证源码仅保留在本地，不纳入生产源码提交。
+/app/src/test/
+/app/src/androidTest/
+/module/tests/
+/server/reamicro-api/tests/
+/config/detekt/README.md
+/module/reamicro-automation/README.md

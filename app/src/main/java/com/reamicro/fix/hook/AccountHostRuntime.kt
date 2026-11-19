@@ -143,6 +143,7 @@ internal object AccountHostRuntime {
         }
 
     fun beginIdentityMutation() = identityLock.withLock {
+        com.reamicro.fix.cloud.local.HostLocalTaskRunner.cancel()
         identityMutations++
         observedIdentity = null
         identityGeneration++
@@ -158,6 +159,7 @@ internal object AccountHostRuntime {
     private fun observeIdentity(value: Identity?): Identity? {
         val previous = observedIdentity
         if (previous?.accountId != value?.accountId || previous?.token != value?.token || previous?.session !== value?.session) {
+            if (previous != null) com.reamicro.fix.cloud.local.HostLocalTaskRunner.cancel()
             identityGeneration++
         }
         return value?.copy(generation = identityGeneration).also { observedIdentity = it }

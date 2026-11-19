@@ -1,4 +1,5 @@
 #!/system/bin/sh
+MODDIR=${0%/*}
 
 PACKAGE=com.reamicro.fix
 ACTIVITY=com.reamicro.fix.ui.ModuleMainActivity

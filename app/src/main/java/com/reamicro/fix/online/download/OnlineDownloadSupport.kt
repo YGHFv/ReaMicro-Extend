@@ -277,11 +277,13 @@ internal fun onlineCompletionRetryDelayMs(round: Int): Long =
 internal fun sleepOnlineCompletionRetryDelay(task: OnlineCompletionDownloadTask?, delayMs: Long) {
     val deadline = SystemClock.elapsedRealtime() + delayMs.coerceAtLeast(0L)
     while (true) {
+        com.reamicro.fix.reload.TaskCancellation.checkCurrent()
         task?.let { throwIfOnlineCompletionDownloadCancelled(it) }
         val remaining = deadline - SystemClock.elapsedRealtime()
         if (remaining <= 0L) break
         Thread.sleep(remaining.coerceAtMost(500L))
     }
+    com.reamicro.fix.reload.TaskCancellation.checkCurrent()
     task?.let { throwIfOnlineCompletionDownloadCancelled(it) }
 }
 

@@ -3,8 +3,11 @@ package com.reamicro.fix.reload
 import java.util.concurrent.CancellationException
 
 /** 将一次查询的子任务和阻塞 IO 绑定到同一个取消信号。 */
-internal class TaskCancellation private constructor(private val parent: TaskCancellation?) {
+internal class TaskCancellation private constructor(
+    private val parent: TaskCancellation?, private val checkActive: (() -> Boolean)? = null,
+) {
     constructor() : this(null)
+    constructor(checkActive: () -> Boolean) : this(null, checkActive)
 
     private var cancelled = false
     private val actions = linkedSetOf<() -> Unit>()
@@ -13,6 +16,7 @@ internal class TaskCancellation private constructor(private val parent: TaskCanc
         get() = synchronized(this) { cancelled } || parent?.isCancelled == true
 
     fun check() {
+        if (checkActive?.invoke() == false) cancel()
         if (isCancelled || Thread.currentThread().isInterrupted) {
             throw CancellationException("Task cancelled")
         }

@@ -83,6 +83,7 @@ import com.reamicro.fix.online.download.writeOnlineCompletionFailedChapters
 import com.reamicro.fix.online.download.onlineCompletionFailedChapter
 import com.reamicro.fix.online.download.sleepOnlineCompletionRetryDelay
 import com.reamicro.fix.online.download.onlineCompletionRetryDelayMs
+import com.reamicro.fix.online.download.retryOnlineCompletionChapters
 import com.reamicro.fix.online.download.throwIfOnlineCompletionDownloadCancelled
 import com.reamicro.fix.online.download.withOnlineCompletionTaskLock
 import com.reamicro.fix.online.download.onlineCompletionOnDemandPendingChapter
@@ -613,7 +614,9 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
                     nonRetryable.add(index)
                 }
                 val retryKind = onlineHttpRetryKind(error)
-                if (retryKind != OnlineHttpRetryKind.NONE && index !in nonRetryable) {
+                if (retryKind != OnlineHttpRetryKind.NONE && index !in nonRetryable &&
+                    localAttempt < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT
+                ) {
                     consecutiveServiceFailures++
                     val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
                     val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
@@ -649,21 +652,18 @@ internal fun WebDavDriveHook.retryOnlineCompletionLoggedFailures(
         onProgress(progress, "重试失败章节 ${retryIndex + 1}/${candidates.size}${onlineCompletionFailureSuffix(failed.size)}")
         attemptLoggedChapter(failure.index, immediateRetry = true)
     }
-    var retryRound = 0
-    while (failed.any { it !in nonRetryable && (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
-        retryRound++
-        val retryCandidates = failed.filter {
-            it !in nonRetryable && (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT
-        }
-        val waitMs = onlineCompletionRetryDelayMs(retryRound)
-        onProgress(23, "等待重试失败章节 ${retryCandidates.size} 章${onlineCompletionFailureSuffix(failed.size)}")
-        sleepOnlineCompletionRetryDelay(null, waitMs)
-        retryCandidates.forEachIndexed { retryIndex, index ->
-            val progress = 23 + ((retryIndex + 1) * 8 / retryCandidates.size.coerceAtLeast(1))
-            onProgress(progress, "重试失败章节 ${retryIndex + 1}/${retryCandidates.size}${onlineCompletionFailureSuffix(failed.size)}")
+    retryOnlineCompletionChapters(
+        candidates = { failed.filter { it !in nonRetryable && (roundAttemptsByIndex[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT } },
+        beforeRound = { round, remaining ->
+            onProgress(23, "等待重试失败章节 ${remaining.size} 章${onlineCompletionFailureSuffix(failed.size)}")
+            sleepOnlineCompletionRetryDelay(null, onlineCompletionRetryDelayMs(round))
+        },
+        attempt = { index, retryIndex, count ->
+            val progress = 23 + ((retryIndex + 1) * 8 / count.coerceAtLeast(1))
+            onProgress(progress, "重试失败章节 ${retryIndex + 1}/$count${onlineCompletionFailureSuffix(failed.size)}")
             attemptLoggedChapter(index, immediateRetry = false)
-        }
-    }
+        },
+    )
     val unresolved = remaining.values.sortedBy { it.index }
     logOnlineCompletionFinalFailures(target, unresolved.filter { it.index in failed }, "update-retry")
     writeOnlineCompletionFailedChapters(bookDir, target, unresolved, commit = commit, checkCurrent = checkCurrent)
@@ -794,24 +794,43 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                             progressNotifier.running(progress, message)
                         }
                     } else {
-                        downloadOnlineCompletionBook(target, localFile, task) { progress, message ->
-                            throwIfOnlineCompletionDownloadCancelled(task)
-                            progressNotifier.running(progress, message)
-                        }
+                        downloadOnlineCompletionBook(target, localFile, task,
+                            onPartialReady = { partialFile, progress ->
+                                task.cancellation.run {
+                                    importOnlineCompletionBook(task, partialFile, target, importProgress = progress,
+                                        onWaiting = { progressNotifier.running(progress, "首批章节等待导入", force = true) },
+                                        onStarted = { progressNotifier.running(progress, "正在导入首批章节", force = true) })
+                                    task.publishedChapterIndices.addAll(task.downloadedChapters.keys)
+                                    task.control.resumeAfterCheckpoint()
+                                }
+                                throwIfOnlineCompletionDownloadCancelled(task)
+                                progressNotifier.running(progress, "首批章节已导入，继续下载其余章节", force = true)
+                            },
+                            onProgress = { progress, message ->
+                                throwIfOnlineCompletionDownloadCancelled(task)
+                                progressNotifier.running(progress, message)
+                            },
+                        )
                     }
                 }
                 task.cancellation.run {
                     throwIfOnlineCompletionDownloadCancelled(task)
-                    progressNotifier.running(94, "正在导入完整章节", force = true)
-                    importOnlineCompletionBook(task, localFile, target,
-                        onWaiting = { progressNotifier.running(94, "等待导入队列", force = true) },
-                        onStarted = { progressNotifier.running(94, "正在导入", force = true) })
+                    progressNotifier.running(94,
+                        if (task.importedBookDir != null) "正在保存下载结果" else "正在导入完整章节", force = true)
+                    if (task.importedBookDir != null) {
+                        saveOnlineCompletionImportedChapters(task, target, final = true)
+                    } else {
+                        importOnlineCompletionBook(task, localFile, target,
+                            onWaiting = { progressNotifier.running(94, "等待导入队列", force = true) },
+                            onStarted = { progressNotifier.running(94, "正在导入", force = true) })
+                    }
                     val completionMessage = if (mode == OnlineBookDownloadMode.ON_DEMAND) {
                         "已导入逐章加载书籍"
                     } else "已导入阅微${onlineCompletionFailureSuffix(failedChapters)}"
                     progressNotifier.finish(completionMessage, target.result.detailUrl, success = true)
                 }
             } catch (error: Throwable) {
+                val cancelledMessage = if (task.importedBookDir != null) "下载已取消，已保留导入章节" else "下载已取消，未导入书架"
                 if (task.control.shouldPause && !task.control.isCancelled && !task.control.isPublishing) {
                     try {
                         if (task.control.preparePausedPublication()) {
@@ -819,18 +838,18 @@ internal fun WebDavDriveHook.startOnlineCompletionDownload(
                                 publishPausedOnlineCompletionBook(target, localFile, task, mode, progressNotifier)
                             }
                         } else {
-                            progressNotifier.finish("下载已取消，未导入书架", null, success = false)
+                            progressNotifier.finish(cancelledMessage, null, success = false)
                         }
                     } catch (pauseError: Throwable) {
                         if (task.cancelRequested || task.cancellation.isCancelled || pauseError is java.util.concurrent.CancellationException) {
-                            progressNotifier.finish("下载已取消，未导入书架", null, success = false)
+                            progressNotifier.finish(cancelledMessage, null, success = false)
                         } else {
                             progressNotifier.finish(pauseError.message ?: "暂停保存失败", null, success = false)
                             HookRuntime.logError("$LOG_PREFIX paused download publication failed", pauseError)
                         }
                     }
                 } else if (error is java.util.concurrent.CancellationException || task.cancelRequested || task.cancellation.isCancelled) {
-                    progressNotifier.finish("下载已取消，未导入书架", null, success = false)
+                    progressNotifier.finish(cancelledMessage, null, success = false)
                 } else {
                     progressNotifier.finish(error.message ?: "下载失败", null, success = false)
                     HookRuntime.logError("$LOG_PREFIX online completion download failed", error)
@@ -864,6 +883,12 @@ private fun WebDavDriveHook.publishPausedOnlineCompletionBook(
     throwIfOnlineCompletionDownloadCancelled(task)
     val chapters = task.tocSnapshot?.chapters.orEmpty()
     val completed = task.downloadedChapters.toMap().filterKeys { it in chapters.indices }
+    if (task.importedBookDir != null) {
+        notifier.running(94, "保存已下载章节", force = true)
+        saveOnlineCompletionImportedChapters(task, target, final = false)
+        notifier.finish("已暂停，已保存 ${completed.size} 章，可长按更新继续", target.result.detailUrl, success = true)
+        return
+    }
     if (completed.isEmpty()) {
         notifier.finish("已暂停，尚无完整章节，未导入书架", null, success = false)
         return
@@ -946,8 +971,11 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
         throwIfOnlineCompletionDownloadCancelled(task)
         onProgress(10 + ((index + 1) * 45 / initialCount.coerceAtLeast(1)), "下载首批章节 ${index + 1}/$initialCount")
         var lastError: Throwable? = null
-        repeat(2) {
+        repeat(2) { retry ->
             if (downloaded[index] != null) return@repeat
+            if (lastError?.let(::isPermanentOnlineChapterFailure) == true ||
+                lastError is OnlineSourceDailyLimitException
+            ) return@repeat
             attempts[index]++
             runCatching {
                 downloadOnlineChapter(
@@ -976,7 +1004,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandBook(
                 lastError = error
                 errors[index] = error.message.orEmpty().ifBlank { error.javaClass.name }
                 val retryKind = onlineHttpRetryKind(error)
-                if (retryKind != OnlineHttpRetryKind.NONE) {
+                if (retryKind != OnlineHttpRetryKind.NONE && retry == 0 && !isPermanentOnlineChapterFailure(error)) {
                     consecutiveServiceFailures++
                     val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
                     val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
@@ -1060,6 +1088,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
     target: OnlineDownloadTarget,
     outputFile: File,
     task: OnlineCompletionDownloadTask,
+    onPartialReady: (File, Int) -> Unit,
     onProgress: (Int, String) -> Unit,
 ): Int {
     throwIfOnlineCompletionDownloadCancelled(task)
@@ -1087,6 +1116,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
         failed.add(index)
         nonRetryable.add(index)
         failureMessages[index] = quotaPendingMessage
+        task.failedChapters[index] = onlineCompletionFailedChapter(target, chapters[index], index, 0, quotaPendingMessage)
     }
     val cover = target.result.coverUrl.takeIf { it.isNotBlank() }?.let { coverUrl ->
         runCatching {
@@ -1127,9 +1157,29 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             }
     }
     task.downloadedCover = cover
+    var firstBatchImported = false
     var consecutiveServiceFailures = 0
     val batchSession = onlineChapterBatchSession(target, chapters, 0 until allowedChapterCount)
     fun downloadedCount(): Int = downloaded.count { it != null }
+
+    fun maybeImportFirstBatch(progress: Int, processedCount: Int) {
+        if (chapters.size <= ONLINE_COMPLETION_PARTIAL_IMPORT_THRESHOLD || firstBatchImported ||
+            processedCount < ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS ||
+            downloaded.take(ONLINE_COMPLETION_PARTIAL_IMPORT_CHAPTERS).none { it != null }
+        ) return
+        throwIfOnlineCompletionDownloadCancelled(task)
+        val partialFile = File(outputFile.parentFile, "${outputFile.nameWithoutExtension}_first_100.epub")
+        onProgress(progress, "生成首批章节 EPUB")
+        val partialChapters = chapters.mapIndexed { index, chapter ->
+            downloaded[index] ?: com.reamicro.fix.online.download.onlineCompletionPausedPendingChapter(chapter, index)
+        }
+        writeOnlineCompletionEpub(partialFile, target, partialChapters, cover,
+            failedChapters = task.failedChapters.values.toList(),
+            onDemandMetadata = onlineCompletionTaskMetadata(task, target, OnlineBookDownloadMode.FULL),
+            allowNetworkImages = false, checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) })
+        onPartialReady(partialFile, progress)
+        firstBatchImported = true
+    }
 
     fun attemptChapter(index: Int, immediateRetry: Boolean): Boolean {
         throwIfOnlineCompletionDownloadCancelled(task)
@@ -1138,6 +1188,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             failed.add(index)
             nonRetryable.add(index)
             failureMessages[index] = message
+            task.failedChapters[index] = onlineCompletionFailedChapter(target, chapter, index, attempts[index], message)
             return false
         }
         val maxAttemptsThisRound = if (immediateRetry) 2 else 1
@@ -1147,6 +1198,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
         ) {
             throwIfOnlineCompletionDownloadCancelled(task)
             attempts[index]++
+            task.chapterAttempts[index] = attempts[index]
             roundAttempts++
             val attempt = attempts[index]
             runCatching {
@@ -1155,6 +1207,8 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             }.onSuccess { chapterContent ->
                 downloaded[index] = chapterContent
                 task.downloadedChapters[index] = chapterContent
+                task.failedChapters.remove(index)
+                writeOnlineCompletionChapterToImportedBookIfReady(task, target, index, chapterContent)
                 val recoveredFromServiceFailure = consecutiveServiceFailures > 0
                 consecutiveServiceFailures = 0
                 if (recoveredFromServiceFailure) {
@@ -1179,6 +1233,7 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                 failed.add(index)
                 val message = error.message.orEmpty().ifBlank { error.javaClass.name }
                 failureMessages[index] = message
+                task.failedChapters[index] = onlineCompletionFailedChapter(target, chapter, index, attempts[index], message)
                 if (error is OnlineSourceDailyLimitException) {
                     dailyLimitMessage = message
                     nonRetryable.add(index)
@@ -1187,7 +1242,9 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
                     nonRetryable.add(index)
                 }
                 val retryKind = onlineHttpRetryKind(error)
-                if (retryKind != OnlineHttpRetryKind.NONE && index !in nonRetryable) {
+                if (retryKind != OnlineHttpRetryKind.NONE && index !in nonRetryable &&
+                    attempts[index] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT
+                ) {
                     consecutiveServiceFailures++
                     val waitMs = onlineHttpRetryDelayMs(error, consecutiveServiceFailures)
                     val reason = if (retryKind == OnlineHttpRetryKind.CIRCUIT_OPEN) "上游熔断" else "上游暂时异常"
@@ -1217,35 +1274,35 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
         val progress = 5 + ((index + 1) * 78 / chapters.size.coerceAtLeast(1))
         onProgress(progress, "下载章节 ${index + 1}/${chapters.size}${onlineCompletionFailureSuffix(failed.size)}")
         attemptChapter(index, immediateRetry = true)
+        maybeImportFirstBatch(progress, index + 1)
         if (failed.isNotEmpty()) {
             onProgress(progress, "下载章节 ${index + 1}/${chapters.size}${onlineCompletionFailureSuffix(failed.size)}")
         }
     }
-    var retryRound = 0
-    while (failed.any { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
-        retryRound++
-        val retryCandidates = failed.filter { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
-        val waitMs = onlineCompletionRetryDelayMs(retryRound)
-        onProgress(84, "等待重试失败章节 ${retryCandidates.size} 章${onlineCompletionFailureSuffix(failed.size)}")
-        logWebDav(
-            "online completion delayed retry round=$retryRound wait=${waitMs}ms " +
-                "candidates=${retryCandidates.size} failed=${failed.size} " +
-                "downloaded=${downloadedCount()}/${chapters.size}",
-        )
-        sleepOnlineCompletionRetryDelay(task, waitMs)
-        retryCandidates.forEachIndexed { retryIndex, chapterIndex ->
+    retryOnlineCompletionChapters(
+        candidates = { failed.filter { it !in nonRetryable && attempts[it] < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT } },
+        beforeRound = { round, remaining ->
+            val waitMs = onlineCompletionRetryDelayMs(round)
+            onProgress(84, "等待重试失败章节 ${remaining.size} 章${onlineCompletionFailureSuffix(failed.size)}")
+            logWebDav(
+                "online completion delayed retry round=$round wait=${waitMs}ms " +
+                    "candidates=${remaining.size} failed=${failed.size} downloaded=${downloadedCount()}/${chapters.size}",
+            )
+            sleepOnlineCompletionRetryDelay(task, waitMs)
+        },
+        attempt = { chapterIndex, retryIndex, count ->
             throwIfOnlineCompletionDownloadCancelled(task)
-            val progress = 84 + ((retryIndex + 1) * 4 / retryCandidates.size.coerceAtLeast(1))
+            val progress = 84 + ((retryIndex + 1) * 4 / count.coerceAtLeast(1))
             onProgress(progress, "重试章节 ${chapterIndex + 1}/${chapters.size}${onlineCompletionFailureSuffix(failed.size)}")
             attemptChapter(chapterIndex, immediateRetry = false)
             if (failed.isNotEmpty()) {
                 onProgress(progress, "重试章节 ${chapterIndex + 1}/${chapters.size}${onlineCompletionFailureSuffix(failed.size)}")
             }
-        }
-    }
+        },
+    )
     val successCount = downloadedCount()
     if (failed.isNotEmpty()) {
-        onProgress(88, "仍有 ${failed.size} 章失败，继续生成 EPUB")
+        onProgress(88, "仍有 ${failed.size} 章失败，保存已完成章节")
         logWebDav(
             "online completion chapters still failed count=${failed.size} " +
                 "success=$successCount/${chapters.size} failures=" +
@@ -1261,6 +1318,8 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             message = failureMessages[index].orEmpty(),
         )
     }
+    task.failedChapters.clear()
+    task.failedChapters.putAll(finalFailures.associateBy { it.index })
     logOnlineCompletionFinalFailures(target, finalFailures, "download")
     val finalChapters = chapters.mapIndexed { index, chapter ->
         downloaded[index] ?: OnlineDownloadedChapter(
@@ -1271,9 +1330,14 @@ internal fun WebDavDriveHook.downloadOnlineCompletionBook(
             sourceUrl = chapter.url,
         )
     }
+    if (task.importedBookDir != null) {
+        onProgress(88, "保存下载结果")
+        return failed.size
+    }
     onProgress(88, "生成 EPUB")
     throwIfOnlineCompletionDownloadCancelled(task)
     writeOnlineCompletionEpub(outputFile, target, finalChapters, cover, finalFailures,
+        onDemandMetadata = onlineCompletionTaskMetadata(task, target, OnlineBookDownloadMode.FULL),
         checkCurrent = { throwIfOnlineCompletionDownloadCancelled(task) })
     logWebDav(
         "online completion epub ready path=${outputFile.absolutePath} " +
@@ -1836,6 +1900,108 @@ internal fun WebDavDriveHook.downloadOnlineCompletionOnDemandChapter(
     }
 }
 
+private fun onlineCompletionTaskMetadata(
+    task: OnlineCompletionDownloadTask,
+    target: OnlineDownloadTarget,
+    mode: OnlineBookDownloadMode,
+): OnlineOnDemandMetadata {
+    val chapters = task.tocSnapshot?.chapters.orEmpty()
+    val hrefs = defaultOnlineChapterHrefs(chapters.size)
+    return OnlineOnDemandMetadata(target.source.id, target.result.detailUrl, target.result.name, mode,
+        chapters.mapIndexed { index, chapter ->
+            val failure = task.failedChapters[index]
+            val ready = task.downloadedChapters.containsKey(index)
+            OnlineOnDemandChapter(
+                OnlineChapterUpdatePlanner.stableSourceChapterId(chapter.url), chapter.url,
+                chapter.title, chapter.volumeTitle, hrefs[index],
+                when { ready -> OnlineChapterState.READY; failure != null -> OnlineChapterState.FAILED; else -> OnlineChapterState.PENDING },
+                if (ready) System.currentTimeMillis() else 0L,
+                task.chapterAttempts[index] ?: 0, failure?.message.orEmpty(),
+            )
+        })
+}
+
+internal fun WebDavDriveHook.writeOnlineCompletionChapterToImportedBookIfReady(
+    task: OnlineCompletionDownloadTask, target: OnlineDownloadTarget,
+    index: Int, chapter: OnlineDownloadedChapter,
+) {
+    val directory = task.importedBookDir ?: return
+    withOnlineCompletionTaskLock(task, task.bookDirWriteLock) {
+        throwIfOnlineCompletionDownloadCancelled(task)
+        val guard = com.reamicro.fix.online.download.OnlineBookWriteGuard(directory,
+            isCurrent = { !task.control.isCancelled && task.checkActive() &&
+                AccountHostRuntime.isCurrentStorage(task.storageIdentity) && OnlineSourceStore.isCurrent(target.source) },
+            commitCurrent = { action -> AccountHostRuntime.withCurrentStorage(task.storageIdentity, action = action) })
+        fun checkCurrent() { throwIfOnlineCompletionDownloadCancelled(task); guard.checkCurrent() }
+        com.reamicro.fix.online.download.OnlineOnDemandBridge.withIdleBook(directory) {
+            OnlineOnDemandMetadataStore.resourceEdit(directory) {
+                // Preserve the index written at first import; update states together at completion or pause.
+                writeOnlineCompletionChapterToBookDir(directory, index, chapter, target = target,
+                    isVolumeFirstChapter = chapter.volumeTitle.isNotBlank() && (index == 0 ||
+                        task.tocSnapshot?.chapters?.getOrNull(index - 1)?.volumeTitle != chapter.volumeTitle),
+                    commit = guard::commit, checkCurrent = ::checkCurrent, allowNetworkImages = false)
+                task.publishedChapterIndices.add(index)
+                markOnlineEpubChanged(directory.name, task.storageIdentity, ::checkCurrent)
+            }
+        }
+    }
+}
+
+private fun WebDavDriveHook.saveOnlineCompletionImportedChapters(
+    task: OnlineCompletionDownloadTask, target: OnlineDownloadTarget, final: Boolean,
+) {
+    val directory = task.importedBookDir ?: return
+    withOnlineCompletionTaskLock(task, task.bookDirWriteLock) {
+        throwIfOnlineCompletionDownloadCancelled(task)
+        val guard = com.reamicro.fix.online.download.OnlineBookWriteGuard(directory,
+            isCurrent = { task.checkActive() && AccountHostRuntime.isCurrentStorage(task.storageIdentity) &&
+                OnlineSourceStore.isCurrent(target.source) },
+            commitCurrent = { action -> AccountHostRuntime.withCurrentStorage(task.storageIdentity, action = action) })
+        fun checkCurrent() { throwIfOnlineCompletionDownloadCancelled(task); guard.checkCurrent() }
+        val metadata = onlineCompletionTaskMetadata(task, target, OnlineBookDownloadMode.FULL)
+        val chapters = task.tocSnapshot?.chapters.orEmpty()
+        val failures = task.failedChapters.values.sortedBy { it.index }
+        val volumeStarts = onlineVolumeSegments(chapters.mapIndexed { index, chapter ->
+            task.downloadedChapters[index] ?: com.reamicro.fix.online.download.onlineCompletionPausedPendingChapter(chapter, index)
+        }).mapTo(hashSetOf()) { it.startIndex }
+        com.reamicro.fix.online.download.OnlineOnDemandBridge.withIdleBook(directory) {
+            OnlineOnDemandMetadataStore.resourceEdit(directory) {
+                guard.commit {
+                    if (!task.control.beginPublishing()) throw OnlineCompletionDownloadCancelledException("保存前已停止")
+                }
+                // First-batch files and later writes share the same imported directory, never a second import.
+                chapters.forEachIndexed { index, chapter ->
+                    checkCurrent()
+                    if (index in task.publishedChapterIndices) return@forEachIndexed
+                    val content = task.downloadedChapters[index] ?: if (final) OnlineDownloadedChapter(
+                        chapter.title, onlineCompletionFailurePlaceholder(task.chapterAttempts[index] ?: 0,
+                            task.failedChapters[index]?.message.orEmpty()),
+                        volumeTitle = chapter.volumeTitle, level = chapter.level, sourceUrl = chapter.url,
+                    ) else null
+                    if (content != null) writeOnlineCompletionChapterToBookDir(directory, index, content,
+                        target = target, isVolumeFirstChapter = index in volumeStarts,
+                        commit = guard::commit, checkCurrent = ::checkCurrent, allowNetworkImages = false)
+                    if (task.downloadedChapters.containsKey(index) && content != null) task.publishedChapterIndices.add(index)
+                }
+                OnlineOnDemandMetadataStore.write(directory, metadata, commit = guard::commit, checkCurrent = ::checkCurrent)
+                writeOnlineCompletionFailedChapters(directory, target, failures,
+                    commit = guard::commit, checkCurrent = ::checkCurrent)
+                markOnlineEpubChanged(directory.name, task.storageIdentity, ::checkCurrent)
+                task.control.markCommitted()
+            }
+        }
+        // Content is already durable; a later DAO refresh failure must not discard downloaded chapters.
+        runCatching {
+            checkCurrent()
+            val repository = currentBookshelfRepository() ?: error("BookshelfRepository unavailable")
+            val book = findOnlineCompletionImportedBook(repository, target, target.result.detailUrl,
+                storageIdentity = task.storageIdentity, expectedUuid = directory.name)
+                ?: error("导入的图书记录已变化")
+            updateOnlineContentMetadata(book, target, bookDirectorySize(directory), task.storageIdentity, repository, ::checkCurrent)
+        }.onFailure { HookRuntime.logError("$LOG_PREFIX chapters saved; metadata refresh deferred", it) }
+    }
+}
+
 internal fun WebDavDriveHook.writeOnlineCompletionChapterToBookDir(
     bookDir: File,
     index: Int,
@@ -1892,6 +2058,7 @@ internal fun WebDavDriveHook.importOnlineCompletionBook(
     target: OnlineDownloadTarget,
     onWaiting: (() -> Unit)? = null,
     onStarted: (() -> Unit)? = null,
+    importProgress: Int = 95,
 ): OnlineCompletionImportResult = withOnlineCompletionTaskLock(
     task, onlineCompletionImportLock,
     onWaiting = {
@@ -1901,11 +2068,11 @@ internal fun WebDavDriveHook.importOnlineCompletionBook(
 ) {
     throwIfOnlineCompletionDownloadCancelled(task)
     onStarted?.invoke()
-    importOnlineCompletionBookLocked(task, file, target)
+    importOnlineCompletionBookLocked(task, file, target, importProgress)
 }
 
 internal fun WebDavDriveHook.importOnlineCompletionBookLocked(
-    task: OnlineCompletionDownloadTask, file: File, target: OnlineDownloadTarget,
+    task: OnlineCompletionDownloadTask, file: File, target: OnlineDownloadTarget, importProgress: Int = 95,
 ): OnlineCompletionImportResult {
     throwIfOnlineCompletionDownloadCancelled(task)
     val bookshelf = awaitBookshelfRepository()
@@ -1988,7 +2155,7 @@ internal fun WebDavDriveHook.importOnlineCompletionBookLocked(
         )
         if (!task.control.beginPublishing()) throw OnlineCompletionDownloadCancelledException("导入前已停止")
         onlineCompletionProgressNotifiers[task.notificationId]
-            ?.running(95, "正在完成导入，提交后不能取消", force = true)
+            ?.running(importProgress, "正在完成导入", force = true)
         val result = invokeSuspendBlocking(
             importMethod,
             bookshelf,

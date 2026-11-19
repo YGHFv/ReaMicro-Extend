@@ -1,4 +1,4 @@
-// Adapted from compose-miuix-ui/miuix GlassDropdownPreference at 45645854.
+// Adapted from compose-miuix-ui/miuix GlassDropdownPreference at v0.9.5-beta01.
 // Copyright 2026, compose-miuix-ui contributors and ReaMicro Extend contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,10 +21,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -145,8 +143,7 @@ fun EfficientGlassDropdownPreference(
         exitTransition = ExitTransition.None,
         renderInRootScaffold = renderInRootScaffold,
     ) {
-        var hostOrigin by remember { mutableStateOf(Offset.Zero) }
-        Box(modifier = Modifier.fillMaxSize().onGloballyPositioned { hostOrigin = it.positionInRoot() }) {
+        Box(modifier = Modifier.fillMaxSize()) {
             GlassDropdownPopupContent(
                 show = expanded && actualEnabled,
                 onDismissRequest = { setExpanded(false) },
@@ -155,7 +152,6 @@ fun EfficientGlassDropdownPreference(
                 anchor = anchor,
                 sizing = sizing,
                 visuals = visuals,
-                coordinateOrigin = hostOrigin,
                 onDismissFinished = { mounted.value = false },
             ) {
                 items.forEachIndexed { index, item ->

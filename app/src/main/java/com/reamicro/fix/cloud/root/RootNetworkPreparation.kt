@@ -47,6 +47,7 @@ internal class RootNetworkPreparation(
         var motionAttempted = false
         var vendorWakeAttempted = false
         var firstProbe = true
+        var pollDelay = pollMs
         var dns: RootDnsProbeResult? = null
         var dnsElapsedMs: Long? = null
         fun remaining(): Long = (timeoutMs - (clock() - started)).coerceAtLeast(0L)
@@ -74,21 +75,6 @@ internal class RootNetworkPreparation(
                     firstProbe = false
                 }
                 if (remaining() <= 0L) break
-                if (state.idle && !motionAttempted) {
-                    motionAttempted = true
-                    event("network_wake_requested")
-                    checkCancelled()
-                    if (remaining() < MIN_PROBE_BUDGET_MS) break
-                    val accepted = try {
-                        exitIdle(remaining())
-                    } catch (error: InterruptedException) {
-                        throw error
-                    } catch (_: Exception) {
-                        false
-                    }
-                    event("network_wake_result", motionAccepted = accepted)
-                    continue
-                }
                 if (state.ready) {
                     val verify = verifyDns
                     if (verify != null) {
@@ -114,26 +100,43 @@ internal class RootNetworkPreparation(
                         return
                     }
                 }
-                if (!vendorWakeAttempted && shouldWakeVendor(state)) {
-                    val wake = wakeVendor
-                    if (wake != null) {
-                        vendorWakeAttempted = true
-                        event("network_vendor_wake_requested")
-                        checkCancelled()
-                        if (remaining() < MIN_PROBE_BUDGET_MS) break
-                        val accepted = try {
-                            wake(remaining())
-                        } catch (error: InterruptedException) {
-                            throw error
-                        } catch (_: Exception) {
-                            false
-                        }
-                        event("network_vendor_wake_result", vendorWakeAccepted = accepted)
-                        continue
+                // 维护窗口和可用的飞行模式 Wi-Fi 都能直接执行。先验证业务域名，
+                // 确有阻塞再请求恢复，每个动作在本轮至多派发一次。
+                val requestVendor = wakeVendor != null && !vendorWakeAttempted && shouldWakeVendor(state)
+                val vendorRestricted = state.oplusNetworkRestricted || state.xiaomiSleep == true
+                if (state.idle && state.airplaneMode != true && !motionAttempted && !(requestVendor && vendorRestricted)) {
+                    motionAttempted = true
+                    event("network_wake_requested")
+                    checkCancelled()
+                    if (remaining() < MIN_PROBE_BUDGET_MS) break
+                    val accepted = try {
+                        exitIdle(remaining())
+                    } catch (error: InterruptedException) {
+                        throw error
+                    } catch (_: Exception) {
+                        false
                     }
+                    event("network_wake_result", motionAccepted = accepted)
+                    continue
                 }
-                val delay = minOf(pollMs, remaining())
+                if (requestVendor) {
+                    vendorWakeAttempted = true
+                    event("network_vendor_wake_requested")
+                    checkCancelled()
+                    if (remaining() < MIN_PROBE_BUDGET_MS) break
+                    val accepted = try {
+                        wakeVendor.invoke(remaining())
+                    } catch (error: InterruptedException) {
+                        throw error
+                    } catch (_: Exception) {
+                        false
+                    }
+                    event("network_vendor_wake_result", vendorWakeAccepted = accepted)
+                    checkCancelled()
+                }
+                val delay = minOf(pollDelay, remaining())
                 if (delay > 0L) sleep(delay)
+                pollDelay = (pollDelay + pollMs).coerceAtMost(maxOf(pollMs, MAX_POLL_MS))
             }
             checkCancelled()
             event("network_timeout")
@@ -162,5 +165,6 @@ internal class RootNetworkPreparation(
 
     private companion object {
         const val MIN_PROBE_BUDGET_MS = 1_000L
+        const val MAX_POLL_MS = 4_000L
     }
 }

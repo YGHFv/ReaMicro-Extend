@@ -21,7 +21,7 @@ private class ModulePageBackdrops(
         density: Density,
         coordinates: LayoutCoordinates?,
         layerBlock: (GraphicsLayerScope.() -> Unit)?,
-        downscaleFactor: Int,
+        downscaleFactor: Float,
     ) {
         visiblePages().forEach { index ->
             pages.getOrNull(index)?.let {

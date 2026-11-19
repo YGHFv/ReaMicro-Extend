@@ -629,7 +629,7 @@ internal fun ReaMicroSettingsHook.renderAboutCompletionContent(innerPaddings: An
         val localAutomationRow = ActionRow(
             key = "about_completion_local_automation",
             title = "\u81ea\u52a8\u4efb\u52a1",
-            subtitle = "\u672c\u5730\u81ea\u52a8\u7b7e\u5230\u3001\u62bd\u5361\u3001\u9605\u8bfb\u4e0e\u884c\u5546\u901a\u77e5\uff0c\u914d\u7f6e\u4fdd\u5b58\u5728\u672c\u673a",
+            subtitle = "打开阅微时执行一次已开启的任务，与独立应用的自动任务分开保存",
             onClick = {
                 resetLocalAutomationState()
                 openNestedInjectedRoute(InjectedRoute.LocalAutomationSettings)

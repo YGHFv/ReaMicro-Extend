@@ -35,6 +35,11 @@
                 <action android:name="com.reamicro.fix.ROOT_TASK_SYNC" />
             </intent-filter>
         </receiver>
+        <receiver android:name=".notification.RootTaskProgressReceiver" android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <activity android:name=".notification.RootTaskProgressActivity" android:exported="true"
+            android:permission="android.permission.DUMP" android:excludeFromRecents="true"
+            android:taskAffinity="" android:theme="@style/NoDisplayTheme" />
         <receiver android:name=".migration.PackageUpgradeReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
@@ -69,15 +74,6 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.reamicro.fix.CLOUD_TASK_NOTIFICATION" />
-            </intent-filter>
-        </receiver>
-
-        <receiver
-            android:name=".cloud.local.LocalTaskMirrorReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.reamicro.fix.LOCAL_TASK_MIRROR" />
             </intent-filter>
         </receiver>
 

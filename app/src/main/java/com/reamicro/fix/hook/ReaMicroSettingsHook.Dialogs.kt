@@ -440,7 +440,7 @@ internal fun ReaMicroSettingsHook.settingsDialogScroll(context: Context, card: L
     }
 
 internal fun ReaMicroSettingsHook.settingsDialog(activity: Activity): Dialog =
-    HostSettingsDialogs.create(this, activity)
+    HostSettingsDialogs.create(activity)
 
 @Suppress("UNUSED_PARAMETER")
 internal fun ReaMicroSettingsHook.showSettingsDialog(

@@ -89,7 +89,7 @@ internal class LocalBookMenuBridge(private val drive: WebDavDriveHook) {
         val content = ui.callback(ui.type("function3")) { args ->
             val scope = requireNotNull(args?.getOrNull(0))
             val inner = requireNotNull(args?.getOrNull(1))
-            val modifier = requireNotNull(ui.instance("weight", scope, ui.value("modifier"), 1f))
+            val modifier = ui.rowWeight(scope, ui.value("modifier"))
             host.method("cell").invoke(null, modifier, updateIcon, "更新", update, inner, 0)
             val color = ui.call("borderVariant", ui.call("colorScheme", inner)) as Long
             val width = ui.call("dpDouble", 0.8) as Float

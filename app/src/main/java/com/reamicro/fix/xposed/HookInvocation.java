@@ -2,6 +2,7 @@ package com.reamicro.fix.xposed;
 
 import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Executable;
+import java.util.List;
 
 /** The exception boundary belongs to this invocation, rather than an emulated legacy API. */
 final class HookInvocation {
@@ -16,23 +17,24 @@ final class HookInvocation {
     }
 
     static Object intercept(HookCallback callback, XposedInterface.Chain chain) throws Throwable {
-        Object[] inputs = chain.getArgs().toArray();
+        List<Object> inputs = chain.getArgs();
         HookCallback.Call call = new HookCallback.Call(
-                chain.getExecutable(), chain.getThisObject(), inputs.clone());
+                chain.getExecutable(), chain.getThisObject(), inputs.toArray());
+        boolean argumentsChanged = false;
         try {
             callback.before(call);
-            if (!call.isIntercepted()) validateArguments(call, inputs);
+            if (!call.isIntercepted()) argumentsChanged = validateArguments(call, inputs);
         } catch (Throwable error) {
             // A callback may fail after changing one slot. Restore the full slot array so the
             // original method does not receive a mixture of original and partially edited inputs.
-            System.arraycopy(inputs, 0, call.args, 0, inputs.length);
+            inputs.toArray(call.args);
             call.resetOutcome();
             report("before", call.method, error);
         }
 
         if (!call.isIntercepted()) {
             try {
-                call.restoreOutcome(chain.proceed(call.args), null);
+                call.restoreOutcome(argumentsChanged ? chain.proceed(call.args) : chain.proceed(), null);
             } catch (Throwable error) {
                 call.restoreOutcome(null, error);
             }
@@ -50,15 +52,16 @@ final class HookInvocation {
         return call.getResult();
     }
 
-    private static void validateArguments(HookCallback.Call call, Object[] inputs) {
+    private static boolean validateArguments(HookCallback.Call call, List<Object> inputs) {
         Class<?>[] parameters = null;
-        for (int index = 0; index < inputs.length; index++) {
-            if (inputs[index] == call.args[index]) continue;
+        for (int index = 0; index < call.args.length; index++) {
+            if (inputs.get(index) == call.args[index]) continue;
             if (parameters == null) parameters = call.method.getParameterTypes();
             if (!accepts(parameters[index], call.args[index])) {
                 throw new IllegalArgumentException("Invalid hook argument " + index + " for " + call.method);
             }
         }
+        return parameters != null;
     }
 
     static boolean accepts(Class<?> type, Object value) {

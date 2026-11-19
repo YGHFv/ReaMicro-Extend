@@ -110,6 +110,28 @@ internal object HostSemanticQueries {
                 descriptor?.let { saveType(owner, it.removePrefix("L").removeSuffix(";").replace('/', '.')) }
             }
         }
+        val sheet = HostStorageQueries.SHEET
+        val localRowKey = "method:$sheet#LocalLibrary"
+        if (group == "library" && localRowKey !in output) {
+            // RC adds a second composable of this shape. Only the import row renders the
+            // same list item as both cloud rows.
+            val authorized = output["method:$sheet#CloudAuthorizedRow"]?.let(bridge::getMethodData)
+            val unauthorized = output["method:$sheet#CloudUnauthRow"]?.let(bridge::getMethodData)
+            if (authorized != null && unauthorized != null) {
+                val args = unauthorized.paramTypeNames.drop(1)
+                val composer = args[1]
+                val item = authorized.invokes.filter { Modifier.isStatic(it.modifiers) &&
+                    it.returnTypeName == "void" && it.paramCount == 10 &&
+                    it.paramTypeNames.takeLast(4) == listOf("float", composer, "int", "int")
+                }.map { it.descriptor }.intersect(unauthorized.invokes.map { it.descriptor }.toSet()).singleOrNull()
+                if (item != null) {
+                    unauthorized.declaredClass?.methods?.singleOrNull { Modifier.isStatic(it.modifiers) &&
+                        it.returnTypeName == "void" && it.paramTypeNames == args &&
+                        it.invokes.any { call -> call.descriptor == item }
+                    }?.let { output[localRowKey] = it.descriptor }
+                }
+            }
+        }
         // Record properties are linked through uniquely identified accessor methods, never field order.
         output.toMap().filterKeys { it.startsWith("method:") }.forEach { (key, descriptor) ->
             val logical = key.removePrefix("method:")

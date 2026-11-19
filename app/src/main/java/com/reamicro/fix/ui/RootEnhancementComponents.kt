@@ -1,9 +1,8 @@
 package com.reamicro.fix.ui
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.reamicro.fix.BuildConfig
@@ -11,10 +10,10 @@ import com.reamicro.fix.R
 import com.reamicro.fix.cloud.root.RootModuleStatus
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
-import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal enum class RootEnhancementAction { ENABLE, DISABLE, UNINSTALL }
 
@@ -84,7 +83,7 @@ internal fun RootModuleDialog(
     onClose: () -> Unit, onInstall: () -> Unit, onSuPath: () -> Unit, onUninstall: () -> Unit,
 ) {
     RootEnhancementDialog(show, stringResource(R.string.root_module_title), onClose) {
-        Card(insideMargin = PaddingValues(0.dp)) {
+        Column {
             ArrowPreference(
                 title = stringResource(R.string.execution_install_update),
                 summary = stringResource(R.string.root_install_hint), enabled = !busy, onClick = onInstall,
@@ -97,7 +96,7 @@ internal fun RootModuleDialog(
             )
             ArrowPreference(
                 title = stringResource(R.string.root_uninstall),
-                titleColor = BasicComponentDefaults.titleColor(color = Color(0xFFC63838)),
+                titleColor = BasicComponentDefaults.titleColor(color = MiuixTheme.colorScheme.error),
                 summary = stringResource(R.string.root_uninstall_hint), enabled = !busy, onClick = onUninstall,
             )
             BasicComponent(
@@ -112,7 +111,7 @@ internal fun RootModuleDialog(
                 summary = stringResource(R.string.execution_legacy_cleanup),
             )
             if (!status?.error.isNullOrBlank()) BasicComponent(
-                title = stringResource(R.string.root_inspection_detail), summary = status?.error.orEmpty(),
+                title = stringResource(R.string.root_inspection_detail), summary = status.error,
             )
             if (lastError.isNotBlank() && lastError != status?.error) BasicComponent(
                 title = stringResource(R.string.root_last_error), summary = lastError,
@@ -142,7 +141,7 @@ private fun moduleSummary(status: RootModuleStatus?): String = when {
         stringResource(R.string.root_staged_older)
     status.moduleResource() == R.string.root_module_ready &&
         status.installedVersion < BuildConfig.ROOT_MODULE_VERSION_CODE ->
-        stringResource(R.string.root_module_upgrade_for_wake)
+        stringResource(R.string.root_module_update_available, BuildConfig.ROOT_MODULE_VERSION_CODE)
     else -> stringResource(status.moduleResource())
 }
 

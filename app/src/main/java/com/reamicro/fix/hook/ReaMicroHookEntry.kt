@@ -30,7 +30,7 @@ class ReaMicroHookEntry {
     @Volatile private var currentActivityResumed: Boolean = false
     private val moduleSettings = XposedModuleSettings { currentActivityRef?.get() }
 
-    private val activityProvider: () -> Activity? = { currentActivityRef?.get() }
+    internal val activityProvider: () -> Activity? = { currentActivityRef?.get() }
     private val settingsProvider: () -> ModuleSettingsSnapshot = moduleSettings::snapshot
     private val installedFeatureIds = linkedSetOf<String>()
     private val disabledFeatureIds = linkedSetOf<String>()
@@ -43,7 +43,6 @@ class ReaMicroHookEntry {
     @Volatile private var webDavDrive: WebDavDriveHook? = null
     @Volatile private var readerImportOverwrite: ReaderImportOverwriteHook? = null
     @Volatile private var manualAssociationUi: ManualAssociationUiHook? = null
-    @Volatile private var disabledExecutionSyncPending = false
 
     init {
         moduleSettings.onModuleExecutionInvalidated = {
@@ -54,6 +53,7 @@ class ReaMicroHookEntry {
                 { manualAssociationUi?.invalidateExecution() },
                 YouShuWebSearchBridge::invalidateExecution,
                 YouShuSourceRequests::invalidateAll,
+                com.reamicro.fix.cloud.local.HostLocalTaskRunner::cancel,
             ).forEach { invalidate ->
                 runCatching(invalidate).onFailure { HookRuntime.logError("$LOG_PREFIX execution cancellation failed", it) }
             }
@@ -86,13 +86,11 @@ class ReaMicroHookEntry {
             webDavDrive = null
             readerImportOverwrite = null
             manualAssociationUi = null
-            disabledExecutionSyncPending = false
         }
     }
 
     internal fun attachStartupContext(context: android.content.Context) {
         moduleSettings.attachContext(context)
-        synchronizeDisabledExecution(context)
     }
 
     internal fun observeStartupActivity(activity: Activity, resumed: Boolean) {
@@ -100,18 +98,7 @@ class ReaMicroHookEntry {
         currentActivityResumed = resumed
         moduleSettings.attachContext(activity)
         if (resumed) {
-            synchronizeDisabledExecution(activity)
             ReaMicroSettingsHook.activeInstanceOrNull()?.finishActivationRestart(activity)
-        }
-    }
-
-    private fun synchronizeDisabledExecution(context: android.content.Context) {
-        if (moduleSettings.snapshot().moduleEnabled || disabledExecutionSyncPending ||
-            com.reamicro.fix.cloud.local.LocalTaskMirror.activationConfirmed(false)) return
-        disabledExecutionSyncPending = true
-        com.reamicro.fix.cloud.local.LocalTaskMirror.setModuleEnabled(context, false) { result ->
-            disabledExecutionSyncPending = false
-            if (!result.success) HookRuntime.logError("$LOG_PREFIX disabled execution handoff will retry on resume")
         }
     }
 
@@ -135,7 +122,6 @@ class ReaMicroHookEntry {
                 val appContext = activity.applicationContext
                 CloudTaskNotificationPoller.poll(appContext, source = "foreground-heartbeat")
 
-                com.reamicro.fix.cloud.local.LocalTaskMirror.push(appContext)
                 heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
             }
         }
@@ -382,6 +368,16 @@ class ReaMicroHookEntry {
         }, delayMillis)
     }
 
+    private fun startHostLocalTasks(activity: Activity) {
+        if (!moduleSettings.snapshot().moduleEnabled) return
+        val identity = runCatching { AccountHostRuntime.snapshot(activity) }.getOrNull() ?: return
+        com.reamicro.fix.cloud.local.HostLocalTaskRunner.start(
+            activity.applicationContext, identity.accountId.toString(), identity.token,
+        ) {
+            moduleSettings.snapshot().moduleEnabled && AccountHostRuntime.isCurrent(identity)
+        }
+    }
+
     private fun hookMainActivity(
         classLoader: ClassLoader,
         webDavDriveHook: WebDavDriveHook,
@@ -415,7 +411,7 @@ class ReaMicroHookEntry {
             ApiPackageAutoUpdater.checkIfDue(activity.applicationContext, moduleSettings)
             CloudTaskNotificationPoller.poll(activity.applicationContext)
             com.reamicro.fix.migration.LegacyAndroidWakeCleanup.runForHost(activity.applicationContext)
-            com.reamicro.fix.cloud.local.LocalTaskMirror.push(activity.applicationContext)
+            startHostLocalTasks(activity)
             startForegroundHeartbeat()
         }
         attachStartedActivity = { activity, resumed ->
@@ -486,6 +482,7 @@ class ReaMicroHookEntry {
                             RotationOrientationController.apply(activity, moduleSettings.snapshot())
                             profileBackgroundHook.refreshRandomImageFor(activity)
                             CloudTaskNotificationPoller.poll(activity.applicationContext)
+                            startHostLocalTasks(activity)
                             startForegroundHeartbeat()
                             DexKitUpdateScan.onResume(activity)
                         }

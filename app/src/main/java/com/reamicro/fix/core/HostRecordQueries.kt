@@ -8,6 +8,7 @@ import com.android.tools.smali.dexlib2.iface.reference.*
  * Unsupported control flow is rejected; declaration/string/field order is never a mapping.
  */
 internal object HostRecordQueries {
+    private val propertyLabel = Regex("(?:^|\\(|,\\s*)([A-Za-z_][A-Za-z0-9_]*)=$")
     private sealed interface Value
     private data class Text(val value: String) : Value
     private data class Property(val field: String) : Value
@@ -21,35 +22,33 @@ internal object HostRecordQueries {
         allowPartial: Boolean = false): Map<String, String> {
         val aliases = types.filterKeys { it.startsWith("class:") }.entries.groupBy({ it.value }, { it.key.removePrefix("class:") })
         val index = HostDexIndex.forApk(apk)
-        val classes = index.classes
-        val methods = index.methods
         // A value-class formatter changes the printed representation, not the field's origin.
         // Only admit the independently identified Color formatter, never an arbitrary String call.
-        val colorType = types["class:androidx.compose.ui.graphics.Color"]
-        val colorFormatters = methods.values.filter { method ->
-            method.definingClass == colorType && method.accessFlags and 8 != 0 &&
+        val color = types["class:androidx.compose.ui.graphics.Color"]?.let(index::classByType)
+        val colorFormatters = color?.methods?.filter { method ->
+            method.accessFlags and 8 != 0 &&
                 method.parameterTypes.map { it.toString() } == listOf("J") && method.returnType == "Ljava/lang/String;" &&
                 method.implementation?.instructions?.any {
                     ((it as? ReferenceInstruction)?.reference as? StringReference)?.string == "Color("
                 } == true
-        }.map(::descriptor).toSet() + scalarFormatters
-        check(scalarFormatters.all { descriptor -> methods[descriptor]?.let {
+        }?.map(::descriptor).orEmpty().toSet() + scalarFormatters
+        check(scalarFormatters.all { descriptor -> index.findMethod(descriptor)?.let {
             it.accessFlags and 8 != 0 && it.parameterTypes.size == 1 && it.returnType == "Ljava/lang/String;"
         } == true }) { "Record value formatters require a static scalar-to-String contract" }
         val output = linkedMapOf<String, String>()
-        for (type in classes) {
-            val logicals = aliases[type.type] ?: continue
+        for ((actual, logicals) in aliases) {
+            val type = index.classByType(actual) ?: continue
             val stringMethod = type.methods.singleOrNull {
                 it.name == "toString" && it.parameterTypes.isEmpty() && it.returnType == "Ljava/lang/String;"
             } ?: continue
-            val parts = evaluate(stringMethod, listOf(Receiver), methods, colorFormatters, emptySet()) as? Builder ?: continue
+            val parts = evaluate(stringMethod, listOf(Receiver), index, colorFormatters, emptySet()) as? Builder ?: continue
             val properties = linkedMapOf<String, String>()
             var text = ""
             var valid = true
             for (value in parts.parts) when (value) {
                 is Text -> text += value.value
                 is Property -> {
-                    val name = Regex("(?:^|\\(|,\\s*)([A-Za-z_][A-Za-z0-9_]*)=$").find(text)?.groupValues?.get(1)
+                    val name = propertyLabel.find(text)?.groupValues?.get(1)
                     if (name == null || !value.field.startsWith(type.type + "->")) {
                         if (!allowPartial) valid = false
                     } else if (properties.put(name, value.field)?.let { it != value.field } == true) valid = false
@@ -60,9 +59,11 @@ internal object HostRecordQueries {
             // R8 may share a field for two equal properties (e.g. onPrimaryFixed).
             // Each association is still proven by the appended register value.
             if (!valid || properties.isEmpty()) continue
+            val getters = type.methods.mapNotNull { method -> accessor(method)?.let { it to method } }
+                .groupBy({ it.first }, { it.second })
             for (logical in logicals) for ((name, field) in properties) {
                 output["field:$logical#$name"] = field
-                val getter = type.methods.filter { accessor(it) == field }.singleOrNull() ?: continue
+                val getter = getters[field]?.singleOrNull() ?: continue
                 output["method:$logical#${if (name.startsWith("is") && name.getOrNull(2)?.isUpperCase() == true) name else "get" + name.replaceFirstChar(Char::uppercaseChar)}"] = descriptor(getter)
             }
         }
@@ -83,17 +84,20 @@ internal object HostRecordQueries {
         if (method.parameterTypes.isNotEmpty() || method.accessFlags and 8 != 0 || method.returnType == "V" ||
             method.name in setOf("hashCode", "toString", "getClass")) return null
         val body = method.implementation ?: return null
-        val instructions = body.instructions.toList()
-        if (instructions.size != 2) return null
-        val read = instructions[0] as? TwoRegisterInstruction ?: return null
+        val instructions = body.instructions.iterator()
+        if (!instructions.hasNext()) return null
+        val read = instructions.next() as? TwoRegisterInstruction ?: return null
         val reference = (read as? ReferenceInstruction)?.reference as? FieldReference ?: return null
         if (!read.opcode.toString().startsWith("IGET") || reference.definingClass != method.definingClass ||
             read.registerB != body.registerCount - 1 || reference.type != method.returnType) return null
-        val result = instructions[1] as? OneRegisterInstruction ?: return null
-        return field(reference).takeIf { result.opcode.toString().startsWith("RETURN") && result.registerA == read.registerA }
+        if (!instructions.hasNext()) return null
+        val result = instructions.next() as? OneRegisterInstruction ?: return null
+        return field(reference).takeIf {
+            !instructions.hasNext() && result.opcode.toString().startsWith("RETURN") && result.registerA == read.registerA
+        }
     }
 
-    private fun evaluate(method: Method, args: List<Value>, methods: Map<String, Method>,
+    private fun evaluate(method: Method, args: List<Value>, index: HostDexIndex,
         colorFormatters: Set<String>, stack: Set<String>): Value {
         val id = descriptor(method)
         val body = method.implementation ?: return Unknown
@@ -141,7 +145,7 @@ internal object HostRecordQueries {
                         }
                         reference.definingClass == "Ljava/lang/String;" && reference.name == "valueOf" && values.size == 1 -> values[0]
                         descriptor(reference) in colorFormatters && values.singleOrNull() is Property -> values.single()
-                        else -> methods[descriptor(reference)]?.let { evaluate(it, values, methods, colorFormatters, stack + id) } ?: Unknown
+                        else -> index.findMethod(descriptor(reference))?.let { evaluate(it, values, index, colorFormatters, stack + id) } ?: Unknown
                     }
                     if (result == Unknown && values.any { it is Builder } &&
                         !(reference.definingClass == "Ljava/lang/StringBuilder;" && reference.name == "<init>")) return Unknown

@@ -69,6 +69,7 @@ internal object HostUiBindings {
         }
         val composerClass: Class<*> get() = method("title").parameterTypes[2]
         val modifierClass: Class<*> get() = method("title").parameterTypes[1]
+        val rowWeight = HostRowWeight(method("weight"), modifierClass)
         private val unit: Any get() = HostCoroutines.unit(loader)
         fun function(type: Class<*>, action: (Array<out Any?>?) -> Any?): Any =
             function(type, { unit }, action)
@@ -249,7 +250,7 @@ internal object HostUiBindings {
                 require(!policy.returnType.isPrimitive)
             }
             shape("box", 3, void).params(modifier, composer, int)
-            instance("weight", field("rowScope").type, modifier, modifier, float)
+            require(method("weight").declaringClass == field("rowScope").type) { "Invalid row weight receiver" }
             for (key in listOf("fillWidth", "height", "width")) shape(key, 2, modifier).params(modifier, float)
             shape("fillSize", 1, modifier).params(modifier)
             shape("padding", 5, modifier).params(modifier, float, float, float, float)

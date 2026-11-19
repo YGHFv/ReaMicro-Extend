@@ -86,7 +86,6 @@
     <string name="pref_pager_gesture_summary">左右滑动切页时响应方式</string>
     <string name="pager_gesture_default">默认</string>
     <string name="pager_gesture_cross">跨轴拦截</string>
-    <string name="pager_gesture_ios">iOS 风格</string>
 
     <string name="task_daily_lore">每日轶闻</string>
     <string name="task_auto_wish">自动祈愿</string>
@@ -136,8 +135,8 @@
     <string name="records_empty_description">到「任务」页点任务卡片上的「执行」可以先跑一轮；点任意一条记录能看详情（运签、奖励、行商事件）</string>
     <string name="task_overview_title">任务概览</string>
     <string name="tasks_empty_title">还没有本地任务</string>
-    <string name="tasks_empty_description">在阅微的设置页里启用任务后，这里就能配置</string>
-    <string name="tasks_sync_note">本地任务由模块进程执行；与阅微设置页同步时保留最新配置，旧镜像不会覆盖刚保存的选择。</string>
+    <string name="tasks_empty_description">先从「账号管理」导入凭证，再为各账号配置并开启任务。</string>
+    <string name="tasks_sync_note">此处的账号、配置和记录独立保存。定时执行需开启 Root 增强；宿主内嵌任务只在打开阅微时执行一次。</string>
     <string name="refresh_pull">下拉刷新</string>
     <string name="refresh_release">松手刷新</string>
     <string name="refresh_running">正在刷新…</string>
@@ -330,15 +329,16 @@
     <string name="root_last_error">上次操作说明</string>
     <string name="root_checked_at">上次检测：%1$s</string>
     <string name="root_staged_older">待生效模块比应用内置版本旧。请先点击「安装 / 更新模块」，再按管理器提示重启；这不是 Root 授权失败。</string>
-    <string name="root_install_hint">通过当前 Root 管理器安装配套模块，不自动开启增强</string>
+    <string name="root_install_hint">通过当前 Root 管理器安装，更新会保留现有任务配置</string>
     <string name="root_uninstall">卸载模块</string>
-    <string name="root_uninstall_hint">停止后台任务并保存进度，再提交卸载请求</string>
+    <string name="root_uninstall_hint">清除 Root 执行器及其私有数据，保留应用内任务</string>
+    <string name="root_last_progress_unsaved">最后一次 Root 进度未能同步，应用保留上次已同步的进度。</string>
     <string name="root_enable_action">确认开启</string>
     <string name="root_disable_action">确认停用</string>
     <string name="root_confirmation_title">请确认操作</string>
     <string name="root_confirm_enable">将检查 Root 权限并安装或更新配套模块。若需重启生效，请重启后重新检测，再开启增强。\n\n启用后，模块在独立后台进程中执行本地自动任务，不会定时打开阅微界面。设备深度休眠时不保证准点执行；若后台任务服务被系统终止，请点击「同步任务」尝试恢复或重启设备。</string>
     <string name="root_confirm_disable">将停止接收新的自动任务，等待当前任务安全结束，并将进度保存回应用。随后清除 Root 模块保存的账号凭据副本，并在管理器中禁用配套模块。\n\n模块文件和应用内任务资料会保留；停用后仅支持手动执行，不会改用其他自动唤醒方式。</string>
-    <string name="root_confirm_uninstall">将先停止自动任务并保存进度，再取消尚未生效的模块安装或更新，并通过当前 Root 管理器请求卸载。\n\n模块通常需重启设备后才会移除，请按管理器提示操作。应用内任务资料会保留，本应用不会自动重启设备。</string>
+    <string name="root_confirm_uninstall">将停止 Root 自动任务，清除暂存的安装或更新、Root 私有目录和其中的凭据。应用内的任务与已同步进度会保留。\n\n如管理器显示待卸载，重启后会移除模块本体。</string>
     <string name="root_disabled_done">Root增强已停用，配套模块已移除；应用内任务资料保留</string>
     <string name="root_removal_pending">Root增强已停止，配套模块待卸载；请按 Root 管理器提示重启设备</string>
     <string name="root_notification_hint">仅控制结果通知，不会创建自动唤醒</string>
@@ -363,6 +363,7 @@
     <string name="root_module_busy">正在处理模块操作…</string>
     <string name="root_sync_running">正在发送任务配置并读取进度与结果…</string>
     <string name="root_sync_success">任务配置、进度和结果已同步</string>
+    <string name="root_sync_stopped">Root 执行已停用，进度和记录已取回；重新开启 Root 增强可恢复后台任务</string>
     <string name="root_sync_failed">同步失败：%1$s</string>
     <string name="root_synced_at">上次同步：%1$s</string>
     <string name="root_module_bundled_version">应用内置版本：%1$d</string>
@@ -372,7 +373,7 @@
     <string name="root_wake_scheduled">已设定下一次唤醒</string>
     <string name="root_wake_at">已设定下一次唤醒：%1$s</string>
     <string name="root_wake_polling">按任务时间等待；当前无法定时唤醒，深睡时任务可能延迟</string>
-    <string name="root_module_upgrade_for_wake">当前模块可用；请安装 / 更新模块以启用定时唤醒</string>
+    <string name="root_module_update_available">当前模块可用，可更新到 APK 内置版本（%1$d）</string>
     <string name="about_qiji_font_credit">开屏页字体</string>
     <plurals name="records_selected_count">
         <item quantity="other">已选择 %1$d 项</item>
@@ -398,4 +399,27 @@
     <string name="task_order_save_failed">任务顺序保存失败，请重试</string>
     <string name="task_auto_read_config">阅读 %1$d 分钟 · 每日 %2$s</string>
     <string name="task_last_execution">上次执行：%1$s</string>
+    <string name="accounts_all">全部账号</string>
+    <string name="accounts_filter">选择账号</string>
+    <string name="accounts_manage">账号管理</string>
+    <string name="accounts_remark">账号备注</string>
+    <string name="accounts_remark_hint">最多 80 个字符，留空使用昵称</string>
+    <string name="accounts_description">每个账号单独配置任务。点击账号可修改备注；导入同一账号会更新凭证并保留配置和记录。</string>
+    <string name="accounts_import">导入凭证</string>
+    <string name="accounts_import_description">粘贴阅微账号管理导出的凭证，或选择单账号 / 多账号凭证文件。新账号的任务默认关闭。</string>
+    <string name="accounts_credential_hint">粘贴账号凭证</string>
+    <string name="accounts_choose_file">从文件导入</string>
+    <string name="accounts_saving">正在保存…</string>
+    <string name="accounts_imported">已导入 %1$d 个账号</string>
+    <string name="accounts_import_failed">凭证导入失败</string>
+    <string name="accounts_file_too_large">凭证文件不能超过 1 MiB</string>
+    <string name="accounts_file_unavailable">无法读取凭证文件</string>
+    <string name="accounts_delete">删除账号</string>
+    <string name="accounts_delete_action">删除</string>
+    <string name="accounts_delete_named">删除账号 %1$s</string>
+    <string name="accounts_delete_confirm">删除「%1$s」及其在本应用中的凭证、任务配置和任务记录？后台任务将停止，之后可重新导入凭证。阅微宿主内的数据和本地任务不受影响。</string>
+    <string name="accounts_deleting">正在删除…</string>
+    <string name="accounts_deleted">已删除账号 %1$s</string>
+    <string name="accounts_delete_failed">账号删除失败，请重试</string>
+    <string name="accounts_delete_sync_failed">账号已从本应用删除，但 Root 后台清理失败：%1$s。请在 Root 设置中重新同步。</string>
 </resources>

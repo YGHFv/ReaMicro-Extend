@@ -4,7 +4,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import com.reamicro.fix.cloud.local.LocalTaskBridgeRuntime
 import com.reamicro.fix.xposed.HookRuntime
 
 class ApiServerSettingsMirrorReceiver : BroadcastReceiver() {
@@ -12,7 +11,7 @@ class ApiServerSettingsMirrorReceiver : BroadcastReceiver() {
         if (intent?.action != ApiServerSettingsMirror.ACTION) return
         // 广播附带的包名可以伪造；只信任系统提供的 UID，旧系统使用 Provider。
         if (Build.VERSION.SDK_INT < 34 ||
-            !LocalTaskBridgeRuntime.trustedUid(context, runCatching { sentFromUid }.getOrDefault(-1))) {
+            !ApiServerBridgeAccess.trustedUid(context, runCatching { sentFromUid }.getOrDefault(-1))) {
             HookRuntime.logError("ReaMicro API settings mirror rejected unauthenticated sender")
             return
         }
@@ -24,7 +23,7 @@ class ApiServerSettingsMirrorReceiver : BroadcastReceiver() {
         }
         ApiServerSettingsStore { appContext }.save(settings)
         // 显式广播可达而 Provider 被包可见性限制时，授权后让下次同步取得保存回执。
-        LocalTaskBridgeRuntime.grantLegacyVisibility(appContext)
+        ApiServerBridgeAccess.grantVisibility(appContext)
         HookRuntime.log(
             "ReaMicro API settings mirror applied enabled=${settings.enabled} " +
                 "baseUrl=${settings.baseUrl.isNotBlank()} hostAccountId=${settings.hostAccountId.isNotBlank()}",

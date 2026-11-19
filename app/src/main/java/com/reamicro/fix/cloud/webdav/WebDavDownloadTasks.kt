@@ -58,6 +58,9 @@ internal class OnlineCompletionDownloadTask(
     @Volatile var importedBookDir: File? = null
     @Volatile var importedBookFileKey: Any? = null
     val downloadedChapters = ConcurrentHashMap<Int, OnlineDownloadedChapter>()
+    val publishedChapterIndices = ConcurrentHashMap.newKeySet<Int>()
+    val chapterAttempts = ConcurrentHashMap<Int, Int>()
+    val failedChapters = ConcurrentHashMap<Int, com.reamicro.fix.hook.webdav.OnlineFailedChapter>()
     @Volatile var tocSnapshot: com.reamicro.fix.hook.webdav.OnlineTocSnapshot? = null
     @Volatile var downloadedCover: com.reamicro.fix.hook.webdav.OnlineBinaryPayload? = null
     val bookDirWriteLock = ReentrantLock()

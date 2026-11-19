@@ -1,6 +1,7 @@
 package com.reamicro.fix.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,11 +55,15 @@ internal fun ModuleToolbarAction(
     }
     val guardedClick = { if (enabled && canActivate) onClick() }
     val content = @Composable {
-        Icon(
-            imageVector = vector,
-            contentDescription = description,
-            tint = if (enabled) tint else MiuixTheme.colorScheme.disabledOnSurface,
-        )
+        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+            // Contacts fills more of its viewport than the other toolbar glyphs.
+            Icon(
+                imageVector = vector,
+                contentDescription = description,
+                modifier = Modifier.size(if (icon == ModuleActionIcon.Accounts) 22.dp else 24.dp),
+                tint = if (enabled && canActivate) tint else MiuixTheme.colorScheme.disabledOnSurface,
+            )
+        }
     }
     // Reserve touch space outside the visual surface. Each native button remains the only
     // click owner, and its actual bounds still anchor the sorting popup.

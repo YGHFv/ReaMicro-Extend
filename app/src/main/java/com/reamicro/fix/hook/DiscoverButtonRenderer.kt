@@ -52,7 +52,7 @@ private class DiscoverRowRenderer {
         requireNotNull(host.call("size", padding(clickable(base(), action), start, 16, 12, 16), dp(24)))
     fun labelModifier(action: () -> Unit) = padding(clickable(base(), action), 0, 16, 0, 16)
     fun spacerModifier(scope: Any, action: () -> Unit): Any {
-        val weighted = requireNotNull(ui.instance("weight", scope, base(), 1f))
+        val weighted = ui.rowWeight(scope, base())
         return requireNotNull(ui.call("height", padding(clickable(weighted, action), 0, 16, 0, 16), dp(24)))
     }
     fun arrow(composer: Any, color: Long, vector: Any, end: Int, action: () -> Unit) {

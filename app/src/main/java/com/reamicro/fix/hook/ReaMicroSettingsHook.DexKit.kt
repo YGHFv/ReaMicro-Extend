@@ -48,8 +48,10 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
     HostSettingsDialogs.inheritSystemBars(dialog)
     val card = settingsDialogCard(activity, colors)
     val title = settingsDialogTitle(activity, if (scanning) "DexKit 自动扫描" else "DexKit 扫描结果", colors)
+    var spinner: ProgressBar? = null
     if (scanning) {
         val header = LinearLayout(activity).apply {
+            HostSettingsDialogs.markTitleRow(this)
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
@@ -59,6 +61,7 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
         header.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val spinnerSize = settingsDp(activity, 24)
         header.addView(ProgressBar(activity).apply {
+            spinner = this
             isIndeterminate = true
             ModuleDialogTheme.tintProgress(this, colors.primary)
         }, LinearLayout.LayoutParams(spinnerSize, spinnerSize).apply {
@@ -81,11 +84,21 @@ private fun ReaMicroSettingsHook.showDexKitDialog(
         "定位成功不等于全部功能验收；签名变更仍需适配。" to "BodySmall",
         notice.message to "BodyMedium",
     )
-    lines.forEach { (line, role) ->
-        card.addView(settingsDialogStatus(activity, line, colors).apply {
+    val messages = lines.map { (line, role) ->
+        settingsDialogStatus(activity, line, colors).apply {
             EmbeddedHostUi.text(this, role)
             if (role == "BodyLarge") setTextColor(colors.title)
-        })
+            card.addView(this)
+        } to role
+    }
+    HostSettingsDialogs.bindTheme(dialog) { native ->
+        EmbeddedHostUi.text(title, "TitleLarge")
+        title.setTextColor(native.roles.getValue("OnBackground"))
+        spinner?.let { ModuleDialogTheme.tintProgress(it, native.roles.getValue("Primary")) }
+        messages.forEach { (view, role) ->
+            EmbeddedHostUi.text(view, role)
+            view.setTextColor(if (role == "BodyLarge") native.roles.getValue("OnBackground") else native.captionArgb)
+        }
     }
     if (!scanning) {
         val actions = mutableListOf<HostSettingsDialogs.Action>()

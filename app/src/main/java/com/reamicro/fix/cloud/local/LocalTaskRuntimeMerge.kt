@@ -8,6 +8,7 @@ internal object LocalTaskRuntimeMerge {
 
     // A writer's captured configuration is context, never a persisted runtime field.
     const val CONFIG_CONTEXT = "_runtimeConfigUpdatedAt"
+    const val ACCOUNT_CONTEXT = "_runtimeAccountGeneration"
 
     private fun revision(state: JSONObject): Long =
         maxOf(state.optLong(UPDATED_AT), state.optLong(LocalTaskStore.KEY_LAST_RUN_AT), 0L)

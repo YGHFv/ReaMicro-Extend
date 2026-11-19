@@ -82,11 +82,14 @@ fun GlassIconButton(
     val materialContext = topBarContext.takeIf { inheritTopBarMaterial }
     val resolvedSurfaceAlpha = surfaceAlpha * (topBarContext?.alpha ?: 1f)
     val topBarRamp = topBarContext?.ramp
+    val shadowAlpha = remember(resolvedSurfaceAlpha, topBarRamp) {
+        { resolvedSurfaceAlpha * (topBarRamp?.value ?: 1f) }
+    }
     GlassButtonSurface(
         backdrop = materialContext?.buttonBackdrop ?: backdrop ?: topBarContext?.buttonBackdrop,
         floating = topBarContext?.floating ?: true,
         surfaceAlpha = resolvedSurfaceAlpha,
-        shadowAlpha = { resolvedSurfaceAlpha * (topBarRamp?.value ?: 1f) },
+        shadowAlpha = shadowAlpha,
         style = style,
         material = material?.withUnderlayBlur(materialContext?.buttonUnderlayMaterial)
             ?: materialContext?.material ?: GlassTopAppBarDefaults.buttonMaterial(),
@@ -113,7 +116,7 @@ fun GlassIconButton(
 @Composable
 // foldIn only reads the anchor marker; the modifier is still applied to exactly one root Box.
 @Suppress("ktlint:compose:modifier-reused-check", "ktlint:compose:state-param-check")
-private fun GlassButtonSurface(
+internal fun GlassButtonSurface(
     backdrop: Backdrop?,
     floating: Boolean,
     surfaceAlpha: Float,
@@ -148,13 +151,13 @@ private fun GlassButtonSurface(
             if (active) 1f else 0f
         }
     }
-    val ownKeepMaterial by remember(floating, progress) {
+    val keepMaterial = sharedKeepMaterial ?: remember(floating, progress) {
         derivedStateOf { floating || progress.value > 0f }
-    }
-    val keepMaterial = sharedKeepMaterial ?: ownKeepMaterial
+    }.value
     val opacity = surfaceAlpha.coerceIn(0f, 1f)
-    val anchorSurface = remember(backdrop, style, material, underlayMaterial, stroke, fill) {
-        GlassAnchorSurface(backdrop, style, material, underlayMaterial, stroke, fill)
+    val effectiveBackdrop = backdrop?.takeIf { isRuntimeShaderSupported() }
+    val anchorSurface = remember(effectiveBackdrop, style, material, underlayMaterial, stroke, fill) {
+        GlassAnchorSurface(effectiveBackdrop, style, material, underlayMaterial, stroke, fill)
     }
     SideEffect {
         val anchor = popupAnchor ?: return@SideEffect
@@ -189,10 +192,10 @@ private fun GlassButtonSurface(
                 .matchParentSize()
                 .graphicsLayer { alpha = progress.value }
                 .then(
-                    if (backdrop != null) {
+                    if (effectiveBackdrop != null) {
                         if (underlayMaterial != null) {
                             Modifier.glassOnActionBar(
-                                backdrop = backdrop,
+                                backdrop = effectiveBackdrop,
                                 shape = shape,
                                 style = style,
                                 alpha = opacity,
@@ -203,7 +206,7 @@ private fun GlassButtonSurface(
                             )
                         } else {
                             Modifier.glass(
-                                backdrop = backdrop,
+                                backdrop = effectiveBackdrop,
                                 shape = shape,
                                 style = style,
                                 alpha = opacity,

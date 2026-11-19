@@ -53,6 +53,8 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
     var chapterHrefs: List<String> = emptyList()
     var newIndices = emptySet<Int>()
     var oldMetadata: OnlineOnDemandMetadata? = null
+    var recoveredMetadata = false
+    var recoveredFailureLog = false
     var initialFailures: List<OnlineFailedChapter> = emptyList()
     val downloaded = linkedMapOf<Int, OnlineDownloadedChapter>()
     val attempts = mutableMapOf<Int, Int>()
@@ -77,14 +79,30 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
                 val plan = onlineChapterUpdatePlan(original, remote)
                 chapterHrefs = plan.first
                 newIndices = plan.second.toSet()
-                oldMetadata = OnlineOnDemandMetadataStore.read(original)?.recoverAfterProcessRestart()
+                val savedMetadata = OnlineOnDemandMetadataStore.read(original)?.recoverAfterProcessRestart()
+                oldMetadata = savedMetadata?.recoverPublishedChapters { href ->
+                    checkIdentity()
+                    val chapterFile = onlineCompletionChapterFile(original, href)
+                    chapterFile.isFile && OnlineChapterContentValidator.storedXhtmlFailureReason(
+                        chapterFile.readText(Charsets.UTF_8),
+                    ) == null
+                }
+                recoveredMetadata = oldMetadata != savedMetadata
                 val pendingHrefs = oldMetadata?.chapters.orEmpty()
                     .filter { it.state == OnlineChapterState.PENDING || it.state == OnlineChapterState.DOWNLOADING }
                     .mapTo(hashSetOf()) { it.href }
                 pendingIndices = chapterHrefs.indices.filterTo(hashSetOf()) { chapterHrefs[it] in pendingHrefs }
-                val logged = remapOnlineCompletionFailures(
+                val storedFailures = remapOnlineCompletionFailures(
                     readOnlineCompletionFailedChapters(original), remote, chapterHrefs,
                 )
+                val logged = storedFailures.filter { failure ->
+                    checkIdentity()
+                    val chapterFile = onlineCompletionChapterFile(original, chapterHrefs[failure.index])
+                    !chapterFile.isFile || OnlineChapterContentValidator.storedXhtmlFailureReason(
+                        chapterFile.readText(Charsets.UTF_8),
+                    ) != null
+                }
+                recoveredFailureLog = logged.size != storedFailures.size
                 val invalid = detectInvalidOnlineCompletionChapters(
                     original, target, remote, chapterHrefs,
                     logged.mapTo(hashSetOf()) { it.index } + pendingIndices,
@@ -140,7 +158,9 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
                                 return
                             }
                             retryable += index
-                            if (onlineHttpRetryKind(error) != OnlineHttpRetryKind.NONE) {
+                            if (onlineHttpRetryKind(error) != OnlineHttpRetryKind.NONE &&
+                                (attempts[index] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT
+                            ) {
                                 serviceFailures++
                                 val delay = onlineHttpRetryDelayMs(error, serviceFailures)
                                 onProgress(80, "源暂时异常，等待重试第 ${index + 1} 章")
@@ -154,15 +174,17 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
                         "下载未完成章节 ${offset + 1}/${allowed.size}")
                     attempt(index, true)
                 }
-                var round = 0
-                while (!quotaReached && retryable.any { (attempts[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }) {
-                    checkIdentity()
-                    round++
-                    onProgress(82, "等待重试 ${retryable.size} 章")
-                    sleepOnlineCompletionRetryDelay(null, onlineCompletionRetryDelayMs(round))
-                    retryable.toList().filter { (attempts[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
-                        .forEach { attempt(it, false) }
-                }
+                retryOnlineCompletionChapters(
+                    candidates = {
+                        if (quotaReached) emptyList() else retryable.filter { (attempts[it] ?: 0) < ONLINE_COMPLETION_CHAPTER_RETRY_LIMIT }
+                    },
+                    beforeRound = { round, remaining ->
+                        checkIdentity()
+                        onProgress(82, "等待重试 ${remaining.size} 章")
+                        sleepOnlineCompletionRetryDelay(null, onlineCompletionRetryDelayMs(round))
+                    },
+                    attempt = { index, _, _ -> attempt(index, false) },
+                )
                 checkIdentity()
             }
         } catch (error: Throwable) {
@@ -202,6 +224,12 @@ internal fun WebDavDriveHook.updateOnlineCompletionBookIncrementally(
                         if (!active.beginPublishing()) {
                             throw java.util.concurrent.CancellationException("更新已取消或暂停")
                         }
+                        if (recoveredMetadata) OnlineOnDemandMetadataStore.write(original, requireNotNull(oldMetadata),
+                            commit = originalGuard::commit, checkCurrent = ::checkIdentity)
+                        if (recoveredFailureLog) writeOnlineCompletionFailedChapters(original, target, failures = emptyList(),
+                            commit = originalGuard::commit, checkCurrent = ::checkIdentity)
+                        if (recoveredMetadata || recoveredFailureLog) markOnlineEpubChanged(
+                            original.name, storageIdentity, ::checkIdentity)
                         refreshOnlineCompletionCatalogTables(book, original, storageIdentity, ::checkIdentity)
                         active.markCommitted()
                     }

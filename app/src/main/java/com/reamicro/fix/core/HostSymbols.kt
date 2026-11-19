@@ -191,16 +191,7 @@ object HostSymbols {
         }
     }
 
-    private fun typeHierarchy(type: Class<*>): List<Class<*>> {
-        val result = linkedSetOf<Class<*>>()
-        fun visit(current: Class<*>?) {
-            if (current == null || !result.add(current)) return
-            current.interfaces.forEach(::visit)
-            visit(current.superclass)
-        }
-        visit(type)
-        return result.toList()
-    }
+    private fun typeHierarchy(type: Class<*>): List<Class<*>> = hostMembers().symbolHierarchyOf(type)
 
     @JvmStatic
     fun resolveFieldName(logicalClass: String, logicalName: String): String {

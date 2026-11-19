@@ -52,6 +52,7 @@ internal class HostMembers {
     private val fieldDescriptorCache = IdentityHashMap<ClassLoader?, MutableMap<String, Field>>()
     private val constructorDescriptorCache = IdentityHashMap<ClassLoader?, MutableMap<String, Constructor<*>>>()
     private val hierarchyCache = HashMap<Class<*>, List<Class<*>>>()
+    private val symbolHierarchyCache = HashMap<Class<*>, List<Class<*>>>()
     private val methodCache = HashMap<MethodKey, List<Method>>()
     private val fieldCache = HashMap<Pair<Class<*>, String>, Field?>()
     private val constructorCache = HashMap<ConstructorKey, Constructor<*>?>()
@@ -67,6 +68,7 @@ internal class HostMembers {
         typeCache.clear()
         classDescriptorCache.clear()
         hierarchyCache.clear()
+        symbolHierarchyCache.clear()
         methodCache.clear()
         fieldCache.clear()
         constructorCache.clear()
@@ -91,6 +93,21 @@ internal class HostMembers {
     fun hierarchyOf(type: Class<*>): List<Class<*>> = synchronized(lock) {
         requireActive()
         hierarchyCache.getOrPut(type) { Collections.unmodifiableList(hierarchy(type)) }
+    }
+
+    /** Logical mappings historically visit interfaces before the superclass. Raw members use hierarchyOf. */
+    fun symbolHierarchyOf(type: Class<*>): List<Class<*>> = synchronized(lock) {
+        requireActive()
+        symbolHierarchyCache.getOrPut(type) {
+            val owners = linkedSetOf<Class<*>>()
+            fun visit(owner: Class<*>?) {
+                if (owner == null || !owners.add(owner)) return
+                owner.interfaces.forEach(::visit)
+                visit(owner.superclass)
+            }
+            visit(type)
+            Collections.unmodifiableList(owners.toList())
+        }
     }
 
     /** 验证描述符只加载类型；静态初始化仍由实际调用、字段读取或构造触发。 */

@@ -13,7 +13,6 @@ import androidx.compose.ui.node.ModifierNodeElement
 import androidx.compose.ui.node.PointerInputModifierNode
 import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.unit.IntSize
-import top.yukonga.miuix.kmp.utils.PagerFlingTrackerConnection
 import top.yukonga.miuix.kmp.utils.PagerInterceptionMode
 import top.yukonga.miuix.kmp.utils.pagerGestureOverride
 
@@ -22,36 +21,26 @@ internal fun Modifier.modulePagerGestureOverride(
     flingBehavior: FlingBehavior,
     mode: PagerInterceptionMode,
     enabled: Boolean,
-    flingTracker: PagerFlingTrackerConnection,
     isExcluded: (windowPosition: Offset) -> Boolean,
 ): Modifier {
     // Keep the parent pointer chain attached when a child long-press drag takes ownership.
-    // Upstream's enabled=false removes the iOS pointer node and cancels its child hit path.
-    // Gate the existing pointer nodes instead; retain the iOS nested-scroll tracker unchanged.
+    // Gate the pointer nodes instead of removing the child's active hit path.
     val elements = Modifier.pagerGestureOverride(
         pagerState = pagerState,
         flingBehavior = flingBehavior,
         mode = mode,
         enabled = true,
-        flingTracker = flingTracker,
     ).foldIn(emptyList<Modifier.Element>()) { list, element ->
         list + element
     }
     return elements.foldIndexed(this) { index, modifier, element ->
-        // CrossAxis supplies touch and non-touch pointer nodes. iOS adds a nested-scroll
-        // element followed by one pointer node. Native supplies no additional elements.
-        val pointerElement = when (mode) {
-            PagerInterceptionMode.CrossAxis -> true
-            PagerInterceptionMode.TapToHalt -> index == elements.lastIndex
-            PagerInterceptionMode.Native -> false
-        }
+        // CrossAxis supplies non-touch followed by touch; Native adds no elements.
+        val pointerElement = mode == PagerInterceptionMode.CrossAxis
         if (pointerElement && element is ModifierNodeElement<*>) {
             @Suppress("UNCHECKED_CAST")
             val libraryElement = element as ModifierNodeElement<Modifier.Node>
             modifier.then(
                 when {
-                    mode == PagerInterceptionMode.TapToHalt ->
-                        IosPagerExclusionElement(libraryElement, enabled, isExcluded)
                     index == elements.lastIndex ->
                         CrossAxisTouchExclusionElement(libraryElement, enabled, isExcluded)
                     else ->
@@ -79,8 +68,7 @@ private sealed class PagerExclusionElement : ModifierNodeElement<PagerExclusionN
     }
 }
 
-// Compose reuses nodes by element class. Keep different upstream node types distinct so changing
-// gesture mode cannot update an iOS coroutine node through a CrossAxis element's typed bridge.
+// Compose reuses nodes by element class; keep the two upstream pointer node types distinct.
 private data class CrossAxisTouchExclusionElement(
     override val libraryElement: ModifierNodeElement<Modifier.Node>,
     override val enabled: Boolean,
@@ -88,12 +76,6 @@ private data class CrossAxisTouchExclusionElement(
 ) : PagerExclusionElement()
 
 private data class CrossAxisNonTouchExclusionElement(
-    override val libraryElement: ModifierNodeElement<Modifier.Node>,
-    override val enabled: Boolean,
-    override val isExcluded: (Offset) -> Boolean,
-) : PagerExclusionElement()
-
-private data class IosPagerExclusionElement(
     override val libraryElement: ModifierNodeElement<Modifier.Node>,
     override val enabled: Boolean,
     override val isExcluded: (Offset) -> Boolean,
