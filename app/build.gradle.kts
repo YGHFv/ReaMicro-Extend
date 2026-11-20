@@ -222,7 +222,7 @@ tasks.withType<dev.detekt.gradle.Detekt>().configureEach {
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
 
