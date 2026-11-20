@@ -11,7 +11,11 @@ internal fun applyModuleTaskEdits(
 ): LocalTask? {
     if (spec != null && spec.taskType != task.taskType) return null
     val text = { label: String -> fields[label]?.invoke()?.trim().orEmpty() }
-    val timeOfDay = if (spec?.rewardTriggered != true && spec?.merchant != true) {
+    val drawAtCustomTime = if (task.taskType == "yeshe_draw_card") {
+        if ("drawAtCustomTime" in fields) text("drawAtCustomTime").toBooleanStrictOrNull() ?: return null
+        else task.drawAtCustomTime
+    } else task.drawAtCustomTime
+    val timeOfDay = if (spec?.merchant != true && (task.taskType != "yeshe_draw_card" || drawAtCustomTime)) {
         val parts = text("timeOfDay").split(":")
         val hour = parts.getOrNull(0)?.toIntOrNull()
         val minute = parts.getOrNull(1)?.toIntOrNull()
@@ -48,6 +52,7 @@ internal fun applyModuleTaskEdits(
         timeOfDay = timeOfDay,
         durationMinutes = duration,
         dailyDrawLimit = drawLimit,
+        drawAtCustomTime = drawAtCustomTime,
         books = books,
         forbiddenPawnPropIds = forbiddenPawnPropIds,
         blessingType = blessing,

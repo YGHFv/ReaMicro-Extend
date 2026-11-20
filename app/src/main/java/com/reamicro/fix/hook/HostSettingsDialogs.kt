@@ -63,7 +63,7 @@ internal object HostSettingsDialogs {
                 textParameters[it] == ui.composerClass
             }
             val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
-            val themedContent = HostThemedPopupContent { composer -> capture(loader, activityProvider(), composer) }
+            val themedContent = HostThemedPopupContent { composer -> capture(activityProvider(), composer) }
             try {
                 handles += HookRuntime.hookMethod(native.method("theme"), object : HookCallback() {
                     override fun before(param: Call) {
@@ -249,9 +249,9 @@ internal object HostSettingsDialogs {
 
     /** Must run while a themed host composable is executing, before leaving its slot. */
     fun capture(hook: ReaMicroSettingsHook, composer: Any) =
-        capture(hook.classLoader, hook.activityProvider(), composer)
+        capture(hook.activityProvider(), composer)
 
-    private fun capture(loader: ClassLoader, activity: Activity?, composer: Any) {
+    private fun capture(activity: Activity?, composer: Any) {
         if (rendering != 0) return
         if (activity == null) return
         val native = HostDialogBindings.current ?: return
@@ -269,7 +269,7 @@ internal object HostSettingsDialogs {
             } finally {
                 ui.instance("endGroup", composer, false)
             }
-            EmbeddedHostUi.captureTypography(loader, composer)
+            EmbeddedHostUi.captureTypography(composer)
         }.onFailure { HookRuntime.logError("ReaMicro native popup parent capture failed", it) }
     }
 
@@ -520,7 +520,7 @@ internal object HostSettingsDialogs {
                     if (ui.stateValue(state) == true) {
                         themeObserver?.let { apply ->
                             runCatching {
-                                EmbeddedHostUi.captureTypography(ui.loader, composer)
+                                EmbeddedHostUi.captureTypography(composer)
                                 HostThemeColors.readerSnapshot(requireNotNull(ui.call("colorScheme", composer)))?.let(apply)
                             }.onFailure { HookRuntime.logError("ReaMicro native dialog theme unavailable", it) }
                         }

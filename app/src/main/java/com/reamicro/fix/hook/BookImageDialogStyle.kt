@@ -9,7 +9,6 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 
 internal object BookImageDialogStyle {
-    fun capture(loader: ClassLoader, composer: Any?) = EmbeddedHostUi.captureTypography(loader, composer)
     fun typography(context: Context, scale: Float): ModuleTypography {
         val family = EmbeddedHostUi.uiFontFamily(context)
         fun style(role: String, size: Int, bold: Boolean, spacing: Float): TextStyle {

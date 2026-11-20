@@ -2,7 +2,7 @@ package com.reamicro.fix.core
 
 /** Reads the host's actual text style fields and preserves its native font scaling. */
 internal class HostTypographyMetrics(
-    private val loader: ClassLoader, val typography: Any, private val density: Any,
+    val typography: Any, private val density: Any,
 ) {
     data class UnitValue(val value: Float, val em: Boolean)
     data class Style(
@@ -10,8 +10,8 @@ internal class HostTypographyMetrics(
         val fontWeight: Int?, val fontSizePx: Float, val lineHeightPx: Float,
     )
 
-    constructor(loader: ClassLoader, composer: Any) : this(
-        loader, requireNotNull(HostTypographyBindings.current).typography(composer),
+    constructor(composer: Any) : this(
+        requireNotNull(HostTypographyBindings.current).typography(composer),
         requireNotNull(HostTypographyBindings.current).density(composer),
     )
 

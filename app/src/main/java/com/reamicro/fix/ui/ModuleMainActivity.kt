@@ -169,9 +169,7 @@ import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.integration.captureBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Info
-import top.yukonga.miuix.kmp.icon.extended.Play
 import top.yukonga.miuix.kmp.icon.extended.Recent
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Tasks
@@ -226,6 +224,8 @@ class ModuleMainActivity : ComponentActivity() {
     private var recordsAccount by mutableStateOf<String?>(null)
     private var tasksAccount by mutableStateOf<String?>(null)
     private val accountsUi = ModuleAccountsUi()
+    private val nicknameRefreshAttempts = mutableSetOf<Pair<String, String>>()
+    private var nicknameRefreshJob: Job? = null
     private fun accountLabel(id: String): String = accounts.firstOrNull { it.id == id }?.label ?: id
     private fun visibleRecords(): List<ModuleRecordRow> = recordRows.value.filter { recordsAccount == null || it.accountId == recordsAccount }
     private val importCredentialFile = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -420,6 +420,7 @@ class ModuleMainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        nicknameRefreshAttempts.clear()
         aboutEffectResumed.value = true
 
         rootUi.value = RootTaskBridge.lastInspection
@@ -520,7 +521,8 @@ class ModuleMainActivity : ComponentActivity() {
             val checkin = tasks.optJSONObject("yeshe_checkin") ?: JSONObject()
             tasks.keys().asSequence().mapNotNull { type ->
                 val rawTask = tasks.optJSONObject(type) ?: return@mapNotNull null
-                val task = localTaskFromJson(type, rawTask)
+                val task = localTaskFromJson(type, rawTask).copy(
+                    accountGeneration = accounts.getJSONObject(accountId).optString("accountGeneration"))
                 val state = localTaskRuntimeState(rawTask)
                 val spec = specOf(task.taskType)
                 val effectiveNext = nextLocalTaskAt(task, state, checkin, now) ?: 0L
@@ -599,6 +601,30 @@ class ModuleMainActivity : ComponentActivity() {
         overviewText.value = data.overview
         notificationSummary.value = data.notifications
         logSummary.value = data.logs
+        refreshMissingAccountNicknames(data.tasks)
+    }
+
+    private fun refreshMissingAccountNicknames(rows: List<TaskRow>) {
+        if (nicknameRefreshJob?.isActive == true) return
+        val missing = accounts.filter { it.nickname.isBlank() }.mapNotNull { account ->
+            val generation = rows.firstOrNull { it.accountId == account.id }?.task?.accountGeneration ?: return@mapNotNull null
+            (account.id to generation).takeIf { it !in nicknameRefreshAttempts }
+        }
+        if (missing.isEmpty()) return
+        nicknameRefreshJob = uiRefreshScope.launch {
+            try {
+                for ((accountId, generation) in missing) {
+                    nicknameRefreshAttempts += accountId to generation
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching { LocalTaskStore { applicationContext }.refreshAccountNickname(accountId, generation) }
+                    }
+                    if (result.getOrDefault(false)) refresh()
+                }
+            } finally {
+                nicknameRefreshJob = null
+                refresh()
+            }
+        }
     }
 
     @Composable
@@ -1365,6 +1391,7 @@ class ModuleMainActivity : ComponentActivity() {
         }, then = { result ->
             accountsUi.busy = false
             result.onSuccess { count ->
+                nicknameRefreshAttempts.clear()
                 accountsUi.credential = ""
                 accountsUi.show(AccountDialog.Manage)
                 toast(uiText(R.string.accounts_imported, count))
@@ -1541,7 +1568,7 @@ class ModuleMainActivity : ComponentActivity() {
 
     private fun runSingleTask(accountId: String, task: LocalTask) {
         runBg(
-            work = { LocalTaskRunner.runTaskNow(applicationContext, accountId, task.taskType) },
+            work = { LocalTaskRunner.runTaskNow(applicationContext, accountId, task.taskType, task.accountGeneration) },
             then = { message ->
                 toast(message)
                 refresh()
@@ -1556,11 +1583,8 @@ class ModuleMainActivity : ComponentActivity() {
         runBg(work = {
             runCatching {
                 val store = LocalTaskStore { applicationContext }
-                val token = if (enabled) store.token(accountId).also {
-                    check(it.isNotBlank()) { "登录凭据不可用，请从账号管理重新导入该账号凭证" }
-                } else ""
                 check(store.get(accountId, task.taskType) != null) { "任务不存在，请刷新后重试" }
-                store.setEnabled(accountId, task.taskType, enabled, token)
+                store.setEnabled(accountId, task.taskType, enabled, expected = task)
                 readTaskRow(store, accountId, task.taskType)
             }
         }, then = { result ->
@@ -1853,12 +1877,15 @@ class ModuleMainActivity : ComponentActivity() {
                 editor.textFields[label] = TextFieldState(initialText = value)
             }
         }
-        if (spec?.rewardTriggered != true && spec?.merchant != true) put(FIELD_TIME, task.timeOfDay)
+        if (spec?.merchant != true) put(FIELD_TIME, task.timeOfDay)
         if (spec?.autoRead == true) {
             put(FIELD_DURATION, task.durationMinutes.toString())
             put(FIELD_BOOKS, task.books.joinToString("\n") { "${it.bookId}|${it.name}" })
         }
-        if (spec?.rewardTriggered == true) put(FIELD_DRAW_LIMIT, task.dailyDrawLimit.toString())
+        if (spec?.rewardTriggered == true) {
+            put(FIELD_DRAW_LIMIT, task.dailyDrawLimit.toString())
+            put(FIELD_DRAW_CUSTOM_TIME, task.drawAtCustomTime.toString())
+        }
         if (spec?.taskType == "pawn") {
 
             put(
@@ -1869,7 +1896,8 @@ class ModuleMainActivity : ComponentActivity() {
             )
             editor.multiOptions[FIELD_PAWN] = pawnOptionsFromState(accountId)
 
-            runBg(work = { runCatching { fetchPawnOptions(accountId) } }, then = { result ->
+            runBg(work = { runCatching { fetchPawnOptions(accountId, task.accountGeneration) } }, then = { result ->
+                if (editorDialog.value !== editor) return@runBg
                 val updated = result.getOrNull()
                 if (updated != null) {
                     editor.multiOptions[FIELD_PAWN] = updated
@@ -1884,7 +1912,8 @@ class ModuleMainActivity : ComponentActivity() {
             put(FIELD_TRANSPORT, task.merchantTransportId.toString())
 
             editor.merchantLoading = true
-            runBg(work = { runCatching { fetchMerchantChoices(accountId) } }, then = { result ->
+            runBg(work = { runCatching { fetchMerchantChoices(accountId, task.accountGeneration) } }, then = { result ->
+                if (editorDialog.value !== editor) return@runBg
                 editor.merchantLoading = false
                 val fetched = result.getOrNull()
                 if (fetched == null) {
@@ -1909,8 +1938,9 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
-    private fun fetchPawnOptions(accountId: String): List<ModulePawnOption> {
+    private fun fetchPawnOptions(accountId: String, generation: String): List<ModulePawnOption> {
         val pawnStore = LocalTaskStore { applicationContext }
+        check(pawnStore.accountGeneration(accountId) == generation) { "账号已变更，请重新打开配置" }
         val token = pawnStore.token(accountId)
         if (token.isBlank()) {
             throw IllegalStateException(uiText(R.string.error_credential_invalid))
@@ -1934,16 +1964,21 @@ class ModuleMainActivity : ComponentActivity() {
             state.optJSONObject(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG) ?: JSONObject(),
             fresh,
         )
-        state.put(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG, merged)
-        pawnStore.recordState(accountId, "pawn", state)
-        return CloudTaskLocalRunner.pawnPropChoices(state).map {
+        val patch = JSONObject().put(CloudTaskLocalRunner.KEY_PAWN_PROP_CATALOG, merged)
+            .put(com.reamicro.fix.cloud.local.LocalTaskRuntimeMerge.ACCOUNT_CONTEXT, generation)
+        pawnStore.recordState(accountId, "pawn", patch)
+        return CloudTaskLocalRunner.pawnPropChoices(patch).map {
             ModulePawnOption(it.propId, it.name, cloudTaskQualityColor(it.quality), it.hint)
         }
     }
 
-    private fun fetchMerchantChoices(accountId: String): CloudTaskLocalRunner.MerchantOptionsFetch {
-        val token = LocalTaskStore { applicationContext }.token(accountId)
-        return CloudTaskLocalRunner.fetchMerchantOptions(token)
+    private fun fetchMerchantChoices(accountId: String, generation: String): CloudTaskLocalRunner.MerchantOptionsFetch {
+        val store = LocalTaskStore { applicationContext }
+        check(store.accountGeneration(accountId) == generation) { "账号已变更，请重新打开配置" }
+        val token = store.token(accountId)
+        return CloudTaskLocalRunner.fetchMerchantOptions(token).also {
+            check(store.accountGeneration(accountId) == generation) { "账号已变更，请重新打开配置" }
+        }
     }
 
     private fun saveTaskEdits(editor: TaskEditor) {
@@ -1971,10 +2006,7 @@ class ModuleMainActivity : ComponentActivity() {
         runBg(work = {
             runCatching {
                 val store = LocalTaskStore { applicationContext }
-                val token = if (updated.enabled) store.token(editor.accountId).also {
-                    check(it.isNotBlank()) { "登录凭据不可用，请从账号管理重新导入该账号凭证" }
-                } else ""
-                store.saveEditedTask(editor.accountId, updated, token, editor.task)
+                store.saveEditedTask(editor.accountId, updated, "", editor.task)
                 readTaskRow(store, editor.accountId, updated.taskType)
             }
         }, then = { result ->
@@ -2322,7 +2354,19 @@ class ModuleMainActivity : ComponentActivity() {
             Text(accountLabel(editor.accountId), style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary, modifier = Modifier.padding(bottom = 12.dp))
             val spec = editor.spec
-            if (spec?.rewardTriggered != true && spec?.merchant != true) {
+            val customDrawTime = editor.values[FIELD_DRAW_CUSTOM_TIME] == "true"
+            if (spec?.rewardTriggered == true) {
+                SwitchPreference(
+                    title = uiText(R.string.task_wish_custom_time),
+                    summary = if (customDrawTime) uiText(R.string.task_wish_custom_time_hint)
+                        else uiText(R.string.task_wish_trigger),
+                    checked = customDrawTime,
+                    enabled = !editor.saving,
+                    onCheckedChange = { editor.values[FIELD_DRAW_CUSTOM_TIME] = it.toString() },
+                    insideMargin = PaddingValues(vertical = 12.dp),
+                )
+            }
+            if (spec?.merchant != true && (spec?.rewardTriggered != true || customDrawTime)) {
                 TaskTimePicker(
                     label = uiText(R.string.field_time),
                     value = editor.values[FIELD_TIME].orEmpty(),
@@ -2354,6 +2398,12 @@ class ModuleMainActivity : ComponentActivity() {
                 )
             }
             if (spec?.rewardTriggered == true) {
+                Text(
+                    text = uiText(R.string.task_wish_schedule_hint),
+                    style = MiuixTheme.textStyles.body2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
                 EditorField(
                     label = uiText(R.string.field_draw_limit),
                     hint = uiText(R.string.field_draw_limit_hint),
@@ -2697,8 +2747,9 @@ class ModuleMainActivity : ComponentActivity() {
         LaunchedEffect(label) {
             refreshing = true
             runBg(
-                work = { runCatching { fetchPawnOptions(editor.accountId) } },
+                work = { runCatching { fetchPawnOptions(editor.accountId, editor.task.accountGeneration) } },
                 then = { result ->
+                    if (editorDialog.value !== editor) return@runBg
                     refreshing = false
                     val updated = result.getOrNull()
                     if (result.isFailure) {
@@ -2984,6 +3035,7 @@ class ModuleMainActivity : ComponentActivity() {
         const val FIELD_DURATION = "durationMinutes"
         const val FIELD_BOOKS = "books"
         const val FIELD_DRAW_LIMIT = "dailyDrawLimit"
+        const val FIELD_DRAW_CUSTOM_TIME = "drawAtCustomTime"
         const val FIELD_PAWN = "forbiddenPawnPropIds"
         const val FIELD_CITY = "merchantCityCode"
         const val FIELD_PRINCIPAL = "merchantPrincipal"

@@ -5,32 +5,16 @@ import android.app.Dialog
 import android.content.ComponentCallbacks
 import android.content.res.Configuration
 import android.view.Window
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.ViewCompositionStrategy
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.R
 import com.reamicro.fix.core.InjectedModuleContext
-import com.reamicro.fix.ui.ModuleTheme
-import androidx.compose.ui.unit.DpSize
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
 /** Uses the host book-action sheet's geometry and live theme, including its custom UI font. */
 internal class HostAssociationDialog(
@@ -41,6 +25,7 @@ internal class HostAssociationDialog(
     data class Action(
         val title: String,
         val description: String,
+        val icon: ImageVector,
         val destructive: Boolean = false,
         val run: () -> Unit,
     )
@@ -59,7 +44,7 @@ internal class HostAssociationDialog(
     }
 
     override fun show() {
-        if (isShowing || closed || activity.isFinishing || activity.isDestroyed) return
+        if (isShowing || closed || activity.isFinishing || activity.isDestroyed || !isCurrent()) return
         try {
             requestWindowFeature(Window.FEATURE_NO_TITLE)
             setOnDismissListener { release() }
@@ -84,6 +69,7 @@ internal class HostAssociationDialog(
             super.show()
             window?.let { com.reamicro.fix.ui.DialogWindowStyle.apply(it, activity.window) }
         } catch (error: Throwable) {
+            if (isShowing) runCatching { dismiss() }.onFailure(error::addSuppressed)
             runCatching { release() }.onFailure(error::addSuppressed)
             throw error
         }
@@ -121,51 +107,14 @@ internal class HostAssociationDialog(
         val palette = HostEmbeddedStyle.palette(activity, dark)
         val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
         val typography = remember(scale, LocalConfiguration.current) { BookImageDialogStyle.typography(activity, scale) }
-        ModuleTheme(colorScheme = palette.controlsScheme(), typography = typography) {
-            WindowBottomSheet(
-                show = true,
-                onDismissRequest = { dismiss() },
-                backgroundColor = palette.content,
-                cornerRadius = (20 * scale).dp,
-                insideMargin = DpSize.Zero,
-                outsideMargin = DpSize.Zero,
-                dragHandleColor = palette.surfaceHighest,
-            ) {
-                Column(Modifier.fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = (20 * scale).dp).padding(bottom = (16 * scale).dp)) {
-                    Text("关联操作", style = ModuleTheme.typography.labelLarge,
-                        modifier = Modifier.semantics { heading() }.padding(bottom = (20 * scale).dp))
-                    Surface(shape = RoundedCornerShape((8 * scale).dp), color = palette.bright,
-                        border = BorderStroke((.8f * scale).dp, palette.borderVariant)) {
-                        Column {
-                            actions.forEachIndexed { index, action ->
-                                if (index > 0) HorizontalDivider(color = palette.borderVariant,
-                                    thickness = (.8f * scale).dp, modifier = Modifier.padding(horizontal = (18 * scale).dp))
-                                ActionRow(action, palette, scale) { select(action) }
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height((16 * scale).dp))
-                    com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() },
-                        modifier = Modifier.fillMaxWidth()) {
-                        Text("取消操作", style = ModuleTheme.typography.labelLarge)
-                    }
-                }
+        val look = remember(palette, scale, typography) { HostDialogLook(palette, scale, typography) }
+        HostDialogSheet(look, "关联操作", onDismiss = { dismiss() }, actions = {
+            actions.forEachIndexed { index, action ->
+                if (index > 0) HostDialogDivider(look, look.dp(54f))
+                HostDialogAction(look, action.title, action.icon,
+                    if (action.destructive) palette.error else palette.text, typography.labelLarge,
+                    description = action.description) { select(action) }
             }
-        }
-    }
-
-    @Composable
-    private fun ActionRow(action: Action, palette: HostEmbeddedStyle.Palette, scale: Float, onClick: () -> Unit) {
-        Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-            .clickable(role = Role.Button, onClickLabel = action.title, onClick = onClick)
-            .padding(horizontal = (18 * scale).dp, vertical = (16 * scale).dp)) {
-            Text(action.title, color = if (action.destructive) palette.error else palette.text,
-                style = ModuleTheme.typography.labelLarge)
-            Text(action.description, color = palette.caption, style = ModuleTheme.typography.bodyMedium,
-                modifier = Modifier.padding(top = (2 * scale).dp))
-        }
+        })
     }
 }

@@ -77,7 +77,7 @@ private const val ONLINE_SEARCH_COVER_MAX_BYTES = 16 * 1024 * 1024
 private const val ONLINE_SEARCH_COVER_MAX_EDGE = 512
 
 internal fun WebDavDriveHook.renderOnlineCompletionCloudBookSearchRow(book: Any, target: OnlineDownloadTarget, composer: Any) {
-    EmbeddedHostUi.captureTypography(classLoader, composer)
+    EmbeddedHostUi.captureTypography(composer)
     val query = webDavHomeSearchSeq.get()
     val textColors = onlineCompletionSearchTextColors(composer)
     val factory = functionProxy("OnlineCompletionSearchRowAndroidView", FUNCTION1_CLASS) { args ->

@@ -44,7 +44,6 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.R
 import com.reamicro.fix.core.InjectedModuleContext
 import com.reamicro.fix.hook.reader.FullTextSearchResult
-import java.io.File
 import com.reamicro.fix.reload.ModuleUiRuntime
 import kotlinx.coroutines.withContext
 import com.reamicro.fix.ui.ModuleTheme
@@ -54,7 +53,6 @@ import com.reamicro.fix.ui.ModuleLinearProgressIndicator
 
 internal class HostFullTextSearchDialog(
     private val activity:Activity,
-    private val root:File?,
     private val initialQuery:String,
     private val initialScroll:Int,
     private val initialScrollOffset:Int,

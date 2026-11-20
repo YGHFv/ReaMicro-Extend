@@ -705,7 +705,6 @@ internal class EpubScriptaPanel(
             }
         }
 
-        val bg = p.page
         val textColor = p.text
         val muted = p.caption
         val uiState = StructureScriptaUiState(loading, saving, searchBusy, dismissRequested,

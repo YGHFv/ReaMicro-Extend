@@ -8,9 +8,6 @@ import com.reamicro.fix.xposed.HookCallback.Call
 import com.reamicro.fix.xposed.HookRuntime
 import java.lang.ref.WeakReference
 import java.lang.reflect.Executable
-import java.lang.reflect.InvocationTargetException
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.util.ArrayDeque
 
 /** Motion hooks are gated by actual reader state/view identity, including shared Compose classes. */
@@ -19,12 +16,8 @@ internal class ReaderExtraMotionHook(
     private val speed: (Int) -> Float,
     private val nativeMode: () -> Int = { 4 },
 ) {
-    private val readerLists = WeakIdentityMap<Unit>()
-    private val readerFlings = WeakIdentityMap<Unit>()
     private val curlOwners = WeakIdentityMap<CurlState>()
     private val curlChildren = WeakIdentityMap<CurlState>()
-    private val rootDepth = ThreadLocal.withInitial { 0 }
-    private val columnFrames = ThreadLocal.withInitial { ArrayDeque<Boolean>() }
     private val curlFrames = ThreadLocal.withInitial { ArrayDeque<CurlFrame>() }
 
     private class CurlState(owner: Any, child: Any) {
@@ -58,67 +51,6 @@ internal class ReaderExtraMotionHook(
         return result.isSuccess
     }
 
-    private fun installScroll(hooks: Hooks) {
-        val root = symbols["extraScrollRoot"]
-        val factory = symbols["extraScrollState"]
-        val column = symbols["extraScrollColumn"]
-        val list = symbols["extraScrollList"]
-        val fling = symbols["extraScrollFling"]
-        val resume = symbols["extraScrollResume"]
-        val continuationType = fling.parameterTypes[2]
-        check(continuationType.isInterface && resume.declaringClass == continuationType)
-        hooks.method(root, object : HookCallback() {
-            override fun before(param: Call) { rootDepth.set(rootDepth.get() + 1) }
-            override fun after(param: Call) { rootDepth.set(rootDepth.get() - 1) }
-        })
-        hooks.method(factory, object : HookCallback() {
-            override fun after(param: Call) {
-                if (rootDepth.get() > 0 && param.throwable == null) param.result?.let { readerLists.put(it, Unit) }
-            }
-        })
-        hooks.method(column, object : HookCallback() {
-            override fun before(param: Call) {
-                columnFrames.get().push(param.args[1]?.let { readerLists[it] != null } == true)
-            }
-            override fun after(param: Call) { columnFrames.get().pop() }
-        })
-        hooks.method(list, object : HookCallback() {
-            override fun before(param: Call) {
-                if (columnFrames.get().peek() != true || param.args[1]?.let { readerLists[it] } == null) return
-                val behavior = param.args[4] ?: return
-                if (behavior.javaClass == fling.declaringClass) readerFlings.put(behavior, Unit)
-            }
-        })
-        hooks.method(fling, object : HookCallback() {
-            override fun before(param: Call) {
-                val receiver = param.thisObject ?: return
-                if (readerFlings[receiver] == null) return
-                val factor = factor(3)
-                val velocity = param.args[1] as? Float ?: return
-                val continuation = param.args[2] ?: return
-                val scaled = velocity * factor
-                if (factor == 1f || !velocity.isFinite() || !scaled.isFinite()) return
-                // performFling returns residual velocity through either return or Continuation.resumeWith.
-                val proxy = ReaderExtraMotionPolicy.continuation(continuationType, resume, continuation, factor)
-                param.setObjectExtra(FLING_FACTOR, factor)
-                param.args[2] = proxy
-                param.args[1] = scaled
-            }
-            override fun after(param: Call) {
-                if (param.throwable != null) return
-                val factor = param.getObjectExtra(FLING_FACTOR) as? Float ?: return
-                val result = param.result
-                if (result is Float) param.result = ReaderExtraMotionPolicy.residual(result, factor)
-            }
-        })
-        listOf(root, symbols["extraScrollLayout"], column, list, fling).forEach(::deoptimize)
-        var index = 0
-        while (true) {
-            val caller = symbols.optional("extraScrollFlingCaller${index++}") ?: break
-            deoptimize(caller)
-        }
-    }
-
     private fun installCurl(hooks: Hooks) {
         val animationSetter = symbols["extraCurlDuration"]
         val dispatch = symbols["extraCurlDispatch"]
@@ -127,7 +59,6 @@ internal class ReaderExtraMotionHook(
         val finish = symbols["extraCurlFinish"]
         val maintenance = symbols["extraCurlMaintenance"]
         val detach = symbols["extraCurlDetach"]
-        val ownerType = dispatch.declaringClass
         val ownerConstructor = symbols.constructor("extraCurlOwner")
         val childField = symbols.field("extraCurlChild")
         val callbackOwner = listOf("First", "Finish", "Maintenance").associate { role ->
@@ -289,7 +220,6 @@ internal class ReaderExtraMotionHook(
     }
 
     private companion object {
-        const val FLING_FACTOR = "reamicro.extra.fling.factor"
         const val DISPATCH = 1
         const val SYNTHETIC = 2
         const val CLEANUP = 3
@@ -302,16 +232,4 @@ internal class ReaderExtraMotionHook(
 /** Pure boundary policy shared by the hook and JVM tests. */
 internal object ReaderExtraMotionPolicy {
     fun duration(value: Int, factor: Float): Int = if (value == 0) 0 else ReaderPageSpeed.duration(value, factor)
-    fun residual(value: Any?, factor: Float): Any? = if (value is Float && value.isFinite()) value / factor else value
-
-    fun continuation(type: Class<*>, resume: Method, original: Any, factor: Float): Any =
-        Proxy.newProxyInstance(type.classLoader, arrayOf(type)) { _, method, args ->
-            val forwarded = Array<Any?>(args?.size ?: 0) { args!![it] }
-            if (method == resume && forwarded.size == 1) forwarded[0] = residual(forwarded[0], factor)
-            try {
-                method.invoke(original, *forwarded)
-            } catch (error: InvocationTargetException) {
-                throw error.targetException
-            }
-        }
 }

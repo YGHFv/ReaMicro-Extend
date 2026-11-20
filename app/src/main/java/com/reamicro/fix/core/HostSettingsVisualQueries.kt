@@ -18,7 +18,7 @@ internal object HostSettingsVisualQueries {
         val clickable = method("clickable")
         val colors = method("listColors")
         val background = method("backgroundAuto")
-        val clip = method("clip")
+        method("clip")
         val border = method("border")
         val height = method("height")
         val fill = method("fillWidth")

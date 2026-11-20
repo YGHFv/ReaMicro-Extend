@@ -11,6 +11,8 @@ import com.reamicro.fix.core.HostBookUiBindings
 import com.reamicro.fix.core.HostCoroutines
 import com.reamicro.fix.core.HostReaderExtrasBindings
 import com.reamicro.fix.core.HostUiBindings
+import com.reamicro.fix.core.ModuleResourceRecovery
+import com.reamicro.fix.core.ModuleResourcesUnavailableException
 import com.reamicro.fix.hook.settings.InjectedRoute
 import com.reamicro.fix.reload.ModuleUiRuntime
 import com.reamicro.fix.settings.FontSettingsSnapshot
@@ -110,8 +112,9 @@ internal class BookStructurePages(private val hook: ReaMicroSettingsHook) {
             renderStatus(route, "", composer, loading = true)
             return
         }
-        val factory = native.function(native.type("function1")) {
-            page.view ?: EpubBookPanel(
+        // Fail before mounting AndroidView so its release callback cannot discard the error page.
+        val view = page.view ?: try {
+            EpubBookPanel(
                 activity = activity,
                 root = requireNotNull(page.root),
                 bookTitle = route.bookTitle,
@@ -124,7 +127,20 @@ internal class BookStructurePages(private val hook: ReaMicroSettingsHook) {
                 canAccess = { isCurrentPage(page) && page.settingsProvider().canUseFileEdit },
                 isActive = { isCurrentPage(page) },
             ).also { page.view = it }
+        } catch (error: Throwable) {
+            HookRuntime.logError("ReaMicro structure view creation failed", error)
+            page.panel?.release()
+            page.panel = null
+            val message = if (error is ModuleResourcesUnavailableException) {
+                ModuleResourceRecovery.RESTART_MESSAGE
+            } else {
+                "图书结构暂时不可用，请返回后重新打开"
+            }
+            page.failure = message
+            renderStatus(route, message, composer)
+            return
         }
+        val factory = native.function(native.type("function1")) { view }
         val update = native.callback(native.type("function1")) {}
         val onRelease = native.callback(native.type("function1")) { release(page) }
         androidView.render(factory, ui.fillSize(ui.modifier()), composer, update, onRelease)

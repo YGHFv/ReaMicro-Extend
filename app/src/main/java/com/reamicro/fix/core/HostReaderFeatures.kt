@@ -451,20 +451,6 @@ internal object HostReaderFeatures {
                 fling.declaringClass.declaredFields.count { it.type == animate.parameterTypes[1] } == 1)
             shape("swipeLayout", 3, any, false)
         }
-        optional("extraScrollRoot", "extraScrollState", "extraScrollColumn", "extraScrollLayout", "extraScrollList",
-            "extraScrollFling", "extraScrollResume") {
-            shape("extraScrollRoot", 9, void, true).at(7 to composer, 8 to int)
-            val listType = shape("extraScrollState", 4, static = true).also { it.params(int, composer, int, int) }.returnType
-            val column = shape("extraScrollColumn", 12, void, true).also {
-                it.at(1 to listType, 6 to boolean, 8 to function1, 9 to composer, 10 to int, 11 to int)
-            }
-            shape("extraScrollList", 16, void, true).at(1 to listType, 3 to boolean, 4 to column.parameterTypes[5],
-                11 to function1, 12 to composer)
-            shape("extraScrollLayout", 2, any, false)
-            val continuation = shape("extraScrollFling", 3, any, false).also { it.at(1 to float) }.parameterTypes[2]
-            check(continuation.isInterface)
-            shape("extraScrollResume", 1, void, false).also { it.params(any); check(it.declaringClass == continuation) }
-        }
         optional("extraCurlDuration", "extraCurlDispatch", "extraCurlTouch", "extraCurlCleanup", "extraCurlFirst",
             "extraCurlFinish", "extraCurlMaintenance", "extraCurlDetach") {
             val child = shape("extraCurlDuration", 1, void, false).also { it.params(int) }.declaringClass

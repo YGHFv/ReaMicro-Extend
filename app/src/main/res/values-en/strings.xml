@@ -114,7 +114,12 @@
     <string name="pawn_selection_summary">Locked: %1$d/%2$d</string>
     <string name="status_not_enabled">Not enabled</string>
     <string name="status_pending_schedule">Not scheduled yet</string>
-    <string name="task_wish_trigger">Automatically wish after daily lore is completed</string>
+    <string name="task_wish_trigger">Wish after claiming daily lore rewards</string>
+    <string name="task_wish_custom_time">Custom time</string>
+    <string name="task_wish_custom_time_hint">Run daily at Beijing time</string>
+    <string name="task_wish_waiting_lore">Waiting for lore rewards</string>
+    <string name="task_wish_daily_time">Wish daily at %1$s</string>
+    <string name="task_wish_schedule_hint">Retries resume the remaining count. 0 uses all available wish tokens on each trigger.</string>
     <string name="task_next_check">Next check: %1$s</string>
     <string name="task_merchant_next">%1$s\nMerchant trip expected to finish: %2$s</string>
     <string name="task_next_run">Next run: %1$s</string>
@@ -271,7 +276,6 @@
     <string name="error_ksu_install">Failed to install the bundled Root module: %1$s</string>
     <string name="ksu_reboot_required">The companion module has been installed or updated and requires a device reboot to take effect. After rebooting, check again and enable Root enhancement. This app will not reboot the device automatically.</string>
     <string name="error_ksu_missing_bundle">Bundled Root module is missing or ambiguous; install a complete updated APK</string>
-    <string name="error_ksu_disabled">Root module disabled or removed; check module management</string>
     <string name="error_execution_mode_save">Could not save Root enhancement settings. This state change was stopped.</string>
     <string name="error_ksu_daemon">Task settings were saved to the Root module, but its background task service failed to start. Check the module logs, or reboot the device and check again.</string>
     <string name="error_ksu_unavailable">Cannot run the companion module. Check that it is installed and active, and that this app has Root permission.</string>
@@ -415,7 +419,6 @@
     <string name="accounts_saving">Saving…</string>
     <string name="accounts_imported">Imported %1$d accounts</string>
     <string name="accounts_import_failed">Could not import credentials</string>
-    <string name="accounts_file_too_large">Credential files must be no larger than 1 MiB</string>
     <string name="accounts_file_unavailable">Could not read the credential file</string>
     <string name="accounts_delete">Delete account</string>
     <string name="accounts_delete_action">Delete</string>

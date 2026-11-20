@@ -36,10 +36,10 @@ internal class HostBookDetailsAssociationBridge(
     private var screenScope = WeakReference<Any>(null)
     private var active: Context? = null
     private val writing = AtomicBoolean()
-    private val copier by lazy { HostBookAssociation(loader) }
+    private val copier by lazy { HostBookAssociation() }
     private val symbols get() = requireNotNull(HostBookBindings.current)
     private val ui get() = requireNotNull(HostUiBindings.current)
-    private val editAction by lazy { HostBookEditAction(loader) }
+    private val editAction by lazy { HostBookEditAction() }
     private var lastBarcode = ""
     private var associationDialog = WeakReference<HostAssociationDialog>(null)
     private val topBarContext = ThreadLocal<Context?>()
@@ -217,7 +217,7 @@ internal class HostBookDetailsAssociationBridge(
     private fun dialog(activity: Activity, context: Context) {
         val settings = settingsProvider()
         val actions = buildList {
-            if (settings.canUseAssociationCoverFix) add(HostAssociationDialog.Action("封面修复", "重新获取关联书籍的封面") {
+            if (settings.canUseAssociationCoverFix) add(HostAssociationDialog.Action("封面修复", "重新获取关联书籍的封面", HostEmbeddedIcons.ImageOutline) {
                 val vm = context.vm.get()
                 val book = context.verifiedBook
                 if (vm == null || book == null || !coverFix(vm, book)) {
@@ -226,8 +226,8 @@ internal class HostBookDetailsAssociationBridge(
                 }
             })
             if (settings.canRunAssociation && settings.associationUnlinkEnabled) {
-                add(HostAssociationDialog.Action("重新关联", "解除当前关联后，选择新的关联书籍") { unlink(context, true) })
-                add(HostAssociationDialog.Action("取消关联", "保留本地书籍，解除当前书库关联", destructive = true) { unlink(context, false) })
+                add(HostAssociationDialog.Action("重新关联", "解除当前关联后，选择新的关联书籍", HostEmbeddedIcons.Link) { unlink(context, true) })
+                add(HostAssociationDialog.Action("取消关联", "保留本地书籍，解除当前书库关联", HostEmbeddedIcons.LinkOff, destructive = true) { unlink(context, false) })
             }
         }
         associationDialog.get()?.dismiss()

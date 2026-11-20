@@ -14,8 +14,6 @@ updates:
     groups:
       kotlin:
         patterns: ["org.jetbrains.kotlin*"]
-      miuix:
-        patterns: ["top.yukonga.miuix.kmp:*"]
   - package-ecosystem: pip
     directory: /server/reamicro-api
     schedule:

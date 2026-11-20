@@ -57,6 +57,7 @@ source-files/*
 .main.backup.py
 !source-files/fanqie/
 /docs/verification/
+/docs/host-sheets.md
 *.dex
 *.class
 *.keystore
@@ -77,6 +78,7 @@ artifacts/
 /tools/reports/
 
 # 验证源码仅保留在本地，不纳入生产源码提交。
+/tests/
 /app/src/test/
 /app/src/androidTest/
 /module/tests/

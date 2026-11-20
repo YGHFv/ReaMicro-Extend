@@ -227,7 +227,7 @@ internal class WebDavPageColors(context: Context) {
     val illustrationLine = p.border
 }
 
-internal class WebDavBackButton(context: Context, private val iconColor: Int) : View(context) {
+internal class WebDavBackButton(context: Context, iconColor: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = iconColor
         style = Paint.Style.FILL

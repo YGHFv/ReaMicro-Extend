@@ -5,9 +5,11 @@ import java.util.concurrent.CancellationException
 /** 将一次查询的子任务和阻塞 IO 绑定到同一个取消信号。 */
 internal class TaskCancellation private constructor(
     private val parent: TaskCancellation?, private val checkActive: (() -> Boolean)? = null,
+    private val requestAllowed: (() -> Boolean)? = null,
 ) {
     constructor() : this(null)
     constructor(checkActive: () -> Boolean) : this(null, checkActive)
+    constructor(checkActive: () -> Boolean, requestAllowed: () -> Boolean) : this(null, checkActive, requestAllowed)
 
     private var cancelled = false
     private val actions = linkedSetOf<() -> Unit>()
@@ -19,6 +21,16 @@ internal class TaskCancellation private constructor(
         if (checkActive?.invoke() == false) cancel()
         if (isCancelled || Thread.currentThread().isInterrupted) {
             throw CancellationException("Task cancelled")
+        }
+    }
+
+    // Configuration changes stop the next request, after the preceding response is checkpointed.
+    private fun checkRequest() {
+        check()
+        parent?.checkRequest()
+        if (requestAllowed?.invoke() == false) {
+            cancel()
+            throw CancellationException("任务配置或凭据已变更，已确认的进度已保留")
         }
     }
 
@@ -67,6 +79,10 @@ internal class TaskCancellation private constructor(
         fun checkCurrent() {
             current()?.check()
             if (Thread.currentThread().isInterrupted) throw CancellationException("Task interrupted")
+        }
+        fun checkRequestCurrent() {
+            current()?.checkRequest()
+            checkCurrent()
         }
 
         fun rethrowIfCancelled(error: Throwable) {

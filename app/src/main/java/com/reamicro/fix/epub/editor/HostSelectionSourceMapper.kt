@@ -4,8 +4,8 @@ import com.reamicro.fix.core.HostEpubSourceBindings
 import com.reamicro.fix.core.HostHighlightTextBindings
 import com.reamicro.fix.core.HostHtmlParser
 import com.reamicro.fix.core.HostHtmlNormalization
-internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
-    private val parser = HostHtmlParser(loader)
+internal class HostSelectionSourceMapper {
+    private val parser = HostHtmlParser()
     internal val bindings get() = requireNotNull(HostEpubSourceBindings.current)
     private var sourcePositions: HostSelectionSourcePositions? = null
     private var reading: HostReadingContext? = null
@@ -96,8 +96,8 @@ internal class HostSelectionSourceMapper(private val loader: ClassLoader) {
         val positions = NormalizedSelectionPositions(source, normalized, HostHtmlNormalization::normalize)
         val document = parser.parse(source, baseUri)
         val body = bindings.body(document)
-        sourcePositions = HostSelectionSourcePositions(loader, normalized, body, positions)
-        reading?.let { return HostReadingProjection(this, loader, it).map(source, document, positions) }
+        sourcePositions = HostSelectionSourcePositions(normalized, body, positions)
+        reading?.let { return HostReadingProjection(this, it).map(source, document, positions) }
         val pathMethod = bindings.method("node.steps")
         val text = StringBuilder()
         val starts = SelectionInts()

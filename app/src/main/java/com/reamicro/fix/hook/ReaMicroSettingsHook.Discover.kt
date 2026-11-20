@@ -22,7 +22,6 @@ import com.reamicro.fix.discover.DiscoverState
 import com.reamicro.fix.hook.discover.DiscoverUiIcons
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.webdav.OnlineBinaryPayload
-import com.reamicro.fix.hook.webdav.dp
 import com.reamicro.fix.hook.webdav.normalizedAssociationPlatformName
 import com.reamicro.fix.online.OnlineSourceAuth
 import com.reamicro.fix.online.OnlineSourceEntry

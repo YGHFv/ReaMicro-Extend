@@ -38,7 +38,7 @@ import java.util.WeakHashMap
 internal class EpubBookPanel(
     private val activity: Activity,
     private val root: File,
-    private val bookTitle: String,
+    bookTitle: String,
     private var book: Any?,
     private val accountIdentity: AccountHostRuntime.Identity,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
@@ -690,21 +690,6 @@ internal class EpubBookPanel(
         return null
     }
 
-    private fun tagText(content: String, tag: String, attrName: String, attrValue: String): String =
-        Regex("<$tag\\b[^>]*\\b$attrName=[\"']${Regex.escape(attrValue)}[\"'][^>]*\\bcontent=[\"']([^\"']*)[\"'][^>]*>", RegexOption.IGNORE_CASE)
-            .find(content)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.let(::decodeXmlText)
-            .orEmpty()
-
-    private fun decodeXmlText(value: String): String =
-        value.replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&amp;", "&")
-
     private fun allFiles(): List<File> = storage.visibleFiles()
 
     private fun displayName(uri: Uri): String {
@@ -751,8 +736,6 @@ internal class EpubBookPanel(
         private const val GLOBAL_FONT_SYSTEM = "system"
         private const val GLOBAL_FONT_SERIF = "serif"
         private val activePanels = WeakHashMap<Activity, EpubBookPanel>()
-        private val REAMICRO_MD5_REGEX = Regex("^[0-9a-fA-F]{32}$")
-        private val TEXT_EXTENSIONS = setOf("html", "htm", "xhtml", "xml", "opf", "ncx", "css", "txt", "js", "json", "svg", "md")
         private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "svg")
         private val FONT_EXTENSIONS = setOf("ttf", "otf", "woff", "woff2")
 
@@ -773,20 +756,6 @@ internal class EpubBookPanel(
                 else -> "other"
             }
         }
-
-        private fun mimeType(file: File): String =
-            when (file.extension.lowercase(Locale.ROOT)) {
-                "png" -> "image/png"
-                "gif" -> "image/gif"
-                "webp" -> "image/webp"
-                "svg" -> "image/svg+xml"
-                "bmp" -> "image/bmp"
-                "ttf" -> "font/ttf"
-                "otf" -> "font/otf"
-                "woff" -> "font/woff"
-                "woff2" -> "font/woff2"
-                else -> "image/jpeg"
-            }
 
         private fun formatFileSize(bytes: Long): String {
             if (bytes < 1024L) return "$bytes B"

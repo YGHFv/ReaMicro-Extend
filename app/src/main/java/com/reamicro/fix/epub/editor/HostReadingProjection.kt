@@ -10,7 +10,7 @@ internal class HostReadingContext(
 )
 
 internal class HostReadingProjection(
-    private val host: HostSelectionSourceMapper, @Suppress("UNUSED_PARAMETER") loader: ClassLoader,
+    private val host: HostSelectionSourceMapper,
     private val context: HostReadingContext,
 ) {
     private val bindings get() = host.bindings
