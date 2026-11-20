@@ -11,13 +11,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -77,10 +78,10 @@ object GlassTopAppBarDefaults {
     /** Start/end inset of the glass controls, aligned with the page's cards and tabs. */
     val HorizontalPadding: Dp = 12.dp
 
-/** Scroll threshold for the retained shadow ramp. */
+    /** Scroll threshold for the retained shadow ramp. */
     val RampStart: Dp = 0.dp
 
-/** Scroll distance for the retained shadow ramp. Material transitions use their own timing. */
+    /** Scroll distance for the retained shadow ramp. Material transitions use their own timing. */
     val RampDistance: Dp = 32.dp
 
     /** Maximum blur radius applied to titles during collapse/expand transitions. */
@@ -112,22 +113,26 @@ object GlassTopAppBarDefaults {
         val rampPx = with(density) { RampDistance.toPx() }
         val currentOffset by rememberUpdatedState(visualContentOffset)
         return remember(scrollBehavior, startPx, rampPx) {
-            derivedStateOf {
+            computedStateOf {
                 val offset = currentOffset?.invoke() ?: scrollBehavior?.state?.visualContentOffset
                 if (offset == null) 1f else ((-offset - startPx) / rampPx).coerceIn(0f, 1f)
             }
         }
     }
 
-/** Fallback button fill when backdrop material is unavailable. */
+    /** Fallback button fill when backdrop material is unavailable. */
     @Composable
-    fun buttonFill(): Color = if (isDarkTheme()) Color(0xFF2C2C2C) else Color.White
+    fun buttonFill(): Color = when {
+        MiuixTheme.isDynamicColor -> MiuixTheme.colorScheme.surfaceContainerHigh
+        isDarkTheme() -> Color(0xFF2C2C2C)
+        else -> Color.White
+    }
 
-/** Default material for action-bar buttons. */
+    /** Default material for action-bar buttons. */
     @Composable
-    fun buttonMaterial(): GlassMaterial = GlassMaterials.puredThinGlass(isDarkTheme())
+    fun buttonMaterial(): GlassMaterial = dynamicGlassMaterial(GlassMaterials.puredThinGlass(isDarkTheme()))
 
-/** Material applied beneath child buttons and tabs. */
+    /** Material applied beneath child buttons and tabs. */
     @Composable
     internal fun actionBarUnderlayMaterial(): GlassMaterial = GlassMaterials.actionBarMask(isDarkTheme())
 
@@ -147,7 +152,7 @@ object GlassTopAppBarDefaults {
         Color.Black.copy(alpha = 0.10f)
     }
 
-/** Gradient that dims content passing beneath the bar.
+    /** Gradient that dims content passing beneath the bar.
      *
      * @param color Page background colour.
      */
@@ -222,6 +227,7 @@ internal data class GlassTopAppBarContext(
     val fill: Color,
     val stroke: EdgeStroke?,
     val shadow: GlassShadow?,
+    val onButtonBackdropConsumerChange: ((Int) -> Unit)? = null,
 )
 
 internal val LocalGlassTopAppBarContext = staticCompositionLocalOf<GlassTopAppBarContext?> { null }
@@ -284,15 +290,17 @@ fun GlassTopAppBar(
     defaultWindowInsetsPadding: Boolean = true,
     titleAlpha: () -> Float = { 1f },
     backgroundAlpha: () -> Float = { 1f },
+    centerObstructionStart: Dp = Dp.Unspecified,
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
     bottomContent: @Composable () -> Unit = {},
 ) {
     val currentOffset by rememberUpdatedState(visualContentOffset)
     val isContentScrolled by remember(scrollBehavior) {
-        derivedStateOf {
-            val offset = scrollBehavior?.state?.contentOffset ?: currentOffset?.invoke()
-            offset?.let { it < 0f } ?: true
+        computedStateOf {
+            scrollBehavior?.state?.let { it.contentOffset < -1f || it.overscrollOffset < -1f }
+                ?: currentOffset?.invoke()?.let { it < -1f }
+                ?: true
         }
     }
     GlassTopAppBar(
@@ -321,6 +329,7 @@ fun GlassTopAppBar(
         contentModifier = contentModifier,
         titleAlpha = titleAlpha,
         backgroundAlpha = backgroundAlpha,
+        centerObstructionStart = centerObstructionStart,
         navigationIcon = navigationIcon,
         actions = actions,
         bottomContent = bottomContent,
@@ -363,6 +372,7 @@ fun GlassTopAppBar(
     defaultWindowInsetsPadding: Boolean = true,
     titleAlpha: () -> Float = { 1f },
     backgroundAlpha: () -> Float = { 1f },
+    centerObstructionStart: Dp = Dp.Unspecified,
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
     bottomContent: @Composable () -> Unit = {},
@@ -373,22 +383,21 @@ fun GlassTopAppBar(
         transitionSpec = { GlassMotion.topBarMask() },
         label = "glassTopBarMask",
     ) { if (it) 1f else 0f }
-    val scrolledMaterialProgress = transition.animateFloat(
+    val materialProgress = transition.animateFloat(
         transitionSpec = { GlassMotion.topBarButtonFloat() },
         label = "glassTopBarMaterial",
     ) { if (it) 1f else 0f }
-    val materialProgress = remember(scrolledMaterialProgress, scrollBehavior, ramp) {
-        derivedStateOf {
-            val elasticProgress = if (scrollBehavior != null && scrollBehavior.state.overscrollOffset != 0f) ramp.value else 0f
-            maxOf(scrolledMaterialProgress.value, elasticProgress)
-        }
-    }
     val keepMaterial by remember(isContentScrolled, materialProgress) {
-        derivedStateOf { isContentScrolled || materialProgress.value > 0f }
+        computedStateOf { isContentScrolled || materialProgress.value > 0f }
     }
     val rawBackdrop = backdrop?.takeIf { isRuntimeShaderSupported() }
     val underlayMaterial = GlassTopAppBarDefaults.actionBarUnderlayMaterial().takeIf { keepMaterial && rawBackdrop != null }
     var backgroundCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var buttonBackdropConsumers by remember { mutableIntStateOf(0) }
+    val hasButtonBackdropConsumers = buttonBackdropConsumers > 0
+    val onButtonBackdropConsumerChange: (Int) -> Unit = remember {
+        { delta -> buttonBackdropConsumers = (buttonBackdropConsumers + delta).coerceAtLeast(0) }
+    }
     val progressiveBackdrop = if (progressiveBlur && rawBackdrop != null) {
         rememberLayerBackdrop {
             val coordinates = backgroundCoordinates?.takeIf { it.isAttached }
@@ -414,23 +423,31 @@ fun GlassTopAppBar(
                 listOf(BlendColorEntry(surfaceColor.copy(alpha = 0.3f)))
             }
             val blurColors = BlurDefaults.blurColors(blendColors = blendColors)
-            Box(
-                modifier = Modifier
+            val currentBgAlpha by rememberUpdatedState(backgroundAlpha)
+            val bandActive by remember(maskProgress) {
+                computedStateOf {
+                    maskProgress.value * currentBgAlpha().coerceIn(0f, 1f) > 0.001f
+                }
+            }
+            val backdropCaptureModifier = if (hasButtonBackdropConsumers && (keepMaterial || bandActive)) {
+                Modifier
                     .onGloballyPositioned { backgroundCoordinates = it }
                     .layerBackdrop(progressiveBackdrop)
+            } else {
+                Modifier
+            }
+            Box(
+                modifier = backdropCaptureModifier
                     .graphicsLayer {
-                        val offset = visualContentOffset?.invoke() ?: scrollBehavior?.state?.visualContentOffset
-                        val ramp = offset?.let {
-                            (-it / GlassTopAppBarDefaults.ProgressiveBlurRampDistance.toPx()).coerceIn(0f, 1f)
-                        } ?: maskProgress.value
-                        this.alpha = ramp * backgroundAlpha().coerceIn(0f, 1f)
+                        this.alpha = maskProgress.value * backgroundAlpha().coerceIn(0f, 1f)
                     }
                     .progressiveTextureBlur(
                         backdrop = rawBackdrop,
                         shape = RectangleShape,
-                        gradient = ProgressiveBlur.Top.copy(curve = 0.5f),
+                        gradient = ProgressiveBlur.Top.copy(curve = 0.25f),
                         blurRadius = GlassTopAppBarDefaults.ProgressiveBlurRadius.value,
                         colors = blurColors,
+                        enabled = bandActive,
                     ),
             )
         } else {
@@ -476,6 +493,7 @@ fun GlassTopAppBar(
                 fill = fill,
                 stroke = stroke,
                 shadow = buttonShadow,
+                onButtonBackdropConsumerChange = if (progressiveBackdrop != null) onButtonBackdropConsumerChange else null,
             ),
         ) {
             BlurTopAppBar(
@@ -491,6 +509,7 @@ fun GlassTopAppBar(
                 defaultWindowInsetsPadding = defaultWindowInsetsPadding,
                 navigationIconPadding = GlassTopAppBarDefaults.HorizontalPadding,
                 actionIconPadding = GlassTopAppBarDefaults.HorizontalPadding,
+                centerObstructionStart = centerObstructionStart,
                 navigationIcon = navigationIcon,
                 actions = actions,
                 bottomContent = {
@@ -521,7 +540,7 @@ private fun GlassTopAppBarLayout(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
-    val topInsets = WindowInsets.statusBars
+    val topInsets = WindowInsets.systemBars
     Layout(content = content, modifier = modifier) { measurables, constraints ->
         // Measure the foreground first: its bottom slot and the band share this measure pass.
         val foreground = measurables[1].measure(constraints.copy(minWidth = 0, minHeight = 0))
@@ -562,6 +581,7 @@ internal fun BlurTopAppBar(
     navigationIconPadding: Dp = TopAppBarDefaults.NavigationIconPadding,
     actionIconPadding: Dp = TopAppBarDefaults.ActionIconPadding,
     titleAlpha: () -> Float = { 1f },
+    centerObstructionStart: Dp = Dp.Unspecified,
     bottomContent: @Composable () -> Unit = {},
 ) {
     val actionsRow =
@@ -592,6 +612,7 @@ internal fun BlurTopAppBar(
         scrollBehavior = scrollBehavior,
         modifier = modifier,
         defaultWindowInsetsPadding = defaultWindowInsetsPadding,
+        centerObstructionStart = centerObstructionStart,
         bottomContent = bottomContent,
     )
 }

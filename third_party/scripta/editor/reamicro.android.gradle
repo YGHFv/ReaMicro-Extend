@@ -7,7 +7,11 @@ plugins {
 
 android {
     namespace 'top.yukonga.scripta.editor'
-    compileSdk 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
     defaultConfig { minSdk 26 }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -33,5 +37,5 @@ tasks.withType(KotlinCompile).configureEach {
 }
 dependencies {
 
-    api 'org.jetbrains.compose.foundation:foundation-android:1.12.2'
+    api "org.jetbrains.compose.foundation:foundation-android:${libs.versions.compose.get()}"
 }

@@ -1,8 +1,7 @@
-// Adapted from compose-miuix-ui/miuix GlassDropdownPreference at v0.9.5-beta01.
-// Copyright 2026, compose-miuix-ui contributors and ReaMicro Extend contributors
+// Copyright 2026, compose-miuix-ui contributors
 // SPDX-License-Identifier: Apache-2.0
 
-package top.yukonga.miuix.kmp.integration
+package top.yukonga.miuix.kmp.glass
 
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -21,8 +20,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -33,22 +32,35 @@ import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
 import top.yukonga.miuix.kmp.basic.DropdownArrowEndAction
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.Backdrop
-import top.yukonga.miuix.kmp.glass.GlassDropdownPopupContent
-import top.yukonga.miuix.kmp.glass.GlassPopupDefaults
-import top.yukonga.miuix.kmp.glass.GlassPopupItem
-import top.yukonga.miuix.kmp.glass.GlassPopupSizing
-import top.yukonga.miuix.kmp.glass.GlassPopupVisuals
-import top.yukonga.miuix.kmp.glass.glassPopupAnchorValue
-import top.yukonga.miuix.kmp.glass.rememberGlassPopupAnchor
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.MiuixPopupUtils.Companion.PopupLayout
 
 /**
- * Uses the current upstream preference and popup contract with deferred row-bound publication.
- * The popup material, press feedback, host, animation and selected value match the upstream row.
+ * A preference row with a Scaffold-hosted [GlassDropdownPopup].
+ *
+ * Selection is caller-controlled. The [backdrop] must exclude the popup host to avoid self-sampling.
+ *
+ * @param onSelectedIndexChange Called with the selected option's index.
+ * @param items Available options. An empty list disables the preference.
+ * @param selectedIndex Index of the currently selected option.
+ * @param title Preference title, using the standard [BasicComponent] typography.
+ * @param backdrop Page backdrop; `null` uses an opaque popup fill.
+ * @param modifier Modifier applied to the preference row.
+ * @param enabled Whether the row can open the popup.
+ * @param showValue Whether to display the selected option beside the arrow.
+ * @param renderInRootScaffold Whether the outermost Scaffold hosts the popup.
+ * @param titleColor Enabled and disabled title colors.
+ * @param summary Optional supporting text beneath the title.
+ * @param summaryColor Enabled and disabled summary colors.
+ * @param startAction Optional leading content.
+ * @param bottomAction Optional content below the row.
+ * @param insideMargin Row padding, shared with standard preferences.
+ * @param sizing Popup size limits and window margin.
+ * @param visuals Popup material, stroke, shadow and fallback color.
+ * @param onExpandedChange Called when the popup is opened or dismissed.
  */
 @Composable
-fun EfficientGlassDropdownPreference(
+fun GlassDropdownPreference(
     onSelectedIndexChange: (Int) -> Unit,
     items: List<String>,
     selectedIndex: Int,
@@ -71,16 +83,11 @@ fun EfficientGlassDropdownPreference(
     var expanded by remember { mutableStateOf(false) }
     val mounted = remember { mutableStateOf(false) }
     val anchor = rememberGlassPopupAnchor()
-    val rowAnchor = remember { GlassPreferenceAnchor() }
-    DisposableEffect(rowAnchor) {
-        onDispose { rowAnchor.clear() }
-    }
     val actualEnabled = enabled && items.isNotEmpty()
     val currentOnExpandedChange by rememberUpdatedState(onExpandedChange)
     val setExpanded: (Boolean) -> Unit = remember {
         { next ->
             if (expanded != next) {
-                if (next) rowAnchor.capture()
                 expanded = next
                 if (next) mounted.value = true
                 currentOnExpandedChange?.invoke(next)
@@ -98,7 +105,7 @@ fun EfficientGlassDropdownPreference(
     }
 
     BasicComponent(
-        modifier = modifier.onGloballyPositioned { rowAnchor.onPositioned(it, mounted.value) },
+        modifier = modifier,
         title = title,
         titleColor = titleColor,
         summary = summary,
@@ -106,7 +113,7 @@ fun EfficientGlassDropdownPreference(
         startAction = startAction,
         endActions = {
             Row(
-                modifier = Modifier.glassPopupAnchorValue(anchor),
+                modifier = Modifier.glassPopupAnchorValue(anchor, trackBounds = mounted.value),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val value = items.getOrNull(selectedIndex)
@@ -134,6 +141,9 @@ fun EfficientGlassDropdownPreference(
     )
 
     if (!mounted.value) return
+    DisposableEffect(anchor) {
+        onDispose { anchor.dropdownValueBounds = null }
+    }
 
     PopupLayout(
         visible = mounted,
@@ -143,11 +153,16 @@ fun EfficientGlassDropdownPreference(
         exitTransition = ExitTransition.None,
         renderInRootScaffold = renderInRootScaffold,
     ) {
+        // Wait for fresh anchor bounds before opening.
+        val bounds = anchor.dropdownValueBounds
+        val show = expanded && actualEnabled
+        if (show && bounds == null) return@PopupLayout
+        // Full-page dismiss area.
         Box(modifier = Modifier.fillMaxSize()) {
             GlassDropdownPopupContent(
-                show = expanded && actualEnabled,
+                show = show,
                 onDismissRequest = { setExpanded(false) },
-                anchorBounds = rowAnchor.bounds,
+                anchorBounds = bounds ?: Rect.Zero,
                 backdrop = backdrop,
                 anchor = anchor,
                 sizing = sizing,

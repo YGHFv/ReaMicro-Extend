@@ -127,7 +127,12 @@ val bundleModule by tasks.registering(Zip::class) {
 android {
     namespace = "com.reamicro.fix"
 
-    compileSdk = 37
+    // Miuix beta02 uses Compose 1.13, whose Android artifacts require API 37.1.
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
 
     androidResources {
         // Module OkHttp requests use NO_COOKIES and never query topPrivateDomain.
@@ -237,7 +242,7 @@ androidComponents.onVariants { variant ->
 
 dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
 
@@ -260,7 +265,7 @@ dependencies {
     // 从当前宿主 DEX 查询语义契约。
     implementation("org.luckypray:dexkit:2.3.0")
     // Resolve record properties from StringBuilder register flow, not field order.
-    implementation("com.android.tools.smali:smali-dexlib2:3.0.3")
+    implementation("com.android.tools.smali:smali-dexlib2:3.0.10")
     implementation("com.highcapable.kavaref:kavaref-core:1.1.1")
     implementation("com.highcapable.kavaref:kavaref-android:1.1.1")
 

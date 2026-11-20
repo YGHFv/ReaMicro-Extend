@@ -20,8 +20,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -62,16 +62,11 @@ fun EntryGlassDropdownPreference(
     var expanded by remember { mutableStateOf(false) }
     val mounted = remember { mutableStateOf(false) }
     val anchor = rememberGlassPopupAnchor()
-    val rowAnchor = remember { GlassPreferenceAnchor() }
-    DisposableEffect(rowAnchor) {
-        onDispose { rowAnchor.clear() }
-    }
     val actualEnabled = enabled && entry.enabled && entry.items.any { it.enabled }
     val currentExpandedChange by rememberUpdatedState(onExpandedChange)
     val setExpanded: (Boolean) -> Unit = remember {
         { next ->
             if (expanded != next) {
-                if (next) rowAnchor.capture()
                 expanded = next
                 if (next) mounted.value = true
                 currentExpandedChange?.invoke(next)
@@ -87,9 +82,9 @@ fun EntryGlassDropdownPreference(
     BasicComponent(
         title = title,
         summary = summary,
-        modifier = modifier.onGloballyPositioned { rowAnchor.onPositioned(it, mounted.value) },
+        modifier = modifier,
         endActions = {
-            Row(Modifier.glassPopupAnchorValue(anchor), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.glassPopupAnchorValue(anchor, trackBounds = mounted.value), verticalAlignment = Alignment.CenterVertically) {
                 entry.items.firstOrNull { it.selected }?.text?.takeIf { it.isNotEmpty() }?.let {
                     Text(
                         text = it,
@@ -112,6 +107,9 @@ fun EntryGlassDropdownPreference(
         enabled = actualEnabled,
     )
     if (!mounted.value) return
+    DisposableEffect(anchor) {
+        onDispose { anchor.dropdownValueBounds = null }
+    }
     PopupLayout(
         visible = mounted,
         enableWindowDim = false,
@@ -120,11 +118,14 @@ fun EntryGlassDropdownPreference(
         exitTransition = ExitTransition.None,
         renderInRootScaffold = renderInRootScaffold,
     ) {
+        val bounds = anchor.dropdownValueBounds
+        val show = expanded && actualEnabled
+        if (show && bounds == null) return@PopupLayout
         Box(Modifier.fillMaxSize()) {
             GlassDropdownPopupContent(
-                show = expanded && actualEnabled,
+                show = show,
                 onDismissRequest = { setExpanded(false) },
-                anchorBounds = rowAnchor.bounds,
+                anchorBounds = bounds ?: Rect.Zero,
                 backdrop = backdrop,
                 anchor = anchor,
                 sizing = sizing,

@@ -2,6 +2,19 @@
 
 ## 2026-11-20
 
+### Compose 本地任务适配 Miuix 0.9.5-beta02
+
+- 更新内置 Miuix Android 源码子集至 `0.9.5-beta02`，同步新版弹窗、顶栏、玻璃材质、模糊和按压反馈实现，保留现有组件与 Regular 图标裁剪。
+- Miuix 构建适配层与源码编辑器统一使用 Compose Multiplatform `1.13.0-rc01`，支持新版 `computedStateOf`、`CapturedAnimatedVisibility` 和窗口遮罩 API。
+- 按 Compose Android 构件要求统一使用 `compileSdk 37.1`，GitHub Actions 同步安装 Android SDK Platform 37.1；CI Actions、JDK、Build Tools 和 Detekt 版本保持不变。
+- 本地任务使用的尺寸适配导航栏同步新版安全区、隐藏动画及按压裁剪处理，保留原有图标、文字和间距设置。
+- 普通玻璃下拉项直接使用上游 `GlassDropdownPreference`；自定义选项下拉同步 beta02 的按需锚点跟踪、打开前等待新坐标及关闭后清理，删除被替代的旧下拉与锚点适配类。
+
+### 更新项目稳定版依赖
+
+- OkHttp 升级至 `5.5.1`，smali-dexlib2 升级至 `3.0.10`；Gradle Wrapper、启动脚本和校验值同步至 `9.9.2`。
+- 服务端 FastAPI 升级至 `0.165.0`、python-multipart 至 `0.0.34`，Python 基础镜像固定至 `3.15.2-slim`。
+
 ### 多账号任务、祈愿定时与宿主弹窗优化
 
 - 修复多账号任务配置保存与执行中的状态覆盖，旧弹窗和迟到结果不会写入删除后重新导入的账号；关闭任务或修改配置时保留已确认进度并停止后续旧请求，单账号凭据异常不阻断其他账号。Root 同步支持较大配置分段传输，保留历史与较新进度。

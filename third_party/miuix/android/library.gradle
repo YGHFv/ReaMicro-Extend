@@ -1,7 +1,7 @@
 // Copyright 2026, ReaMicro Extend contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Android dependency subset of beta01; derived icon subsets are identified in NOTICE.
+// Android dependency subset of beta02; derived icon subsets are identified in NOTICE.
 def upstreamModule = rootProject.file("third_party/miuix/upstream/${project.name}")
 def namespaces = [icons: 'icon', 'glass-icons': 'icon.glass']
 def moduleName = project.name.substring('miuix-'.length())
@@ -12,7 +12,11 @@ ext.miuixCommonSources = commonSources
 
 android {
     namespace "top.yukonga.miuix.kmp.${namespaces.get(moduleName, moduleName)}"
-    compileSdk 37
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
     defaultConfig { minSdk = moduleName in ['blur', 'glass'] ? 33 : 24 }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -45,9 +49,9 @@ tasks.configureEach {
 
 dependencies {
     if (moduleName in ['ui', 'preference']) {
-        api 'org.jetbrains.compose.foundation:foundation-android:1.12.2'
+        api "org.jetbrains.compose.foundation:foundation-android:${libs.versions.compose.get()}"
     } else {
-        implementation 'org.jetbrains.compose.foundation:foundation-android:1.12.2'
+        implementation "org.jetbrains.compose.foundation:foundation-android:${libs.versions.compose.get()}"
     }
 
     switch (moduleName) {

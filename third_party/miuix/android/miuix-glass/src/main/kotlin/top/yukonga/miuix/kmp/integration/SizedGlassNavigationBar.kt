@@ -1,6 +1,6 @@
 // Copyright 2026, compose-miuix-ui contributors and ReaMicro Extend contributors
 // SPDX-License-Identifier: Apache-2.0
-// Adapted from miuix-glass GlassNavigationBar.kt at v0.9.5-beta01; upstream source remains unchanged.
+// Adapted from miuix-glass GlassNavigationBar.kt at v0.9.5-beta02; upstream source remains unchanged.
 
 package top.yukonga.miuix.kmp.integration
 
@@ -21,12 +21,15 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.captionBar
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.runtime.Composable
@@ -41,10 +44,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -204,12 +207,6 @@ fun SizedGlassNavigationBar(
     val bottomPadding = if (defaultWindowInsetsPadding) {
         val navigationBarBottom = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom)
             .asPaddingValues().calculateBottomPadding()
-        val floatingMargin = when {
-            platform() == Platform.IOS -> 24.dp
-            navigationBarBottom <= 16.dp -> 28.dp
-            navigationBarBottom >= 28.dp -> navigationBarBottom
-            else -> 12.dp + navigationBarBottom
-        }
         val captionBarBottom = WindowInsets.captionBar.only(WindowInsetsSides.Bottom)
             .asPaddingValues().calculateBottomPadding()
         val animatedCaptionBarHeight by animateDpAsState(
@@ -217,28 +214,41 @@ fun SizedGlassNavigationBar(
             animationSpec = tween(durationMillis = 300),
             label = "glassNavigationCaptionBarHeight",
         )
-        floatingMargin + animatedCaptionBarHeight
+        val systemBottom = maxOf(navigationBarBottom, animatedCaptionBarHeight)
+        when {
+            platform() == Platform.IOS -> 24.dp
+            systemBottom <= 16.dp -> 20.dp
+            systemBottom >= 28.dp -> systemBottom
+            else -> 12.dp + systemBottom
+        }
     } else {
         0.dp
     }
     GlassNavigationBarLayout(
-        modifier = modifier
+        modifier = Modifier
+            .then(
+                if (defaultWindowInsetsPadding) {
+                    Modifier.windowInsetsPadding(
+                        WindowInsets.displayCutout.union(WindowInsets.navigationBars)
+                            .only(WindowInsetsSides.Horizontal),
+                    )
+                } else {
+                    Modifier
+                },
+            )
+            .then(modifier)
             .fillMaxWidth()
             .padding(bottom = bottomPadding)
             .graphicsLayer {
                 val show = showScale.value
+                val visibility = ((show - GlassMotion.NAV_HIDE_SCALE) / (1f - GlassMotion.NAV_HIDE_SCALE))
+                    .coerceIn(0f, 1f)
                 scaleX = show
                 scaleY = show
-                this.alpha = ((show - GlassMotion.NAV_HIDE_SCALE) / (1f - GlassMotion.NAV_HIDE_SCALE))
-                    .coerceIn(0f, 1f)
-            }
-            .blur(
-                radius = (
-                    (1f - ((showScale.value - GlassMotion.NAV_HIDE_SCALE) / (1f - GlassMotion.NAV_HIDE_SCALE)))
-                        .coerceIn(0f, 1f) * GlassMotion.NAV_HIDE_BLUR_DP
-                    ).dp,
-                edgeTreatment = BlurredEdgeTreatment.Unbounded,
-            ),
+                this.alpha = visibility
+                val blurPx = ((1f - visibility) * GlassMotion.NAV_HIDE_BLUR_DP).dp.toPx()
+                renderEffect = if (blurPx > 0.5f) BlurEffect(blurPx, blurPx, TileMode.Decal) else null
+            },
         trailingAction = trailingAction?.let { action ->
             {
                 Box(
@@ -413,6 +423,8 @@ fun SizedGlassNavigationBar(
                         Box(
                             modifier = Modifier
                                 .weight(1f)
+                                .heightIn(min = height)
+                                .graphicsLayer { this.alpha = pressAlpha.value }
                                 .padding(
                                     horizontal = GlassNavigationBarDefaults.IndicatorOverhang,
                                     vertical = contentPaddingVertical,
@@ -446,8 +458,7 @@ fun SizedGlassNavigationBar(
                                     } else {
                                         Modifier.clearAndSetSemantics { }
                                     },
-                                )
-                                .graphicsLayer { this.alpha = pressAlpha.value },
+                                ),
                             contentAlignment = Alignment.Center,
                         ) {
                             androidx.compose.foundation.layout.Column(

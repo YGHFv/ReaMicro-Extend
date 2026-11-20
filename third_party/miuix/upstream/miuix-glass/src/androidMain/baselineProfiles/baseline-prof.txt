@@ -19,6 +19,7 @@ PLtop/yukonga/miuix/kmp/glass/PopupColumnScope;->**(**)**
 PLtop/yukonga/miuix/kmp/glass/PopupIntrinsicCache;->**(**)**
 PLtop/yukonga/miuix/kmp/glass/TransformTravel;->**(**)**
 SPLtop/yukonga/miuix/kmp/glass/GlassAnchorSurface;->**(**)**
+SPLtop/yukonga/miuix/kmp/glass/GlassDropdownPreferenceKt**->**(**)**
 SPLtop/yukonga/miuix/kmp/glass/GlassKt**->**(**)**
 SPLtop/yukonga/miuix/kmp/glass/GlassMotion;->**(**)**
 SPLtop/yukonga/miuix/kmp/glass/GlassNavigationBarDefaults;->**(**)**

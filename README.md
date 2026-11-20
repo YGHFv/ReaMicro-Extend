@@ -138,8 +138,11 @@
 
 需要：
 
-- JDK 17
-- Android SDK
+- JDK 25（与 CI 一致，Android 字节码目标为 Java 17）
+- Android SDK Platform 37.1 / Build Tools 37.0.0
+- Gradle 9.9.2（使用仓库内的 Wrapper）
+
+GitHub Actions 显式安装 Android SDK Platform 37.1，与各模块的 `compileSdk` 一致。
 
 构建调试版：
 
@@ -180,11 +183,14 @@ sdk.dir=C:/Users/<name>/AppData/Local/Android/Sdk
 
 `app/` 为 Android 模块，`module/` 为配套 Root 模块，`server/` 为 API 服务端；`source-files/` 保存内置书源，`third_party/` 保存第三方编辑器。
 
-界面使用 Miuix `0.9.5-beta01`，固定到上游提交 `6d2554a850b8960e2616c968263ff64beb5ffb03`。
+界面使用 Miuix `0.9.5-beta02`，固定到上游提交 `66248bacc7be29ae6bdc0957de9458b42ac67732`。
+Android 构建适配层与源码编辑器统一使用 Compose Multiplatform `1.13.0-rc01`，版本集中声明在 `gradle/libs.versions.toml`。
+其 Android 构件要求 `compileSdk 37.1`，各模块已统一；`targetSdk` 仍为 37。
 `third_party/miuix/upstream/` 仅保留 Android 实际使用的 common/Android 依赖，未用组件与其他平台源码不纳入项目。
 图标裁剪为默认别名与 Regular 字重，保留的路径数据与上游一致；Android 性能配置也删除了未用类的规则。
 其余保留的上游源码未修改。
 `third_party/miuix/android/` 提供 Android 构建和项目专用的弹窗、导航栏尺寸适配。
+普通玻璃下拉直接使用 beta02 上游组件，自定义选项下拉同步其锚点生命周期；保留 193 个上游 Kotlin 文件和 6 个项目适配文件，按引用关系裁掉其余组件，性能规则只保留实际编译的类。
 版本声明见 `gradle/libs.versions.toml`，源码来源与许可证见 [Miuix NOTICE](third_party/miuix/NOTICE)。
 
 - 宿主通过代码中的语义查询定位。`HostReaderFeatures` 按功能查找阅读器方法，`HostSemanticQueries` 为既有逻辑接口查询描述符；`HostQuerySession` 共用桥接与有上限的当前宿主缓存。
