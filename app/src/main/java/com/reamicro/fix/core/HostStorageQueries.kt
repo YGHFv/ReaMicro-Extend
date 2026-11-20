@@ -176,7 +176,7 @@ internal object HostStorageQueries {
             val prepare = out.method("prepare", sql.invokes.filter { !Modifier.isStatic(it.modifiers) &&
                 it.paramTypeNames == listOf("java.lang.String") && it.returnTypeName != "void" && it.returnTypeName != "java.lang.String"
             }.one("SQLite prepare"))
-            val connection = out.type("connection", requireNotNull(prepare.declaredClass))
+            out.type("connection", requireNotNull(prepare.declaredClass))
             val statement = out.type("statement", requireNotNull(prepare.returnType))
             for ((role, parameters, returns) in listOf(
                 Triple("bindLong", listOf("long", "int"), "void"), Triple("bindText", listOf("int", "java.lang.String"), "void"),
@@ -277,7 +277,7 @@ internal object HostStorageQueries {
         }
         private fun presentation(out: Output) {
             val composer = out.type("composer", known("androidx.compose.runtime.Composer"))
-            val function0 = out.type("function0", known("kotlin.jvm.functions.Function0"))
+            out.type("function0", known("kotlin.jvm.functions.Function0"))
             val function1 = out.type("function1", known("kotlin.jvm.functions.Function1"))
             val function2 = out.type("function2", known("kotlin.jvm.functions.Function2"))
             val entity = out.type("entity", known("app.zhendong.reamicro.data.db.entity.Book"))

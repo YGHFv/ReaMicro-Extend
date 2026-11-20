@@ -1,7 +1,7 @@
 package com.reamicro.fix.core
 
 /** Record properties and constructor slots come from the current APK. */
-class HostBookAssociation(loader: ClassLoader) {
+class HostBookAssociation {
     private val copy = requireNotNull(HostBookBindings.current) { "Book record contract unavailable" }
 
 

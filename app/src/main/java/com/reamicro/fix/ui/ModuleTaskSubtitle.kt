@@ -27,7 +27,8 @@ internal fun moduleTaskSubtitle(
         SimpleDateFormat("MM-dd HH:mm:ss", context.resources.configuration.locales[0]).format(Date(at))
     val nextLine = when {
         !task.enabled -> text(R.string.status_not_enabled)
-        spec?.rewardTriggered == true -> text(R.string.task_wish_trigger)
+        task.taskType == "yeshe_draw_card" && !task.drawAtCustomTime && effectiveNextRunAt <= 0L ->
+            text(R.string.task_wish_waiting_lore)
         else -> {
             val next = if (effectiveNextRunAt > 0L) time(effectiveNextRunAt) else text(R.string.status_pending_schedule)
             if (spec?.merchant == true) {
@@ -44,6 +45,11 @@ internal fun moduleTaskSubtitle(
         }
     }
     return buildString {
+        if (task.taskType == "yeshe_draw_card") {
+            append(if (task.drawAtCustomTime) text(R.string.task_wish_daily_time, task.timeOfDay)
+                else text(R.string.task_wish_trigger))
+            append('\n')
+        }
         if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
             append(text(R.string.task_auto_read_config, task.durationMinutes, task.timeOfDay))
             append('\n')

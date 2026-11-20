@@ -98,10 +98,10 @@ internal object EmbeddedHostUi {
         }
     }
 
-    fun captureTypography(loader: ClassLoader, composer: Any?) {
+    fun captureTypography(composer: Any?) {
         if (composer == null) return
         runCatching {
-            val metrics = HostTypographyMetrics(loader, composer)
+            val metrics = HostTypographyMetrics(composer)
             if (metrics.typography === lastTypography && metrics.densityKey == lastDensity) return
             val styles = listOf(
                 "DisplayLarge", "DisplayMedium", "DisplaySmall", "HeadlineLarge", "HeadlineMedium", "HeadlineSmall",

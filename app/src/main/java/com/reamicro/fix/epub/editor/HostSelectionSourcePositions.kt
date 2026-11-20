@@ -6,11 +6,11 @@ import java.util.IdentityHashMap
 
 /** 逐树、逐节点验证原生 DOM 后才赋予位置，绝不按同一段文本的出现次序猜测。 */
 internal class HostSelectionSourcePositions(
-    loader: ClassLoader, source: String, body: Any, private val positions: NormalizedSelectionPositions,
+    source: String, body: Any, private val positions: NormalizedSelectionPositions,
 ) {
     private val ranges = IdentityHashMap<Any, Pair<Int, Int>>()
     private val host = requireNotNull(HostEpubSourceBindings.current)
-    private val parser = HostHtmlParser(loader)
+    private val parser = HostHtmlParser()
     private val decoded = HashMap<String, String>()
 
     init {

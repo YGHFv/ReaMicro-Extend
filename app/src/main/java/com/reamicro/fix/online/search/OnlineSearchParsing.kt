@@ -4,9 +4,6 @@ import android.util.Base64
 import com.reamicro.fix.core.HostHomeSearchState
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineJsonPathCompat
-import com.reamicro.fix.online.search.formatOnlineWordCountValue
-import com.reamicro.fix.online.search.inferOnlineStatusFromLastChapterTitle
-import com.reamicro.fix.online.search.resolveOnlineUrlCompat
 import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Locale

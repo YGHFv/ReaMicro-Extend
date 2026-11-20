@@ -1447,13 +1447,6 @@ class AccountCompletionController(
         }
     }
 
-    private fun normalizeModuleBackupPath(path: String): String? {
-        val normalized = path.replace('\\', '/').trim('/')
-        if (normalized.isBlank()) return null
-        if (normalized.split('/').any { it.isBlank() || it == "." || it == ".." }) return null
-        return normalized
-    }
-
     private fun isAllowedModuleBackupFile(relativePath: String): Boolean {
         if (relativePath in MODULE_BACKUP_FILES) return true
         val root = relativePath.substringBefore('/')
@@ -1871,7 +1864,6 @@ class AccountCompletionController(
             else -> error("Unexpected account record type: ${target.javaClass.name}")
         }
     }
-    private fun Any.longValue(name: String): Long = (accountProperty(this, name) as? Number)?.toLong() ?: 0L
     private fun Any.stringValue(name: String): String = accountProperty(this, name)?.toString().orEmpty()
 
     private fun displayIdentity(email: String, thirdBinds: List<String>): String {

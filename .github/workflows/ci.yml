@@ -46,6 +46,14 @@ jobs:
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "模块版本：${VERSION_CODE} / ${VERSION_NAME}"
 
+      - name: Read release notes from commit message
+        run: |
+          if ! git log -1 --format=format:%B "$GITHUB_SHA" > "$RUNNER_TEMP/reamicro-release-notes.md" 2>/dev/null ||
+             ! grep -q '[^[:space:]]' "$RUNNER_TEMP/reamicro-release-notes.md"; then
+            printf 'CI 构建版本 %s（版本代码 %s），来自%s。包含匹配的 APK 和配套模块 ZIP。\n' \
+              "$VERSION_NAME" "$VERSION_CODE" "${GITHUB_SHA:0:7}" > "$RUNNER_TEMP/reamicro-release-notes.md"
+          fi
+
       - name: Set up JDK 25
         uses: actions/setup-java@v6
         with:
@@ -87,36 +95,28 @@ jobs:
           for script in module/reamicro-automation/*.sh; do
             sh -n "$script"
           done
-      - name: Detekt (report only)
+      - name: Detekt with Android type resolution (report only)
         run: |
           rm -rf app/build/reports/detekt
-          for attempt in 1 2 3; do
-            if ./gradlew --refresh-dependencies :app:detekt; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep 5
-          done
-          test -s app/build/reports/detekt/detekt.html
-          test -s app/build/reports/detekt/detekt.md
+          ./gradlew :app:detektDebug
+          test -s app/build/reports/detekt/debug.html
+          test -s app/build/reports/detekt/debug.md
       - name: Upload detekt HTML report
-        if: ${{ !cancelled() && hashFiles('app/build/reports/detekt/detekt.html') != '' }}
+        if: ${{ !cancelled() && hashFiles('app/build/reports/detekt/debug.html') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: detekt-html
           archive: false
-          path: app/build/reports/detekt/detekt.html
+          path: app/build/reports/detekt/debug.html
           if-no-files-found: error
           retention-days: 14
       - name: Upload detekt Markdown report
-        if: ${{ !cancelled() && hashFiles('app/build/reports/detekt/detekt.md') != '' }}
+        if: ${{ !cancelled() && hashFiles('app/build/reports/detekt/debug.md') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: detekt-markdown
           archive: false
-          path: app/build/reports/detekt/detekt.md
+          path: app/build/reports/detekt/debug.md
           if-no-files-found: error
           retention-days: 14
       - name: Build debug APK
@@ -229,15 +229,8 @@ jobs:
         run: |
           TAG="ci-${VERSION_NAME}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           TITLE="阅微补全计划 ${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER}"
-          NOTES_FILE="module-repo/release-${VERSION_NAME}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            tail -n +3 "$NOTES_FILE" > "$RUNNER_TEMP/reamicro-release-notes.md"
-            NOTES_ARGS=(--notes-file "$RUNNER_TEMP/reamicro-release-notes.md")
-          else
-            NOTES_ARGS=(--notes "CI build ${VERSION_NAME} (versionCode ${VERSION_CODE}) from ${GITHUB_SHA}. Includes the matching APK and companion module ZIP.")
-          fi
           gh release create "$TAG" artifacts/*-release*.apk artifacts/*-release*.apk.sha256 artifacts/ReaMicro-Automation-Root-*.zip \
-            --target "$GITHUB_SHA" --title "$TITLE" "${NOTES_ARGS[@]}" --prerelease
+            --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$RUNNER_TEMP/reamicro-release-notes.md" --prerelease
 
       - name: Publish to LSPosed module repo
         if: github.repository == 'YGHFv/ReaMicro-Extend' && github.ref == 'refs/heads/main'
@@ -262,14 +255,10 @@ jobs:
             echo "模块仓库已有 $TAG，跳过。"
             exit 0
           fi
-          NOTES_ARGS=(--generate-notes)
-          if [ -f "module-repo/release-${VERSION_NAME}.md" ]; then
-            NOTES_ARGS=(--notes-file "module-repo/release-${VERSION_NAME}.md")
-          fi
           gh release create "$TAG" "artifacts/ReaMicro-Extend-${VERSION_NAME}-release.apk" \
             --repo "$MODULE_REPO" \
             --title "$VERSION_NAME" \
-            "${NOTES_ARGS[@]}"
+            --notes-file "$RUNNER_TEMP/reamicro-release-notes.md"
           echo "已同步到模块仓库：$TAG"
       - name: Remove CI signing material
         if: always()

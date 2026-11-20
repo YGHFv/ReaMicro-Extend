@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Looper
 import android.os.Build
-import com.reamicro.fix.R
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineParagraphCommentCache

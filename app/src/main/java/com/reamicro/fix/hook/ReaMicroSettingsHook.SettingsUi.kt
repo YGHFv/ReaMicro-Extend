@@ -2,7 +2,6 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.ai.AiApiStore
 import com.reamicro.fix.core.AppTopBarArguments
-import com.reamicro.fix.core.HookInstallReport
 import com.reamicro.fix.ai.AiImagePresetTarget
 import com.reamicro.fix.settings.ModuleSettings
 import com.reamicro.fix.settings.OnlineEpubStyleKind

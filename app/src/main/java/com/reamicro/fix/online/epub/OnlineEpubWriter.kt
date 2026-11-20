@@ -1,19 +1,9 @@
 package com.reamicro.fix.online.epub
 
-import com.reamicro.fix.online.epub.OnlineChapterImageMarkup
 import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
-import com.reamicro.fix.online.epub.onlineEpubImageManifestItem
-import com.reamicro.fix.online.epub.OnlineEpubImageManifestItem
-import com.reamicro.fix.online.epub.stableOnlineImageFileStem
 import com.reamicro.fix.cloud.webdav.OnlineDownloadedChapter
-import com.reamicro.fix.online.epub.OnlineChapterHeadingMarkup
-import com.reamicro.fix.online.epub.OnlineBodyMarkup
-import com.reamicro.fix.online.epub.OnlineEpubFontEmbedder
-import com.reamicro.fix.online.epub.OnlineEpubFontFace
-import com.reamicro.fix.online.epub.OnlineEpubStyleCss
 import com.reamicro.fix.settings.OnlineEpubStyleKind
 import com.reamicro.fix.settings.OnlineEpubStyleSettings
-import com.reamicro.fix.online.epub.OnlineVolumeHeadingMarkup
 import java.io.File
 import java.net.URLEncoder
 import java.util.Locale

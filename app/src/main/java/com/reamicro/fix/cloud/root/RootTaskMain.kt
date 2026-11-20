@@ -28,11 +28,15 @@ object RootTaskMain {
                 "enable" -> repository.enable(readInput())
                 "configure" -> repository.configure(readInput())
                 "snapshot" -> Unit
+                "snapshot-part" -> {
+                    respond(RootTaskSnapshotTransport.part(File(RootTaskRepository.STATE_DIRECTORY), readInput()))
+                    return
+                }
                 "reschedule" -> {
                     check(repository.executionEnabled()) { "Root 后台任务未启用" }
                     val count = repository.withExecutionLock { rescheduleLocalTasks(repository, System.currentTimeMillis()) }
                         ?: error("任务正在执行，请稍后重排")
-                    respond(repository.snapshot().put("rescheduledCount", count))
+                    respondSnapshot(repository.snapshot().put("rescheduledCount", count))
                     return
                 }
                 "kick" -> {
@@ -59,7 +63,7 @@ object RootTaskMain {
             }
             if (Thread.currentThread().isInterrupted) {
                 respond(JSONObject().put("schema", RootTaskRepository.SCHEMA).put("cancelled", true))
-            } else respond(repository.snapshot())
+            } else respondSnapshot(repository.snapshot())
         } catch (error: Throwable) {
             val detail = error.message?.take(500).orEmpty()
             respond(JSONObject().put("schema", RootTaskRepository.SCHEMA)
@@ -189,4 +193,7 @@ object RootTaskMain {
     }
 
     private fun respond(value: JSONObject) { println("REAMICRO_KSU:$value") }
+    private fun respondSnapshot(value: JSONObject) {
+        respond(RootTaskSnapshotTransport.prepare(File(RootTaskRepository.STATE_DIRECTORY), value))
+    }
 }

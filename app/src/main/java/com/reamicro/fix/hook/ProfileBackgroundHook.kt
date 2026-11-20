@@ -23,7 +23,6 @@ import com.reamicro.fix.reload.ModuleResources
 import com.reamicro.fix.reload.TaskCancellation
 
 class ProfileBackgroundHook(
-    private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settings: XposedModuleSettings,
     private val settingsProvider: () -> ModuleSettingsSnapshot = settings::snapshot,
@@ -718,7 +717,6 @@ class ProfileBackgroundHook(
         destination: android.graphics.RectF,
         sampleScreenY: Float,
     ): Int? {
-        val dstW = destination.width().coerceAtLeast(1f)
         val dstH = destination.height().coerceAtLeast(1f)
         val sampleYFraction = ((sampleScreenY - destination.top) / dstH).coerceIn(0f, 1f)
         val centerY = (sampleYFraction * (bitmap.height - 1)).toInt().coerceIn(0, bitmap.height - 1)

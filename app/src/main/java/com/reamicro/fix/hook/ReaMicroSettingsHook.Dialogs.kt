@@ -710,7 +710,7 @@ internal fun ReaMicroSettingsHook.openImagePresetDialog(target: AiImagePresetTar
 }
 
 internal fun ReaMicroSettingsHook.updateModuleDialogTheme(composer: Any) {
-    EmbeddedHostUi.captureTypography(classLoader, composer)
+    EmbeddedHostUi.captureTypography(composer)
     runCatching {
         val scheme = colorScheme(composer)
         val pageBackground = composeColorToArgb(backgroundDim(composer))

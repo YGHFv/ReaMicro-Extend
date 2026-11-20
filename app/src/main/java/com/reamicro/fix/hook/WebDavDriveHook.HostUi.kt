@@ -11,7 +11,6 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Looper
 import android.os.Build
 import android.widget.Toast
-import com.reamicro.fix.R
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.webdav.*
@@ -27,7 +26,7 @@ private var onlineCompletionRefreshVectorCache: Any? = null
 
 internal fun WebDavDriveHook.onlineCompletionUpdateImageVector(): Any? =
     onlineCompletionRefreshVectorCache ?: runCatching {
-        HostWebDavVector(this).buildRefresh().also { onlineCompletionRefreshVectorCache = it }
+        HostWebDavVector().buildRefresh().also { onlineCompletionRefreshVectorCache = it }
     }.onFailure { HookRuntime.logError("$LOG_PREFIX refresh vector binding failed", it) }.getOrNull()
 
 internal fun WebDavDriveHook.colorScheme(composer: Any): Any = HostNativeUi(classLoader).theme(composer, "getColorScheme")

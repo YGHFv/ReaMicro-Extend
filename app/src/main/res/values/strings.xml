@@ -114,7 +114,12 @@
     <string name="pawn_selection_summary">已锁定 %1$d/%2$d 项</string>
     <string name="status_not_enabled">未启用</string>
     <string name="status_pending_schedule">待排程</string>
-    <string name="task_wish_trigger">每日轶闻完成后自动祈愿</string>
+    <string name="task_wish_trigger">每日轶闻领奖后祈愿</string>
+    <string name="task_wish_custom_time">自定义时间</string>
+    <string name="task_wish_custom_time_hint">按北京时间每天执行</string>
+    <string name="task_wish_waiting_lore">等待轶闻领奖</string>
+    <string name="task_wish_daily_time">每天 %1$s 祈愿</string>
+    <string name="task_wish_schedule_hint">失败后续跑剩余次数。0 表示每次触发时用完可用彩筹。</string>
     <string name="task_next_check">下次检查 %1$s</string>
     <string name="task_merchant_next">%1$s\n行商预计 %2$s 完成</string>
     <string name="task_next_run">下次 %1$s</string>
@@ -271,7 +276,6 @@
     <string name="error_ksu_install">内置 Root 模块安装失败：%1$s</string>
     <string name="ksu_reboot_required">配套模块已安装或更新，需重启设备后生效。重启后请重新检测，再开启 Root增强；本应用不会自动重启设备。</string>
     <string name="error_ksu_missing_bundle">APK 内置 Root 模块缺失或有多个版本，请使用完整的新 APK</string>
-    <string name="error_ksu_disabled">Root 模块已停用或卸载，请检查模块管理</string>
     <string name="error_execution_mode_save">无法保存 Root增强设置，已中止本次状态切换</string>
     <string name="error_ksu_daemon">任务配置已保存到 Root 模块，但后台任务服务未能启动。请查看模块日志，或重启设备后重新检测。</string>
     <string name="error_ksu_unavailable">无法运行配套模块，请检查模块是否已安装生效，并确认本应用获得 Root 权限</string>
@@ -412,7 +416,6 @@
     <string name="accounts_saving">正在保存…</string>
     <string name="accounts_imported">已导入 %1$d 个账号</string>
     <string name="accounts_import_failed">凭证导入失败</string>
-    <string name="accounts_file_too_large">凭证文件不能超过 1 MiB</string>
     <string name="accounts_file_unavailable">无法读取凭证文件</string>
     <string name="accounts_delete">删除账号</string>
     <string name="accounts_delete_action">删除</string>

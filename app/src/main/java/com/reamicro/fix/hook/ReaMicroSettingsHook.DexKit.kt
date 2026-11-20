@@ -8,7 +8,6 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.Toast
 import com.reamicro.fix.core.HostAutoScanner
-import com.reamicro.fix.core.HostRestart
 import com.reamicro.fix.core.HostSymbols
 import com.reamicro.fix.hook.settings.*
 import com.reamicro.fix.hook.ReaMicroSettingsHook.SettingsDialogColors

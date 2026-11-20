@@ -1,66 +1,32 @@
-# Detekt 2 配置：只做「体积与复杂度」基线度量，不做风格检查。
-#
-# 背景：本仓库是 Xposed 模块，大量代码是宿主反射互操作，天然会触发
-#       风格类规则（长方法、魔法数字、命名等），全开会淹没真正的信号。
-#       这里只保留能反映「文件是否过大、职责是否过多」的规则，
-#       并以 report-only 方式运行，用于重构前后的对比。
-#       app/build.gradle.kts 中 failOnSeverity=Never 只放行规则发现；
-#       配置错误和执行失败仍会阻断 CI，避免上传过期或缺失的报告。
-
+# Detekt 2：检查生产源码的无用引用，保留体积与复杂度报告。
+# 配合 Android 变体任务 detektDebug 的类型解析；仅启用下面列出的规则，
+# 避免 Compose 和宿主反射代码被命名、参数数量等风格规则淹没。
+# 规则发现仍只报告，配置错误和执行失败必须阻断 CI。
 config:
   validation: true
   warningsAsErrors: true
 
-# 以下类别整体关闭，只保留 complexity 下的体积度量规则。
-comments:
-  active: false
-coroutines:
-  active: false
-empty-blocks:
-  active: false
-exceptions:
-  active: false
-naming:
-  active: false
-performance:
-  active: false
-potential-bugs:
-  active: false
 style:
-  active: false
+  active: true
+  UnusedImport:
+    active: true
+  UnusedPrivateClass:
+    active: true
+  UnusedPrivateFunction:
+    active: true
+  UnusedPrivateProperty:
+    active: true
+  UnusedVariable:
+    active: true
 
 complexity:
   active: true
-  CognitiveComplexMethod:
-    active: false
-  ComplexCondition:
-    active: false
-  ComplexInterface:
-    active: false
-  CyclomaticComplexMethod:
-    active: false
-  LabeledExpression:
-    active: false
   LargeClass:
     active: true
     allowedLines: 1500
   LongMethod:
     active: true
     allowedLines: 120
-  LongParameterList:
-    active: false
-  MethodOverloading:
-    active: false
-  NamedArguments:
-    active: false
-  NestedBlockDepth:
-    active: false
-  NestedScopeFunctions:
-    active: false
-  ReplaceSafeCallChainWithRun:
-    active: false
-  StringLiteralDuplication:
-    active: false
   TooManyFunctions:
     active: true
     allowedFunctionsPerFile: 80

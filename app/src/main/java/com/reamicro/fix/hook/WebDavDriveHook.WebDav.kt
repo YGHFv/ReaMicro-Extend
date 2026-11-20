@@ -23,7 +23,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import com.reamicro.fix.R
 import com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException
 import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
 import com.reamicro.fix.cloud.webdav.WebDavBackupSnapshot
@@ -1769,7 +1768,7 @@ internal inline fun <T> WebDavDriveHook.withWebDavIcon(block: () -> T): T {
 
 internal fun WebDavDriveHook.getComposeWebDavVector(): Any? {
     composeWebDavVector?.let { return it }
-    return runCatching { HostWebDavVector(this).build().also { composeWebDavVector = it } }
+    return runCatching { HostWebDavVector().build().also { composeWebDavVector = it } }
         .onFailure { HookRuntime.logError("$LOG_PREFIX WebDAV vector binding failed", it) }.getOrNull()
 }
 

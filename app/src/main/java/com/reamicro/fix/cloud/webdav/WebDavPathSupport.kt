@@ -1,8 +1,6 @@
 package com.reamicro.fix.cloud.webdav
 
 import android.content.Context
-import com.reamicro.fix.cloud.webdav.CloudDownloadCancelledException
-import com.reamicro.fix.cloud.webdav.CancellableWebDavDownload
 import java.net.URI
 import java.net.URL
 import java.util.Locale

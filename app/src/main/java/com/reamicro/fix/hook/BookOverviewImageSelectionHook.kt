@@ -61,8 +61,7 @@ class BookOverviewImageSelectionHook(
                     val frame = BookImageContext(book, update, java.lang.ref.WeakReference(activity), identity, uuid)
                     (contextStack.get() ?: java.util.ArrayDeque<BookImageContext>().also(contextStack::set)).addLast(frame)
                     param.setObjectExtra(IMAGE_FRAME, frame)
-                    runCatching { EmbeddedHostUi.captureTypography(classLoader, param.args.getOrNull(3)) }
-                    BookImageDialogStyle.capture(classLoader, param.args.getOrNull(3))
+                    EmbeddedHostUi.captureTypography(param.args.getOrNull(3))
                 }
                 override fun after(param: Call) {
                     val frame = param.getObjectExtra(IMAGE_FRAME) as? BookImageContext ?: return
@@ -120,8 +119,15 @@ class BookOverviewImageSelectionHook(
             handles += HookRuntime.hookMethod(symbols.method("menu.text"), object : HookCallback() {
                 override fun after(param: Call) {
                     val frame = sheetRenderStack.get()?.peekLast() ?: return
-                    if (!frame.injected && param.throwable == null && param.args.getOrNull(16) === frame.composer &&
-                        param.args.firstOrNull() == "选取图片") frame.awaitingArrow = true
+                    if (frame.injected || param.throwable != null || param.args.getOrNull(16) !== frame.composer) return
+                    val label = param.args.firstOrNull()
+                    if (label == "选取图片") frame.awaitingArrow = true
+                    else if (label == "取消" && frame.cardHash != null) {
+                        // Keep the host menu intact if an unsupported layout has no matching boundary.
+                        frame.cardHash = null
+                        HookRuntime.logError("$LOG_PREFIX native image menu card boundary not found",
+                            IllegalStateException(frame.binding.target.id))
+                    }
                 }
             })
             handles += HookRuntime.hookMethod(symbols.method("menu.icon"), object : HookCallback() {
@@ -135,18 +141,34 @@ class BookOverviewImageSelectionHook(
                 }
             })
             handles += HookRuntime.hookMethod(symbols.method("menu.endNode"), object : HookCallback() {
+                override fun before(param: Call) {
+                    val frame = sheetRenderStack.get()?.peekLast() ?: return
+                    val inside = frame.cardHash ?: return
+                    if (frame.injected || param.thisObject !== frame.composer || param.args.firstOrNull() != true) return
+                    // Compose restores the compound key inside end(): only the picker card's own node
+                    // still carries the key its rows were emitted under.
+                    frame.cardEnding = runCatching { nativeSheetUi.groupHash(frame.composer) == inside }.getOrDefault(false)
+                }
                 override fun after(param: Call) {
                     val frame = sheetRenderStack.get()?.peekLast() ?: return
-                    if (frame.injected || !frame.awaitingRowEnd || param.throwable != null ||
+                    if (frame.injected || param.throwable != null ||
                         param.thisObject !== frame.composer || param.args.firstOrNull() != true) return
-                    frame.awaitingRowEnd = false
-                    frame.injected = true
-                    runCatching {
-                        nativeSheetUi.renderAdditionalRows(frame.composer,
-                            BookImageSheetActions.additions(frame.binding.target == ImageTarget.Cover, frame.binding.hasSecondary)) { id ->
-                            performSheetAction(frame, id)
-                        }
-                    }.onFailure { HookRuntime.logError("$LOG_PREFIX native image menu additions failed", it) }
+                    if (frame.awaitingRowEnd) {
+                        frame.awaitingRowEnd = false
+                        // The picker row just ended: the composer is back inside the picker card.
+                        frame.cardHash = runCatching { nativeSheetUi.groupHash(frame.composer) }
+                            .onFailure { HookRuntime.logError("$LOG_PREFIX native image menu key unavailable", it) }
+                            .getOrNull()
+                    } else if (frame.cardEnding) {
+                        frame.cardEnding = false
+                        frame.cardHash = null
+                        frame.injected = true
+                        // The picker card is closed: add the module card before the native cancel card.
+                        val actions = BookImageSheetActions.additions(frame.binding.target == ImageTarget.Cover,
+                            frame.binding.hasSecondary)
+                        runCatching { nativeSheetUi.renderActionCard(frame.composer, actions) { id -> performSheetAction(frame, id) } }
+                            .onFailure { HookRuntime.logError("$LOG_PREFIX native image menu card failed", it) }
+                    }
                 }
             })
             HookRuntime.deoptimize(symbols.method("overview"))
@@ -171,6 +193,9 @@ class BookOverviewImageSelectionHook(
     ) {
         var awaitingArrow = false
         var awaitingRowEnd = false
+        /** Compound key inside the native picker card while its closing node is awaited. */
+        var cardHash: Long? = null
+        var cardEnding = false
         var injected = false
     }
 
