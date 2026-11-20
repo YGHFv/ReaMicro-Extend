@@ -51,7 +51,7 @@ internal object HostNativeUiQueries {
         }.one("dimension scale double"))
         val modifierObject = rd("modifier").declaredClass!!
         out["field:modifier"] = modifierObject.fields.single { Modifier.isStatic(it.modifiers) && it.typeName == modifierObject.name }.descriptor
-        val text = save("text", title.invokes.filter {
+        save("text", title.invokes.filter {
             it.paramCount == 20 && it.paramTypeNames.take(2) == listOf("java.lang.String", modifier) && it.paramTypeNames[16] == composer
         }.one("text"))
         val colorScheme = anchor("ColorScheme(primary=").className
@@ -232,7 +232,7 @@ internal object HostNativeUiQueries {
         val create = save("createNode", anchor("createNode() can only be called when inserting"))
         save("useNode", anchor("useNode() called while inserting"))
         val composerType = requireNotNull(bridge.getClassData(composer))
-        val startNode = save("startNode", button.invokes.filter { it.className == composer && it.paramCount == 0 && it.returnTypeName == "void" &&
+        save("startNode", button.invokes.filter { it.className == composer && it.paramCount == 0 && it.returnTypeName == "void" &&
             it.usingStrings.isEmpty() && it.invokes.size == 1 && it.invokes.single().paramTypeNames.take(2) == listOf("int", "int")
         }.one("start node"))
         out["field:inserting"] = create.usingFields.map { it.field }.filter { it.declaredClassName == composer && it.typeName == "boolean" }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Notifications use platform Notification.Builder; NotificationCompat.CallStyle is unused.
+         Value overlays remove the six library image files while preserving its resource symbols. -->
+    <item name="ic_call_answer" type="drawable">@android:color/transparent</item>
+    <item name="ic_call_answer_low" type="drawable">@android:color/transparent</item>
+    <item name="ic_call_answer_video" type="drawable">@android:color/transparent</item>
+    <item name="ic_call_answer_video_low" type="drawable">@android:color/transparent</item>
+    <item name="ic_call_decline" type="drawable">@android:color/transparent</item>
+    <item name="ic_call_decline_low" type="drawable">@android:color/transparent</item>
+</resources>

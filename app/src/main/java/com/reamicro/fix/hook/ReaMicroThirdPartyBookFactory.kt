@@ -6,9 +6,7 @@ import com.reamicro.fix.core.HostAssociationBindings
 import com.reamicro.fix.association.model.BookSearchResult
 import com.reamicro.fix.association.model.ManualAssociationCandidate
 
-class ReaMicroThirdPartyBookFactory(
-    private val classLoader: ClassLoader,
-) {
+class ReaMicroThirdPartyBookFactory {
     fun create(candidate: ManualAssociationCandidate, coverFallback: String = ""): Any {
         val cover = candidate.coverUrl.ifBlank { coverFallback }
         return createThirdPartyBook(

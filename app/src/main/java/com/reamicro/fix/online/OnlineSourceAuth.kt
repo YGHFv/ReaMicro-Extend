@@ -282,7 +282,7 @@ object OnlineSourceAuth {
     }
 
     fun loginWithSavedCredentials(context: Context?, source: OnlineSourceEntry): OnlineSourceAuthResult {
-        val prefs = prefs(context) ?: return OnlineSourceAuthResult(false, "缺少设置存储")
+        if (prefs(context) == null) return OnlineSourceAuthResult(false, "缺少设置存储")
         if (OnlineSourceTrxsCompat.isSource(source)) {
             return if (sourceVariable(context, source).isNotBlank()) {
                 OnlineSourceAuthResult(true, "已读取共享Token")

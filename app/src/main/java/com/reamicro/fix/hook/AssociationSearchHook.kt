@@ -24,12 +24,11 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicInteger
 
 class AssociationSearchHook(
-    private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot,
 ) {
     private val host get() = requireNotNull(HostAssociationBindings.current) { "Association contract unavailable" }
-    private val thirdPartyBookFactory = ReaMicroThirdPartyBookFactory(classLoader)
+    private val thirdPartyBookFactory = ReaMicroThirdPartyBookFactory()
     private val searchGeneration = AtomicInteger(0)
     private val searchResultsLock = Any()
     private var activeSearch: AutoCloseable? = null

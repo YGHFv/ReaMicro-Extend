@@ -27,12 +27,17 @@ import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 
 internal class RootTaskRepository(
     private val directory: File,
     private val moduleEnabled: () -> Boolean = { true },
 ) : LocalTaskRepository {
     private val stateFile = File(directory, "state.json")
+    private var cachedStamp: Triple<Any?, FileTime, Long>? = null
+    private var cachedRoot: JSONObject? = null
+    private var cachedText: String? = null
 
     override fun accountIds(): List<String> = access { accounts(it).keys().asSequence().toList() }
     override fun list(accountId: String): List<LocalTask> = access { root ->
@@ -42,10 +47,14 @@ internal class RootTaskRepository(
     fun accountLabel(accountId: String): String = access { root ->
         account(root, accountId)?.let { com.reamicro.fix.cloud.local.localTaskAccount(accountId, it).label } ?: accountId
     }
-    override fun token(accountId: String): String = access { account(it, accountId)?.optString("token").orEmpty() }
+    override fun token(accountId: String): String = access {
+        val account = account(it, accountId)
+        check(account?.optString("credentialError").isNullOrBlank()) { "登录凭据无法解密，请重新导入该账号凭证" }
+        account?.optString("token").orEmpty()
+    }
     override fun accountGeneration(accountId: String): String = access { account(it, accountId)?.optString("accountGeneration").orEmpty() }
     override fun runtimeState(accountId: String, taskType: String): JSONObject = access { root ->
-        task(root, accountId, taskType)?.let(::localTaskRuntimeState) ?: JSONObject()
+        task(root, accountId, taskType)?.let { JSONObject(localTaskRuntimeState(it).toString()) } ?: JSONObject()
     }
     override fun executionEnabled(): Boolean = moduleEnabled() && access { it.optBoolean("enabled") }
     override fun recordState(accountId: String, taskType: String, state: JSONObject) {
@@ -53,7 +62,7 @@ internal class RootTaskRepository(
             val account = account(root, accountId) ?: return@access
             if (!localTaskAccountStateCurrent(account, state)) return@access
             val current = task(root, accountId, taskType) ?: return@access
-            LocalTaskRuntimeMerge.patch(current, state)
+            LocalTaskRuntimeMerge.patch(current, JSONObject(state.toString()))
         }
     }
     override fun recordExecution(accountId: String, task: LocalTask, state: JSONObject, record: LocalTaskRecord, notify: Boolean) {
@@ -150,8 +159,9 @@ internal class RootTaskRepository(
                         val config = sourceTasks.optJSONObject(taskType) ?: return@forEach
                         targetTasks.put(taskType, LocalTaskStore.mergeMirroredTask(taskType, targetTasks.optJSONObject(taskType), config, System.currentTimeMillis()))
                     }
-                    val token = source.optString("token")
-                    if (token.isNotBlank()) target.put("token", token)
+                    // Empty credentials revoke a previously synchronized token for this account.
+                    if (source.has("token")) target.put("token", source.optString("token"))
+                    target.put("credentialError", source.optString("credentialError"))
                 }
             }
             for (queue in listOf("requests", "notifications")) {
@@ -217,12 +227,17 @@ internal class RootTaskRepository(
 
     // Older states omit notifications until the first delivery. An unreadable queue must keep the short retry.
     fun pendingNotifications(): JSONArray? = access { root ->
-        if (root.has("notifications")) root.optJSONArray("notifications") else JSONArray()
+        if (root.has("notifications")) root.optJSONArray("notifications")?.let { JSONArray(it.toString()) } else JSONArray()
     }
 
     fun snapshot(): JSONObject = access { root ->
         val result = JSONObject(root.toString())
-        accounts(result).keys().forEach { accountId -> account(result, accountId)?.remove("token") }
+        accounts(result).keys().forEach { accountId ->
+            account(result, accountId)?.apply {
+                remove("token")
+                put("recordsMerge", true)
+            }
+        }
         result.remove("kick")
         result.remove("requests")
         result.put("schema", SCHEMA).put("enabled", root.optBoolean("enabled"))
@@ -274,26 +289,49 @@ internal class RootTaskRepository(
         if (!hasState() && !initialize) return@synchronized block(JSONObject())
         RandomAccessFile(File(directory, "state.lock"), "rw").use { lockFile ->
             lockFile.channel.lock().use {
-                val original = if (stateFile.isFile) stateFile.readText(Charsets.UTF_8) else null
-                if (original == null && !initialize) return@synchronized block(JSONObject())
-                val root = if (original != null) JSONObject(original) else JSONObject().put("schema", SCHEMA)
-                accounts(root).keys().forEach { id -> account(root, id)?.let(::normalizeModuleMerchantConfig) }
-                val result = block(root)
-                if (write) {
-                    Files.deleteIfExists(File(directory, ".state.json.tmp").toPath())
-                    Files.deleteIfExists(File(directory, ".next-run-at.tmp").toPath())
-                    val updated = root.toString()
-                    if (updated != original) atomicWrite("state.json", updated)
-                    // The helper arms whole wall-clock seconds. Rounding down can launch
-                    // the runner before LocalTaskEngine considers the task due.
-                    val next = nextTaskAt(root).let { if (it <= 0L) 0L else 1L + (it - 1L) / 1000L }.toString()
-                    val schedule = File(directory, "next-run-at")
-                    if (!schedule.isFile || schedule.readText(Charsets.UTF_8) != next) atomicWrite("next-run-at", next)
+                val stamp = stateStamp()
+                if (stamp != cachedStamp) {
+                    cachedRoot = null
+                    cachedText = null
                 }
-                result
+                val original = cachedText ?: if (stateFile.isFile) stateFile.readText(Charsets.UTF_8) else null
+                if (original == null && !initialize) return@synchronized block(JSONObject())
+                val root = cachedRoot ?: (if (original != null) JSONObject(original) else JSONObject().put("schema", SCHEMA)).also {
+                    accounts(it).keys().forEach { id -> account(it, id)?.let(::normalizeModuleMerchantConfig) }
+                }
+                try {
+                    val result = block(root)
+                    var updated = original
+                    if (write) {
+                        Files.deleteIfExists(File(directory, ".state.json.tmp").toPath())
+                        Files.deleteIfExists(File(directory, ".next-run-at.tmp").toPath())
+                        updated = root.toString()
+                        if (updated != original) atomicWrite("state.json", updated)
+                        // The helper arms whole wall-clock seconds. Rounding down can launch
+                        // the runner before LocalTaskEngine considers the task due.
+                        val next = nextTaskAt(root).let { if (it <= 0L) 0L else 1L + (it - 1L) / 1000L }.toString()
+                        val schedule = File(directory, "next-run-at")
+                        if (!schedule.isFile || schedule.readText(Charsets.UTF_8) != next) atomicWrite("next-run-at", next)
+                    }
+                    cachedRoot = root
+                    cachedText = updated
+                    cachedStamp = stateStamp()
+                    result
+                } catch (error: Throwable) {
+                    cachedRoot = null
+                    cachedText = null
+                    cachedStamp = null
+                    throw error
+                }
             }
         }
     }
+
+    // Atomic replacement changes the inode, including same-size writes within one clock tick.
+    private fun stateStamp(): Triple<Any?, FileTime, Long>? = if (!stateFile.isFile) null else
+        Files.readAttributes(stateFile.toPath(), BasicFileAttributes::class.java).let {
+            Triple(it.fileKey(), it.lastModifiedTime(), it.size())
+        }
 
     private fun atomicWrite(name: String, text: String) {
         val temporary = File(directory, ".$name.tmp")

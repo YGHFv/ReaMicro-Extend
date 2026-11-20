@@ -9,7 +9,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Adds one native scroll viewport around the host's complete backup card column. */
 class BookBackupScrollHook(
-    private val loader: ClassLoader,
     private val settingsProvider: () -> ModuleSettingsSnapshot,
 ) {
     private val scope = BookBackupScrollScope()

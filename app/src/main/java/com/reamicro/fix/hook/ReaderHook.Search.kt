@@ -292,7 +292,7 @@ internal fun ReaderHook.showFullTextSearchPage(activity: Activity, context: Cata
     }
     val active = activeSearchNavigation?.currentIndex ?: -1
     val selectedRow = restored?.let { ReaderSearchPresentation.listIndex(it.results.map { r -> r.volumeTitle }, active) }
-    panel = HostFullTextSearchDialog(activity, currentEpubRoot(), restored?.keyword.orEmpty(),
+    panel = HostFullTextSearchDialog(activity, restored?.keyword.orEmpty(),
         selectedRow?.let { (it - 1).coerceAtLeast(0) } ?: position?.index ?: 0, if (selectedRow != null) 0 else position?.offset ?: 0,
         initialTheme = readerSearchTheme,
         fontSelection = { if (settingsProvider().canUseFontSettings) settings?.fontSettings()?.globalFamily.orEmpty() else "" },

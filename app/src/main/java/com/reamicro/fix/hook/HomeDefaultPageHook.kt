@@ -10,7 +10,6 @@ import java.util.WeakHashMap
 
 /** 仅修正首次索引解析的占位偏好，不改宿主的手动选页、阅读恢复和分组回退。 */
 internal class HomeDefaultPageHook(
-    private val loader: ClassLoader,
     private val settingsProvider: () -> ModuleSettingsSnapshot,
 ) {
     private val initialPreferences = WeakHashMap<Any, Boolean>()

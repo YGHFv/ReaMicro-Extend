@@ -199,10 +199,10 @@ tasks.matching { task -> task.name.contains("lint", ignoreCase = true) }.configu
 }
 
 detekt {
-    buildUponDefaultConfig.set(true)
+    buildUponDefaultConfig.set(false)
     allRules.set(false)
     config.setFrom(rootProject.files("config/detekt/detekt.yml"))
-    source.setFrom(files("src/main/java", "src/main/kotlin"))
+    source.setFrom(files("src/main/java"))
     basePath.set(rootProject.layout.projectDirectory)
     // Findings remain informational; configuration and execution errors must fail.
     ignoreFailures.set(false)
@@ -217,6 +217,21 @@ tasks.withType<dev.detekt.gradle.Detekt>().configureEach {
         markdown.required.set(true)
         checkstyle.required.set(false)
         sarif.required.set(false)
+    }
+}
+
+androidComponents.onVariants { variant ->
+    val variantName = variant.name.replaceFirstChar { it.uppercaseChar() }
+    tasks.withType<dev.detekt.gradle.Detekt>().configureEach {
+        if (name == "detekt$variantName" || (name == "detekt" && variant.name == "debug")) {
+            // AGP built-in Kotlin's classpath omits local Java sources and generated BuildConfig.
+            classpath.setFrom(
+                tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compile${variantName}Kotlin")
+                    .map { it.libraries },
+                tasks.named<JavaCompile>("compile${variantName}JavaWithJavac")
+                    .flatMap { it.destinationDirectory },
+            )
+        }
     }
 }
 

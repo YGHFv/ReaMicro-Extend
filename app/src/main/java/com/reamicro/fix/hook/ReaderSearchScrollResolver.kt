@@ -9,7 +9,7 @@ import com.reamicro.fix.hook.reader.*
 import com.reamicro.fix.reader.SearchHighlightMarkDraft
 import java.util.IdentityHashMap
 
-internal class ReaderSearchScrollResolver(@Suppress("UNUSED_PARAMETER") reader: ReaderHook) {
+internal class ReaderSearchScrollResolver {
     private val host get() = requireNotNull(HostEpubSourceBindings.current)
     private val dom get() = requireNotNull(HostHighlightDomBindings.current)
     private data class Span(val key: String, val from: Int, val until: Int)

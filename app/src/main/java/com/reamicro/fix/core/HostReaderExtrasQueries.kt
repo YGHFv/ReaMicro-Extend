@@ -197,7 +197,7 @@ internal object HostReaderExtrasQueries {
 
         private fun importMetadata(out: Output) {
             val repository = out.type("repository", known(REPOSITORY)); val dao = out.type("dao", known(DAO))
-            val book = out.type("book", known(BOOK)); val opf = out.type("opf", known(OPF)); val path = out.type("path", known("okio.Path"))
+            val book = out.type("book", known(BOOK)); out.type("opf", known(OPF)); out.type("path", known("okio.Path"))
             out.type("continuation", continuation)
             val records = linkedMapOf("book" to BOOK, "metadata" to METADATA, "identifier" to IDENTIFIER,
                 "title" to "org.epub.structure.metadata.Title", "creator" to "org.epub.structure.metadata.Creator",
@@ -224,10 +224,10 @@ internal object HostReaderExtrasQueries {
         private fun importOverwrite(out: Output) {
             val repository = out.type("repository", known(REPOSITORY)); val dao = out.type("dao", known(DAO))
             val book = out.type("book", known(BOOK)); val worker = out.type("worker", known("app.zhendong.reamicro.arch.WorkerManager"))
-            val opf = out.type("opf", known(OPF)); val metadata = out.type("metadata", known(METADATA))
-            val identifier = out.type("identifier", known(IDENTIFIER)); val title = out.type("title", known("org.epub.structure.metadata.Title"))
-            val meta = out.type("meta", known("org.epub.structure.metadata.Meta")); val path = out.type("path", known("okio.Path"))
-            val platform = out.type("platform", known("ReaMicroHost.PlatformFile")); val user = out.type("user", known("app.zhendong.reamicro.data.db.entity.User"))
+            val opf = out.type("opf", known(OPF)); out.type("metadata", known(METADATA))
+            out.type("identifier", known(IDENTIFIER)); out.type("title", known("org.epub.structure.metadata.Title"))
+            out.type("meta", known("org.epub.structure.metadata.Meta")); val path = out.type("path", known("okio.Path"))
+            val platform = out.type("platform", known("ReaMicroHost.PlatformFile")); out.type("user", known("app.zhendong.reamicro.data.db.entity.User"))
             val function = out.type("function1", known("kotlin.jvm.functions.Function1")); val pair = out.type("pair", known("kotlin.Pair"))
             out.type("continuation", continuation)
             for ((key, type) in listOf("repository" to repository, "worker" to worker)) {

@@ -14,24 +14,28 @@ object LocalTaskRunner {
     private var activeAccount: String? = null
     private var activeCancellation: TaskCancellation? = null
 
-    fun runTaskNow(context: Context, accountId: String, taskType: String): String {
+    fun runTaskNow(context: Context, accountId: String, taskType: String, expectedAccountGeneration: String? = null): String {
         if (!running.compareAndSet(false, true)) return "任务正在执行，请稍后重试"
         val appContext = context.applicationContext
         val cancellation = TaskCancellation.current()?.child() ?: TaskCancellation()
         return try {
-            synchronized(activeLock) {
-                if (LocalTaskStore { appContext }.get(accountId, taskType) == null) return "任务不存在"
+            val generation = synchronized(activeLock) {
+                val task = LocalTaskStore { appContext }.get(accountId, taskType) ?: return "任务不存在"
+                if (expectedAccountGeneration != null && task.accountGeneration != expectedAccountGeneration) return "账号已变更，请刷新后重试"
                 activeAccount = accountId
                 activeCancellation = cancellation
+                task.accountGeneration
             }
             cancellation.run {
                 if (com.reamicro.fix.cloud.root.RootTaskBridge.isEnabled(appContext)) {
-                    if (com.reamicro.fix.cloud.root.RootTaskBridge.synchronize(appContext, requested = LocalTaskKey(accountId, taskType))) {
+                    if (com.reamicro.fix.cloud.root.RootTaskBridge.synchronize(appContext, requested = LocalTaskKey(accountId, taskType),
+                            expectedAccountGeneration = generation)) {
                         "已提交 Root 后台任务，请稍后查看任务记录"
                     } else appContext.moduleString(R.string.root_sync_stopped)
                 } else {
                     retryNotifications(appContext)
-                    val result = engine(appContext).runDue(maxTasks = 1, requested = LocalTaskKey(accountId, taskType))
+                    val result = engine(appContext).runDue(maxTasks = 1, requested = LocalTaskKey(accountId, taskType),
+                        expectedAccountGeneration = generation)
                         .firstOrNull()?.message ?: "任务不存在"
                     retryNotifications(appContext)
                     result
@@ -139,7 +143,6 @@ internal fun nextLocalRunAt(taskType: String, timeOfDay: String, result: String,
     override > 0L -> if (override > now) override else now + 60_000L
     result == "failed" -> now + CloudTaskLocalRunner.TASK_RETRY_INTERVAL_MS
     result == "paused" -> now + 3_600_000L
-    taskType == "yeshe_draw_card" -> 0L
     taskType == "traveling_merchant" -> now + 4L * 3_600_000L
     else -> nextDailyRunAt(timeOfDay, now)
 }

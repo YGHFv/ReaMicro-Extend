@@ -9,14 +9,13 @@ import io.github.libxposed.api.XposedInterface
 import java.util.ArrayDeque
 
 /** Reuses the host's complete top-bar icon button, including its click indication. */
-internal class HostBookEditAction(private val loader: ClassLoader) {
+internal class HostBookEditAction {
     private val host get() = requireNotNull(HostBookUiBindings.metadata)
     private val ui get() = requireNotNull(HostUiBindings.current)
     private val vector by lazy { requireNotNull(host.call("edit")) }
 
     fun render(label: String, composer: Any, onClick: () -> Unit) {
-        EmbeddedHostUi.captureTypography(loader, composer)
-        BookImageDialogStyle.capture(loader, composer)
+        EmbeddedHostUi.captureTypography(composer)
         val book = host
         val native = ui
         check(book.type("button.function2") == native.type("function2") &&

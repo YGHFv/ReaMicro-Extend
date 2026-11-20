@@ -6,7 +6,7 @@ import java.io.InputStream
 import java.io.ByteArrayOutputStream
 
 internal data class LocalTaskAccount(val id: String, val nickname: String = "", val remark: String = "") {
-    val name: String get() = remark.ifBlank { nickname }.ifBlank { id }
+    val name: String get() = remark.trim().ifBlank { nickname.trim() }.ifBlank { id }
     val label: String get() = if (name == id) id else "$name · $id"
 }
 
@@ -36,7 +36,7 @@ internal object LocalTaskCredentials {
     fun parse(raw: String): List<LocalTaskAccountCredential> {
         require(raw.length <= MAX_BYTES && raw.toByteArray(Charsets.UTF_8).size <= MAX_BYTES) { "凭证文件不能超过 1 MiB" }
         val result = linkedMapOf<String, LocalTaskAccountCredential>()
-        fun read(value: String, depth: Int) {
+        fun read(value: String, depth: Int, bundledAccount: LocalTaskAccount? = null) {
             require(depth < 8) { "账号凭证嵌套过深" }
             val trimmed = value.trim()
             require(trimmed.isNotEmpty()) { "账号凭证为空" }
@@ -52,16 +52,19 @@ internal object LocalTaskCredentials {
                 require(accounts.length() in 1..MAX_ACCOUNTS) { "最多支持 50 个账号" }
                 for (index in 0 until accounts.length()) {
                     val item = accounts.getJSONObject(index)
-                    read(item.optString("credential").ifBlank { item.toString() }, depth + 1)
+                    read(item.optString("credential").ifBlank { item.toString() }, depth + 1,
+                        LocalTaskAccount(item.optString("accountId"), localTaskNickname(item)))
                 }
             } else {
                 val id = json.get("accountId").toString()
                 require(id.toLongOrNull()?.let { it > 0L && it.toString() == id } == true) { "账号 ID 无效" }
                 val token = json.getString("token").trim()
                 require(token.isNotEmpty() && token.length <= 16_384 && token.none(Char::isISOControl)) { "账号凭证无效" }
-                val nickname = json.optString("nickname").filterNot(Char::isISOControl).trim().take(80)
                 val previous = result[id]
                 require(previous == null || previous.token == token) { "同一账号包含不同凭证，请分别导入" }
+                val nickname = localTaskNickname(json).ifBlank {
+                    bundledAccount?.takeIf { it.id == id }?.nickname.orEmpty()
+                }.ifBlank { previous?.account?.nickname.orEmpty() }
                 result[id] = LocalTaskAccountCredential(LocalTaskAccount(id, nickname), token)
                 require(result.size <= MAX_ACCOUNTS) { "最多支持 50 个账号" }
             }
@@ -77,4 +80,20 @@ internal object LocalTaskCredentials {
 }
 
 internal fun localTaskAccount(accountId: String, root: JSONObject): LocalTaskAccount =
-    LocalTaskAccount(accountId, root.optString("nickname"), root.optString("remark"))
+    LocalTaskAccount(accountId, localTaskNickname(root), root.optString("remark"))
+
+internal fun normalizeLocalTaskNickname(value: Any?): String =
+    (value as? String).orEmpty().filterNot(Char::isISOControl).trim().take(80)
+
+/** Portable credentials carry the host profile in userData; older exports may omit the display copy. */
+internal fun localTaskNickname(json: JSONObject): String {
+    val nickname = normalizeLocalTaskNickname(json.opt("nickname"))
+        .ifBlank { normalizeLocalTaskNickname(json.opt("nickName")) }
+    if (nickname.isNotBlank()) return nickname
+    val profile = json.optJSONObject("userData")
+        ?: (json.opt("userData") as? String)?.let { runCatching { JSONObject(it) }.getOrNull() }
+        ?: return ""
+    if (json.has("accountId") && profile.has("id") && json.optString("accountId") != profile.optString("id")) return ""
+    return normalizeLocalTaskNickname(profile.opt("nickName"))
+        .ifBlank { normalizeLocalTaskNickname(profile.opt("nickname")) }
+}

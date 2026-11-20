@@ -61,7 +61,7 @@ internal fun ReaderHook.openAnchoredSelectionEditor() {
         require(quote.isNotBlank()) { "没有可编辑的选区文本" }
         val vm = currentViewModelRef?.get() ?: error("阅读会话已结束")
         val epub = currentEpubStrong ?: currentEpubRef?.get() ?: error("图书已关闭")
-        val mapper = HostSelectionSourceMapper(classLoader)
+        val mapper = HostSelectionSourceMapper()
         val startRaw = (selection.field("payload.startCfi").get(payload) as String)
         val endRaw = (selection.field("payload.endCfi").get(payload) as String)
         val startHost = mapper.hostCfi(startRaw)

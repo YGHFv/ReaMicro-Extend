@@ -4,8 +4,8 @@ import com.reamicro.fix.core.HostEpubSourceBindings
 import com.reamicro.fix.core.HostHtmlParser
 import com.reamicro.fix.hook.reader.*
 
-internal class HostSearchIndexBuilder(loader: ClassLoader) {
-    private val parser = HostHtmlParser(loader)
+internal class HostSearchIndexBuilder {
+    private val parser = HostHtmlParser()
     private val host get() = requireNotNull(HostEpubSourceBindings.current)
 
     fun index(raw: String, base: CfiBase): IndexedSearchText {

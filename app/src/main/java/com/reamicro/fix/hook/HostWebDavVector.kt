@@ -4,7 +4,7 @@ import com.reamicro.fix.core.HostGraphicsBindings
 import com.reamicro.fix.hook.webdav.*
 
 /** Module paths rendered with the host's queried vector parser and builder. */
-internal class HostWebDavVector(private val drive: WebDavDriveHook) {
+internal class HostWebDavVector {
     private fun build(name: String, layers: List<Pair<Long, String>>): Any =
         requireNotNull(HostGraphicsBindings.current).build(name, layers, 24f, 24f, false)
 

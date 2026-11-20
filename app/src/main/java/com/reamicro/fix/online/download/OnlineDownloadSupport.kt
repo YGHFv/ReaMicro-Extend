@@ -13,10 +13,6 @@ import com.reamicro.fix.online.search.decodeOnlineHtmlEntities
 import com.reamicro.fix.cloud.webdav.OnlineCompletionDownloadCancelledException
 import com.reamicro.fix.cloud.webdav.OnlineCompletionDownloadTask
 import com.reamicro.fix.cloud.webdav.OnlineDownloadedChapter
-import com.reamicro.fix.online.download.OnlineChapterContentValidator
-import com.reamicro.fix.online.download.OnlineChapterUpdatePlanner
-import com.reamicro.fix.online.download.RemoteOnlineChapter
-import com.reamicro.fix.online.download.StoredOnlineChapter
 import java.io.File
 import java.lang.reflect.Method
 import java.nio.file.Files

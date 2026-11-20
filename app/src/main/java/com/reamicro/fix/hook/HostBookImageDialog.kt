@@ -8,48 +8,38 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.view.Window
 import android.view.WindowManager
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
-import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.*
 import androidx.compose.ui.semantics.*
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.reamicro.fix.R
 import com.reamicro.fix.core.InjectedModuleContext
-import kotlinx.coroutines.CancellationException
 import com.reamicro.fix.reload.ModuleUiRuntime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.reamicro.fix.ui.ModuleTheme
-import com.reamicro.fix.ui.ModuleLinearProgressIndicator
-import androidx.compose.ui.unit.DpSize
-import top.yukonga.miuix.kmp.window.WindowBottomSheet
 
+/**
+ * 「在线图片」与「生成封面 / 横幅」底部弹窗。
+ * 按宿主书籍详情图片菜单的实测规格绘制：顶部 20dp 圆角容器、40×4 拖拽条、
+ * 0.8dp 描边的 8dp 圆角卡片，以及「图标 - 文字 - 箭头」动作行；只用 Compose foundation。
+ */
 internal class HostBookImageDialog(
     private val activity: Activity,
     private val title: String,
@@ -133,187 +123,144 @@ internal class HostBookImageDialog(
     }
 
     private data class Preview(val bytes: ByteArray, val bitmap: Bitmap, val key: Pair<String, String>)
-    private data class Action(val label: String, val enabled: Boolean, val run: () -> Unit)
+    private data class Action(val label: String, val icon: ImageVector, val enabled: Boolean, val run: () -> Unit)
 
-    @OptIn(ExperimentalLayoutApi::class)
     @Composable private fun ImageContent() {
         val palette = HostEmbeddedStyle.palette(activity, dark)
         val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
         val typography = remember(scale, LocalConfiguration.current) { BookImageDialogStyle.typography(activity, scale) }
-        ModuleTheme(colorScheme = palette.controlsScheme(), typography = typography) {
-            val scope = rememberCoroutineScope()
-            var input by rememberSaveable { mutableStateOf(initialPrompt) }
-            var size by rememberSaveable { mutableStateOf("2k") }
-            var preview by remember { mutableStateOf<Preview?>(null) }
-            var message by remember { mutableStateOf("") }
-            var failed by remember { mutableStateOf(false) }
-            fun currentKey() = input.trim() to if (generated) size.trim() else ""
-            val key = currentKey()
-            val previewKey = preview?.key
-            val usable = preview != null && previewKey == key
-            fun task(label: String, writes: Boolean = false, action: suspend () -> Unit) {
-                if (busy) return
-                if (runCatching(::requireDialogCurrent).isFailure) { dismiss(); return }
-                busy = true; committing = writes; failed = false; message = label
-                scope.launch {
-                    try { requireDialogCurrent(); action(); if (!closed) requireDialogCurrent() }
-                    catch (e: CancellationException) { throw e }
-                    catch (e: Exception) {
-                        if (runCatching(::requireDialogCurrent).isFailure) dismiss()
-                        else { failed = true; message = e.message?.take(160) ?: "操作失败，请重试" }
-                    }
-                    finally { busy = false; committing = false }
+        val look = remember(palette, scale, typography) { HostDialogLook(palette, scale, typography) }
+        val scope = rememberCoroutineScope()
+        val focus = LocalFocusManager.current
+        val keyboard = LocalSoftwareKeyboardController.current
+        var input by rememberSaveable { mutableStateOf(initialPrompt) }
+        var size by rememberSaveable { mutableStateOf(DEFAULT_SIZE) }
+        var preview by remember { mutableStateOf<Preview?>(null) }
+        var message by remember { mutableStateOf("") }
+        var failed by remember { mutableStateOf(false) }
+        var running by remember { mutableStateOf<String?>(null) }
+        fun currentKey() = input.trim() to if (generated) size.trim() else ""
+        val usable = preview != null && preview?.key == currentKey()
+        fun task(owner: String, label: String, writes: Boolean = false, action: suspend () -> Unit) {
+            if (busy) return
+            if (runCatching(::requireDialogCurrent).isFailure) { dismiss(); return }
+            busy = true; committing = writes; failed = false; message = label; running = owner
+            scope.launch {
+                try { requireDialogCurrent(); action(); if (!closed) requireDialogCurrent() }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) {
+                    if (runCatching(::requireDialogCurrent).isFailure) dismiss()
+                    else { failed = true; message = e.message?.take(160) ?: "操作失败，请重试" }
                 }
+                finally { busy = false; committing = false; running = null }
             }
-            val actions = buildList {
-                add(Action(if (generated) "生成" else "预览", !busy && input.isNotBlank()) {
-                    val request = currentKey()
-                    task(if (generated) "正在生成图片…" else "正在下载图片…") {
+        }
+        val fetchLabel = if (generated) "生成" else "预览"
+        val actions = buildList {
+            add(Action(fetchLabel, if (generated) HostEmbeddedIcons.AutoAwesome else HostEmbeddedIcons.ImageOutline,
+                !busy && input.isNotBlank()) {
+                val request = currentKey()
+                task(fetchLabel, if (generated) "正在生成图片…" else "正在下载图片…") {
+                    preview = null
+                    val loadedPreview = withContext(ModuleUiRuntime.io) {
+                        val bytes = fetch(request.first, request.second)
+                        requireDialogCurrent()
+                        Preview(bytes, decodePreview(bytes), request)
+                    }
+                    requireDialogCurrent()
+                    preview = loadedPreview
+                    message = "预览已就绪，点击应用才会写入"
+                }
+            })
+            if (saveImage != null) add(Action("保存", HostEmbeddedIcons.Download, !busy && usable) {
+                val data = preview?.takeIf { it.key == currentKey() }?.bytes ?: return@Action
+                task("保存", "正在保存到相册…", writes = true) {
+                    withContext(ModuleUiRuntime.io) { requireDialogCurrent(); saveImage.invoke(data) }
+                    requireDialogCurrent()
+                    message = "已保存到相册"
+                }
+            })
+            add(Action("应用", HostEmbeddedIcons.Check, !busy && usable) {
+                val data = preview?.takeIf { it.key == currentKey() }?.bytes ?: return@Action
+                task("应用", "正在应用图片…", writes = true) {
+                    val finish = withContext(ModuleUiRuntime.io) { requireDialogCurrent(); applyImage(data) }
+                    requireDialogCurrent()
+                    finish(); dismiss()
+                }
+            })
+        }
 
-                        preview = null
-                        val loadedPreview = withContext(ModuleUiRuntime.io) {
-                            val bytes = fetch(request.first, request.second)
-                            requireDialogCurrent()
-                            Preview(bytes, decodePreview(bytes), request)
-                        }
-                        requireDialogCurrent()
-                        preview = loadedPreview
-                        message = "预览已就绪，点击应用才会写入"
-                    }
-                })
-                if (saveImage != null) add(Action("保存", !busy && usable) {
-                    val data = preview?.takeIf { it.key == currentKey() }?.bytes ?: return@Action
-                    task("正在保存到相册…", writes = true) {
-                        withContext(ModuleUiRuntime.io) { requireDialogCurrent(); saveImage.invoke(data) }
-                        requireDialogCurrent()
-                        message = "已保存到相册"
-                    }
-                })
-                add(Action("应用", !busy && usable) {
-                    val data = preview?.takeIf { it.key == currentKey() }?.bytes ?: return@Action
-                    task("正在应用图片…", writes = true) {
-                        val finish = withContext(ModuleUiRuntime.io) { requireDialogCurrent(); applyImage(data) }
-                        requireDialogCurrent()
-                        finish(); dismiss()
-                    }
-                })
-            }
-            WindowBottomSheet(
-                show = true,
-                onDismissRequest = { if (!committing) dismiss() },
-                allowDismiss = !committing,
-                backgroundColor = palette.content,
-                cornerRadius = (BookImageDialogStyle.SHEET_CORNER * scale).dp,
-                insideMargin = DpSize.Zero,
-                outsideMargin = DpSize.Zero,
-                dragHandleColor = palette.surfaceHighest,
-            ) {
-                BoxWithConstraints(Modifier.fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))) {
-                    val density = LocalDensity.current
-                    val sheetFocus = LocalFocusManager.current
-                    val sheetKeyboard = LocalSoftwareKeyboardController.current
-                    val measurer = rememberTextMeasurer()
-                    val buttonSizes = actions.map { measurer.measure(AnnotatedString(it.label), typography.bodyLarge).size }
-                    val buttonWidth = with(density) { buttonSizes.maxOf { it.width }.toDp().value } + 36f * scale
-                    val buttonHeight = with(density) { buttonSizes.maxOf { it.height }.toDp().value } + 20f * scale
-                    val layout = BookImageDialogLayout.resolve(maxWidth.value, maxHeight.value, scale,
-                        density.fontScale, actions.size, buttonWidth, buttonHeight)
-                    val gap = (12f * scale).dp
-
-                    val outerScroll = rememberScrollState()
-                    val bodyScroll = rememberScrollState()
-                    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight)
-                        .then(if (layout.scrollAll) Modifier.verticalScroll(outerScroll) else Modifier)
-                        .padding(horizontal = layout.inset.dp).padding(bottom = (12f * scale).dp)) {
-                        Text(title, style = typography.titleSmall, modifier = Modifier.fillMaxWidth()
-                            .padding(bottom = gap).semantics { heading() })
-                        Column(Modifier.fillMaxWidth()
-                            .then(if (layout.scrollAll) Modifier else Modifier.weight(1f, fill = false).verticalScroll(bodyScroll)),
-                            verticalArrangement = Arrangement.spacedBy(gap)) {
-                            if (generated) Text("当前模型：$model\n参考图：当前封面（可用时上传）",
-                                style = typography.bodySmall, color = palette.caption)
-                            InputCard(if (generated) "提示词内容" else "图片链接", input, !busy, palette, scale,
-                                lines = if (generated) layout.promptLines else 3,
-                                hint = if (generated) "描述要生成的图片" else "https://…",
-                                uri = !generated) { input = it; message = ""; failed = false }
-                            if (generated) InputCard("图片尺寸", size, !busy, palette, scale, lines = 1, hint = "2k",
-                                singleLine = true) { size = it; message = ""; failed = false }
-                            preview?.let { result ->
-                                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((8f * scale).dp)) {
-                                    Text("图片预览", style = typography.labelMedium, color = palette.caption)
-                                    Image(result.bitmap.asImageBitmap(), "${title}预览",
-                                        Modifier.fillMaxWidth().height(layout.previewHeight.dp)
-                                            .clip(RoundedCornerShape((BookImageDialogStyle.CARD_CORNER * scale).dp))
-                                            .background(palette.page), contentScale = ContentScale.Fit)
+        val previewHeight = minOf(look.dp(224f), (LocalConfiguration.current.screenHeightDp * .32f).dp)
+        HostDialogSheet(look, title, onDismiss = { dismiss() }, dismissEnabled = !committing,
+            cancelLabel = if (busy) "关闭" else "取消", scrollToEndKey = preview, body = {
+                HostDialogCard(look) {
+                    HostDialogField(look, if (generated) "提示词" else "图片链接", input, !busy,
+                        hint = if (generated) "描述要生成的图片" else "https://…",
+                        minLines = if (generated) PROMPT_MIN_LINES else 1,
+                        maxLines = if (generated) PROMPT_MAX_LINES else URL_MAX_LINES,
+                        uri = !generated) { input = it; message = ""; failed = false }
+                    if (generated) {
+                        HostDialogDivider(look)
+                        HostDialogField(look, "图片尺寸", size, !busy, hint = DEFAULT_SIZE, minLines = 1, maxLines = 1,
+                            singleLine = true, trailing = {
+                                SIZE_PRESETS.forEach { preset ->
+                                    Chip(look, preset.uppercase(), size.trim().equals(preset, ignoreCase = true),
+                                        !busy) { size = preset; message = ""; failed = false }
                                 }
-                            }
-                            if (!usable && preview != null) Text("输入已改变，请重新${if (generated) "生成" else "预览"}",
-                                color = palette.caption, style = typography.bodySmall)
-                            if (busy && generated && !committing) Text("关闭窗口不会撤回已发送的生成请求",
-                                style = typography.bodySmall, color = palette.caption)
-                            if (busy) ModuleLinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.text, trackColor = palette.surfaceHighest)
-                            if (message.isNotEmpty()) Text(message, color = if (failed) palette.error else palette.caption,
-                                style = typography.bodySmall, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                            Spacer(Modifier.height((2f * scale).dp))
-                        }
-                        HorizontalDivider(Modifier.padding(vertical = gap), color = palette.surfaceHighest)
-                        FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = layout.buttonColumns,
-                            horizontalArrangement = Arrangement.spacedBy((8f * scale).dp),
-                            verticalArrangement = Arrangement.spacedBy((8f * scale).dp)) {
-                            actions.forEach { action ->
-                                com.reamicro.fix.ui.DialogActionButton(onClick = { sheetFocus.clearFocus(); sheetKeyboard?.hide(); action.run() }, enabled = action.enabled,
-                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                                ) {
-                                    Text(action.label, style = typography.labelLarge)
-                                }
-                            }
-                        }
-                        Spacer(Modifier.height(gap))
-
-                        com.reamicro.fix.ui.DialogActionButton(onClick = { dismiss() }, enabled = !committing,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                        ) {
-                            Text(if (busy) "关闭" else "取消", style = typography.labelLarge)
-                        }
+                            }) { size = it; message = ""; failed = false }
+                        HostDialogDivider(look)
+                        Fact(look, "当前模型", model)
+                        HostDialogDivider(look)
+                        Fact(look, "参考图", "当前封面（可用时上传）")
                     }
                 }
-            }
+                preview?.let { result ->
+                    HostDialogCard(look) {
+                        Image(result.bitmap.asImageBitmap(), "${title}预览",
+                            Modifier.fillMaxWidth().height(previewHeight), contentScale = ContentScale.Fit)
+                    }
+                }
+                val notes = buildList {
+                    if (!usable && preview != null) add("输入已改变，请重新$fetchLabel" to false)
+                    if (busy && generated && !committing) add("关闭窗口不会撤回已发送的生成请求" to false)
+                    if (message.isNotEmpty()) add(message to failed)
+                }
+                if (notes.isNotEmpty()) Column(Modifier.fillMaxWidth().padding(horizontal = look.dp(2f))
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+                    verticalArrangement = Arrangement.spacedBy(look.dp(4f))) {
+                    notes.forEach { (text, error) ->
+                        HostDialogLabel(text, typography.bodySmall, if (error) palette.error else palette.caption)
+                    }
+                }
+            }, actions = {
+                actions.forEachIndexed { index, action ->
+                    if (index > 0) HostDialogDivider(look, look.dp(54f))
+                    HostDialogAction(look, action.label, action.icon, palette.text, typography.labelLarge,
+                        action.enabled, running == action.label) {
+                        focus.clearFocus(); keyboard?.hide(); action.run()
+                    }
+                }
+            })
+    }
+
+    @Composable private fun Fact(look: HostDialogLook, label: String, value: String) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = look.dp(ROW_START), vertical = look.dp(14f)),
+            horizontalArrangement = Arrangement.spacedBy(look.dp(ROW_ICON_GAP)),
+            verticalAlignment = Alignment.CenterVertically) {
+            HostDialogLabel(label, look.type.bodyMedium, look.palette.caption)
+            HostDialogLabel(value, look.type.bodyMedium, look.palette.text, Modifier.weight(1f), maxLines = 2, align = TextAlign.End)
         }
     }
 
-    @Composable private fun InputCard(label: String, value: String, enabled: Boolean,
-        palette: HostEmbeddedStyle.Palette, scale: Float, lines: Int, hint: String,
-        uri: Boolean = false, singleLine: Boolean = false, changed: (String) -> Unit) {
-        val keyboard = LocalSoftwareKeyboardController.current
-        val focus = LocalFocusManager.current
-        val shape = RoundedCornerShape((BookImageDialogStyle.CARD_CORNER * scale).dp)
-        val card = Modifier.fillMaxWidth().clip(shape).background(palette.page)
-            .border((BookImageDialogStyle.BORDER * scale).dp, palette.borderVariant, shape)
-            .padding((12f * scale).dp)
-        val controlStyle = ModuleTheme.typography.bodyLarge
-        val editor: @Composable (Modifier) -> Unit = { modifier ->
-            BasicTextField(value, { next -> changed(if (uri) next.replace("\r", "").replace("\n", "") else next) },
-                modifier.heightIn(min = 48.dp).semantics { contentDescription = label },
-                enabled = enabled, singleLine = singleLine, minLines = 1,
-                maxLines = if (singleLine) 1 else lines,
-                keyboardOptions = KeyboardOptions(keyboardType = if (uri) KeyboardType.Uri else KeyboardType.Text,
-                    imeAction = if (uri || singleLine) ImeAction.Done else ImeAction.Default),
-                keyboardActions = KeyboardActions(onDone = { focus.clearFocus(); keyboard?.hide() }),
-                textStyle = controlStyle.copy(color = palette.text), cursorBrush = SolidColor(palette.text),
-                decorationBox = { field ->
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-                        if (value.isEmpty()) Text(hint, color = palette.caption, style = controlStyle,
-                            maxLines = if (singleLine) 1 else lines,
-                            softWrap = !singleLine, overflow = TextOverflow.Clip)
-                        field()
-                    }
-                })
-        }
-
-        Column(card, verticalArrangement = Arrangement.spacedBy((8f * scale).dp)) {
-            Text(label, style = controlStyle, color = palette.caption)
-            editor(Modifier.fillMaxWidth())
+    /** 宿主按钮规格（40dp 高、4dp 圆角、0.8dp 描边）的尺寸快捷项。 */
+    @Composable private fun Chip(look: HostDialogLook, label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+        Box(Modifier.height(look.dp(40f)).widthIn(min = look.dp(44f)).clip(look.button)
+            .border(look.border, if (selected) look.palette.text else look.palette.borderVariant, look.button)
+            .clickable(remember { MutableInteractionSource() }, look.press, enabled = enabled, role = Role.RadioButton,
+                onClick = onClick)
+            .semantics { this.selected = selected }
+            .padding(horizontal = look.dp(10f)), contentAlignment = Alignment.Center) {
+            HostDialogLabel(label, look.type.labelMedium, if (selected) look.palette.text else look.palette.caption, maxLines = 1)
         }
     }
 
@@ -325,5 +272,16 @@ internal class HostBookImageDialog(
         while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1600) sample *= 2
         return BitmapFactory.decodeByteArray(raw, 0, raw.size, BitmapFactory.Options().apply { inSampleSize = sample })
             ?: error("图片无法解码，请更换链接或重新生成")
+    }
+
+    private companion object {
+        const val DEFAULT_SIZE = "2k"
+        val SIZE_PRESETS = listOf("1k", "2k", "4k")
+        const val PROMPT_MIN_LINES = 3
+        const val PROMPT_MAX_LINES = 6
+        const val URL_MAX_LINES = 3
+        const val ROW_START = 18f
+        const val ROW_END = 12f
+        const val ROW_ICON_GAP = 16f
     }
 }

@@ -16,7 +16,6 @@ internal object HostReaderExtraMotion {
                 HookRuntime.logError("ReaMicro $label motion unavailable", it)
             }
         }
-        feature("scroll") { scroll(bridge) }
         feature("curl") { curl(bridge) }
         return result
     }
@@ -27,72 +26,6 @@ internal object HostReaderExtraMotion {
 
     private fun DexKitBridge.find(matcher: MethodMatcher): List<MethodData> =
         findMethod(FindMethod.create().matcher(matcher))
-
-    private fun scroll(bridge: DexKitBridge): Map<String, String> {
-        fun anchor(text: String) = bridge.find(MethodMatcher.create().usingEqStrings(text)).one(text).className
-        val state = anchor("ReaderPagerState(initialPage=")
-        val flows = anchor("ReaderPagerFlows(bookProgress=")
-        val actions = anchor("ReaderPagerActions(onJumpCompleted=")
-        val root = bridge.find(MethodMatcher.create().paramCount(9).returnType("void")).filter {
-            Modifier.isStatic(it.modifiers) && it.paramTypeNames.subList(3, 6) == listOf(state, flows, actions) &&
-                it.paramTypeNames.last() == "int"
-        }.one("scroll reader root")
-        val composer = root.paramTypeNames[7]
-        val factory = root.invokes.filter {
-            Modifier.isStatic(it.modifiers) && it.paramTypeNames == listOf("int", composer, "int", "int") &&
-                it.returnTypeName != "void"
-        }.one("reader list state factory")
-        val listType = factory.returnTypeName
-        val layout = root.invokes.filter { it.isConstructor && listType in it.paramTypeNames }
-            .distinctBy { it.descriptor }.flatMap { it.declaredClass?.methods.orEmpty() }
-            .filter { it.isMethod && it.paramCount == 2 && it.returnTypeName == "java.lang.Object" }
-            .flatMap { it.invokes }.filter {
-                val p = it.paramTypeNames
-                Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" && p.size == 12 &&
-                    p[1] == listType && p[6] == "boolean" && p[8] == "kotlin.jvm.functions.Function1" &&
-                    p[9] == composer && p.takeLast(2) == listOf("int", "int")
-            }.one("reader LazyColumn")
-        val layoutCaller = layout.callers.filter { caller ->
-            caller.paramCount == 2 && caller.returnTypeName == "java.lang.Object" &&
-                root.invokes.any { it.isConstructor && it.className == caller.className && listType in it.paramTypeNames }
-        }.one("reader scroll layout closure")
-        // The internal LazyList receives the remembered/default fling object on every composition.
-        val list = layout.invokes.filter {
-            val p = it.paramTypeNames
-            Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" && p.size == 16 &&
-                p[1] == listType && p[3] == "boolean" && p[4] == layout.paramTypeNames[5] &&
-                p[11] == "kotlin.jvm.functions.Function1" && p[12] == composer
-        }.one("reader LazyList")
-        val flings = layout.invokes.filter { it.isConstructor }.distinctBy { it.descriptor }
-            .flatMap { it.declaredClass?.methods.orEmpty() }.filter {
-                !Modifier.isStatic(it.modifiers) && it.paramCount == 3 && it.paramTypeNames[1] == "float" &&
-                    it.returnTypeName == "java.lang.Object"
-            }
-        val fling = flings.one("default list fling execution")
-        val continuation = bridge.getClassData(fling.paramTypeNames[2]) ?: error("Missing fling continuation")
-        val resume = continuation.methods.filter {
-            it.paramTypeNames == listOf("java.lang.Object") && it.returnTypeName == "void" &&
-                !Modifier.isStatic(it.modifiers)
-        }.one("fling continuation resume")
-        val result = linkedMapOf(
-            "extraScrollRoot" to root.descriptor,
-            "extraScrollState" to factory.descriptor,
-            "extraScrollColumn" to layout.descriptor,
-            "extraScrollLayout" to layoutCaller.descriptor,
-            "extraScrollList" to list.descriptor,
-            "extraScrollFling" to fling.descriptor,
-            "extraScrollResume" to resume.descriptor,
-        )
-        // R8 may narrow LazyColumn's parameter to the concrete class; callers still use the interface.
-        val contracts = bridge.find(MethodMatcher.create().paramCount(3).returnType("java.lang.Object")).filter {
-            it.paramTypeNames == fling.paramTypeNames && Modifier.isAbstract(it.modifiers)
-        }
-        (contracts.flatMap { it.callers } + fling.callers).distinctBy { it.descriptor }
-            .filter { it.isMethod }.forEachIndexed { index, method ->
-                result["extraScrollFlingCaller$index"] = method.descriptor
-            }
-        return result
-    }
 
     private fun curl(bridge: DexKitBridge): Map<String, String> {
         val duration = bridge.find(MethodMatcher.create().paramTypes("int").returnType("void"))

@@ -157,7 +157,6 @@ class ReaMicroHookEntry {
         installFeature("ReaderHook", readerHook::install)
         installFeature("ReaderAutoPageHook") {
             readerAutoPage = ReaderAutoPageHook(
-                classLoader = classLoader,
                 activityProvider = activityProvider,
                 settingsProvider = settingsProvider,
             ).also { it.install() }
@@ -208,7 +207,6 @@ class ReaMicroHookEntry {
         }
         installFeature("AssociationSearchHook") {
             AssociationSearchHook(
-                classLoader = classLoader,
                 activityProvider = activityProvider,
                 settingsProvider = settingsProvider,
             ).install()
@@ -222,7 +220,6 @@ class ReaMicroHookEntry {
             installedFeatureIds += "manual-edit"
         }
         val profileBackgroundHook = ProfileBackgroundHook(
-            classLoader = classLoader,
             activityProvider = activityProvider,
             settings = moduleSettings,
             settingsProvider = settingsProvider,
@@ -270,14 +267,14 @@ class ReaMicroHookEntry {
             WebDavSyncHook(classLoader, activityProvider, settingsProvider, webDavDriveHook).install()
         }
         installFeature("CoverFadeHook") {
-            coverFade = CoverFadeHook(classLoader, settingsProvider).also { it.install() }
+            coverFade = CoverFadeHook(settingsProvider).also { it.install() }
         }
         installFeature("BookBackupScrollHook") {
-            bookBackupScroll = BookBackupScrollHook(classLoader, settingsProvider).also { it.install() }
+            bookBackupScroll = BookBackupScrollHook(settingsProvider).also { it.install() }
         }
         installFeature("HomeDefaultPageHook") {
             HookRuntime.withFeatureGate({ moduleSettings.snapshot().homeDefaultPageEnabled }) {
-                HomeDefaultPageHook(classLoader, settingsProvider).install()
+                HomeDefaultPageHook(settingsProvider).install()
             }
         }
         installFeature("BookshelfCompletionHook") {

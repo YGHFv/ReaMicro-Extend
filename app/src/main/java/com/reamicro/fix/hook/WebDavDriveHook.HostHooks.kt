@@ -914,9 +914,6 @@ internal fun WebDavDriveHook.hookWebDavCloudTap() {
 private fun WebDavDriveHook.workerEnqueueDownloadMethods(): List<java.lang.reflect.Method> =
     listOf(com.reamicro.fix.core.HostWorkBindings.requireCurrent().method("download"))
 
-private fun WebDavDriveHook.invokeWorkerEnqueueDownload(workerManager: Any, book: Any): Any? =
-    com.reamicro.fix.core.HostWorkBindings.requireCurrent().method("download").invoke(workerManager, book, null)
-
 internal fun WebDavDriveHook.hookWebDavAccountScreenReuse() {
     val handles = arrayListOf<io.github.libxposed.api.XposedInterface.HookHandle>()
     try {

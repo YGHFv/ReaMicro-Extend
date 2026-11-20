@@ -51,8 +51,8 @@ internal class ManualAssociationUiHook(
     private lateinit var association: HostAssociationBindings.Contract
     private lateinit var ui: HostUiBindings.Symbols
     private val service = ManualAssociationService()
-    private val factory = ReaMicroThirdPartyBookFactory(loader)
-    private val editAction = HostBookEditAction(loader)
+    private val factory = ReaMicroThirdPartyBookFactory()
+    private val editAction = HostBookEditAction()
     private val coverPicker = ManualAssociationCoverLoader(loader)
     private val pages = ThreadLocal<ArrayDeque<Page>>()
     private val toolbars = ThreadLocal<ArrayDeque<Target>>()
@@ -411,7 +411,7 @@ internal class ManualAssociationUiHook(
             association.property("state", "relating", state) != true
     }
     private fun renderEdit(target: Target, composer: Any) {
-        BookImageDialogStyle.capture(loader, composer)
+        EmbeddedHostUi.captureTypography(composer)
         editAction.render("手动编辑", composer) { open(target) }
     }
     private fun open(target: Target) {

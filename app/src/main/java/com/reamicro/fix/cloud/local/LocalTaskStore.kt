@@ -34,6 +34,8 @@ data class LocalTask(
     val lastMessage: String = "",
     val lastRunAt: Long = 0L,
     val configUpdatedAt: Long = 0L,
+    val accountGeneration: String = "",
+    val drawAtCustomTime: Boolean = false,
 )
 
 data class LocalTaskBook(
@@ -105,6 +107,29 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         syncRootConfiguration()
     }
 
+    internal fun refreshAccountNickname(accountId: String, generation: String): Boolean {
+        val account = readAccount(accountId) ?: return false
+        if (account.optString("accountGeneration") != generation || localTaskNickname(account).isNotBlank()) return false
+        val ciphertext = account.optString(KEY_TOKEN)
+        val token = decrypt(ciphertext).takeIf { it.isNotBlank() } ?: return false
+        val nickname = CloudTaskLocalRunner.fetchAccountNickname(accountId, token)
+        return applyAccountNickname(accountId, generation, ciphertext, nickname)
+    }
+
+    internal fun applyAccountNickname(accountId: String, generation: String, ciphertext: String, nickname: String): Boolean {
+        val normalized = normalizeLocalTaskNickname(nickname)
+        if (normalized.isBlank()) return false
+        var updated = false
+        editAccount(accountId) { root, _ ->
+            if (root.optString("accountGeneration") != generation || root.optString(KEY_TOKEN) != ciphertext ||
+                localTaskNickname(root).isNotBlank()) return@editAccount
+            root.put("nickname", normalized)
+            updated = true
+        }
+        if (updated) syncRootConfiguration()
+        return updated
+    }
+
     internal fun deleteAccount(accountId: String) {
         require(accountId.isNotBlank()) { "账号不可用" }
         synchronized(WRITE_LOCK) {
@@ -125,7 +150,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         val root = readAccount(accountId) ?: return emptyList()
         val tasks = root.optJSONObject(KEY_TASKS) ?: return emptyList()
         return tasks.keys().asSequence().mapNotNull { type ->
-            tasks.optJSONObject(type)?.let { localTaskFromJson(type, it) }
+            tasks.optJSONObject(type)?.let { localTaskFromJson(type, it).copy(accountGeneration = root.optString("accountGeneration")) }
         }.toList()
     }
 
@@ -148,6 +173,9 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             requireExisting = true) { root, tasks ->
             val existing = tasks.optJSONObject(task.taskType)
             if (checkVersion) {
+                check(expected == null || expected.accountGeneration == root.optString("accountGeneration")) {
+                    "账号已变更，请重新打开配置"
+                }
                 check(if (expected == null) existing == null else existing != null &&
                     existing.optLong(KEY_CONFIG_UPDATED_AT) == expected.configUpdatedAt &&
                     existing.optBoolean(KEY_ENABLED) == expected.enabled) {
@@ -163,18 +191,24 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
                     if (existing.has(stateKey)) merged.put(stateKey, existing.get(stateKey))
                 }
             }
-            LocalTaskRuntimeMerge.schedule(merged, task.taskType, now)
+            LocalTaskRuntimeMerge.schedule(merged, task.taskType, now, existing)
             tasks.put(task.taskType, merged)
             if (token.isNotBlank()) root.put(KEY_TOKEN, encrypt(token))
         }
         syncRootConfiguration()
     }
 
-    fun setEnabled(accountId: String, taskType: String, enabled: Boolean, token: String = "") {
+    fun setEnabled(accountId: String, taskType: String, enabled: Boolean, token: String = "", expected: LocalTask? = null) {
         if (accountId.isBlank()) return
         editAccount(accountId, create = com.reamicro.fix.core.HostPackages.contains(contextProvider()?.packageName.orEmpty()),
             requireExisting = true) { root, tasks ->
             val obj = tasks.optJSONObject(taskType) ?: JSONObject().put(KEY_TASK_TYPE, taskType)
+            if (expected != null) {
+                check(expected.accountGeneration == root.optString("accountGeneration") &&
+                    expected.configUpdatedAt == obj.optLong(KEY_CONFIG_UPDATED_AT) &&
+                    expected.enabled == obj.optBoolean(KEY_ENABLED)) { "账号或任务配置已更新，请刷新后重试" }
+            }
+            if (enabled && token.isBlank()) requireStoredCredential(root)
             val now = System.currentTimeMillis()
             obj.put(KEY_CONFIG_UPDATED_AT, maxOf(now, obj.optLong(KEY_CONFIG_UPDATED_AT) + 1L))
             obj.put(KEY_ENABLED, enabled)
@@ -285,16 +319,9 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
     fun deleteRecords(accountId: String, selected: List<LocalTaskRecord>): Int {
         if (accountId.isBlank() || selected.isEmpty()) return 0
-        val deleted = synchronized(WRITE_LOCK) {
-            val preferences = prefs() ?: error("本地任务状态不可用")
-            val root = readAccount(accountId) ?: return@synchronized 0
-            val deleted = deleteSelectedLocalTaskRecords(root, selected)
-            if (deleted > 0) {
-                check(preferences.edit().putString(accountKey(accountId), root.toString()).commit()) {
-                    "本地任务记录删除失败"
-                }
-            }
-            deleted
+        var deleted = 0
+        editAccount(accountId) { root, _ ->
+            deleted = deleteSelectedLocalTaskRecords(root, selected)
         }
         if (deleted > 0) syncRootConfiguration()
         return deleted
@@ -371,10 +398,20 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             val root = readAccount(accountId) ?: error("账号 $accountId 配置无法读取，未同步 Root 配置")
             accounts.put(accountId, root.apply {
                 remove("notifications")
-                put(KEY_TOKEN, decrypt(optString(KEY_TOKEN)))
+                // History stays local; Root returns its newer records separately.
+                remove(KEY_RECORDS)
+                val credential = runCatching { decrypt(optString(KEY_TOKEN)) }
+                put(KEY_TOKEN, credential.getOrDefault(""))
+                put("credentialError", if (credential.isFailure) "登录凭据无法解密，请重新导入该账号凭证" else "")
             })
         }
         JSONObject().put(KEY_ACCOUNTS, accounts)
+    }
+
+    private fun requireStoredCredential(account: JSONObject) {
+        check(decrypt(account.optString(KEY_TOKEN)).isNotBlank()) {
+            "登录凭据不可用，请从账号管理重新导入该账号凭证"
+        }
     }
 
 
@@ -434,6 +471,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         } else task.timeOfDay)
         .put(KEY_DURATION_MINUTES, task.durationMinutes)
         .put(KEY_DAILY_DRAW_LIMIT, task.dailyDrawLimit)
+        .put(KEY_DRAW_AT_CUSTOM_TIME, task.drawAtCustomTime)
         .put(KEY_BOOKS, JSONArray(task.books.map { JSONObject().put("bookId", it.bookId).put("name", it.name) }))
         .put(KEY_MERCHANT_AUTO_COMPLETE, task.merchantAutoComplete)
         .put(KEY_MERCHANT_CITY_CODE, task.merchantCityCode)
@@ -458,7 +496,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         block: (root: JSONObject, tasks: JSONObject) -> Unit,
     ) {
         synchronized(WRITE_LOCK) {
-            val prefs = prefs() ?: return
+            val prefs = prefs() ?: error("本地任务状态不可用")
             val stored = prefs.getString(accountKey(accountId), null)
             if (stored == null && !create) {
                 check(!requireExisting) { "账号不存在，请刷新后重试" }
@@ -472,7 +510,12 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             normalizeAccountConfig(root)
             val after = root.toString()
             if (after != before) {
-                check(prefs.edit().putString(accountKey(accountId), after).commit()) { "本地任务状态保存失败" }
+                val key = accountKey(accountId)
+                commitLocalTaskAccountRestore(stored, after, { prefs.getString(key, null) }) { value ->
+                    val editor = prefs.edit()
+                    if (value == null) editor.remove(key) else editor.putString(key, value)
+                    editor.commit()
+                }
             }
         }
     }
@@ -532,6 +575,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         private const val KEY_TIME_OF_DAY = "timeOfDay"
         private const val KEY_DURATION_MINUTES = "durationMinutes"
         private const val KEY_DAILY_DRAW_LIMIT = "dailyLimit"
+        private const val KEY_DRAW_AT_CUSTOM_TIME = "drawAtCustomTime"
         private const val KEY_BOOKS = "books"
         private const val KEY_MERCHANT_AUTO_COMPLETE = "merchantAutoComplete"
         private const val KEY_MERCHANT_CITY_CODE = "merchantCityCode"
@@ -549,7 +593,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             KEY_NEXT_RUN_AT, KEY_LAST_MESSAGE, KEY_LAST_RUN_AT,
             LocalTaskRuntimeMerge.UPDATED_AT,
             "dailyCounterDate", "dailyCounter", "lastDrawItems", "lastDrawResult", "lastDrawAt",
-            "drawPending", "drawRewardLoreId",
+            "drawPending", "drawRewardLoreId", "drawScheduleVersion",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
             CloudTaskLocalRunner.KEY_READ_PENDING_BATCH,
             "lastPawnDate", "pawnUsedToday", "pawnLastCoin",
@@ -576,24 +620,27 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         internal const val KEY_MERCHANT_BLESSED_TRIP = "merchantBlessedTripId"
 
         internal val CONFIG_KEYS = setOf(
-            KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_BOOKS,
+            KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_DRAW_AT_CUSTOM_TIME, KEY_BOOKS,
             KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
             KEY_FORBIDDEN_PAWN_PROP_IDS,
             KEY_BLESSING_TYPE,
         )
 
         internal fun mergeMirroredTask(taskType: String, current: JSONObject?, incoming: JSONObject, now: Long): JSONObject {
-            if (current != null && incoming.optLong(KEY_CONFIG_UPDATED_AT) <= current.optLong(KEY_CONFIG_UPDATED_AT)) {
+            if (current == null) return mergeLocalTaskSnapshot(null, incoming).also {
+                if (!it.has(KEY_NEXT_RUN_AT)) LocalTaskRuntimeMerge.schedule(it, taskType, now)
+            }
+            if (incoming.optLong(KEY_CONFIG_UPDATED_AT) <= current.optLong(KEY_CONFIG_UPDATED_AT)) {
                 return JSONObject(current.toString())
             }
-            val merged = if (current == null) JSONObject() else JSONObject(current.toString())
-            val changed = current == null || CONFIG_KEYS.any { current.opt(it)?.toString() != incoming.opt(it)?.toString() }
+            val merged = JSONObject(current.toString())
+            val changed = CONFIG_KEYS.any { current.opt(it)?.toString() != incoming.opt(it)?.toString() }
             for (key in CONFIG_KEYS) {
                 if (incoming.has(key)) merged.put(key, incoming.get(key)) else merged.remove(key)
             }
             merged.put(KEY_CONFIG_UPDATED_AT, incoming.optLong(KEY_CONFIG_UPDATED_AT))
             if (changed || !merged.has(KEY_NEXT_RUN_AT)) {
-                LocalTaskRuntimeMerge.schedule(merged, taskType, now)
+                LocalTaskRuntimeMerge.schedule(merged, taskType, now, current)
             }
             return merged
         }

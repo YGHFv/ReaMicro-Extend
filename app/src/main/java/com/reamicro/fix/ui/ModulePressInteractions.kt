@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.flow
  * State belongs to each collector and is discarded when its indication node is detached.
  */
 internal class ModuleJoinedPressInteractionSource(
-    private val source: InteractionSource,
+    source: InteractionSource,
 ) : InteractionSource {
     override val interactions: Flow<Interaction> = flow {
         // Most collectors never receive a press. Allocate only on first touch; two slots cover

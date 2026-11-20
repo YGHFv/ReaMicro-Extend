@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToLong
 
 class ReaderAutoPageHook(
-    private val classLoader: ClassLoader,
     private val activityProvider: () -> Activity?,
     private val settingsProvider: () -> ModuleSettingsSnapshot = { ModuleSettingsSnapshot() },
 ) {

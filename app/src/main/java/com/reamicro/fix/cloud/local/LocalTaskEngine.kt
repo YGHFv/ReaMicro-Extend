@@ -33,17 +33,18 @@ internal class LocalTaskEngine(
                 store.list(accountId).map { Triple(LocalTaskKey(accountId, it.taskType), it, generation) }
             }.filter { (key, task) ->
                 key !in processed && if (requested != null) key == requested else
-                    task.enabled && (force || task.taskType != "yeshe_draw_card" || store.runtimeState(key.accountId, task.taskType).optBoolean("drawPending")) &&
-                        (force || AutoReadTimeLock.clampNextAt(
-                            task, store.runtimeState(key.accountId, task.taskType), task.nextRunAt, now,
-                        ) <= now)
+                    task.enabled &&
+                        (force || nextLocalTaskAt(
+                            task, store.runtimeState(key.accountId, task.taskType), JSONObject(), now,
+                        )?.let { it <= now } == true)
             }
             val (key, task, accountGeneration) = candidates.minByOrNull { it.second.nextRunAt } ?: break
             processed += key
             if (store.accountGeneration(key.accountId) != accountGeneration ||
                 (requested != null && expectedAccountGeneration != null && accountGeneration != expectedAccountGeneration)
             ) continue
-            val token = store.token(key.accountId)
+            val credentialResult = runCatching { store.token(key.accountId) }
+            val token = credentialResult.getOrDefault("")
             val stateInput = store.runtimeState(key.accountId, task.taskType)
             val timeLock = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
                 AutoReadTimeLock.deferredOutcome(task.durationMinutes, stateInput, now)
@@ -51,12 +52,19 @@ internal class LocalTaskEngine(
             var stopAfterTask = false
             try {
                 var outcome = timeLock ?: if (token.isBlank()) {
-                    CloudTaskLocalRunner.Outcome("paused", "登录凭据缺失，请更新该账号凭证", stateInput)
+                    CloudTaskLocalRunner.Outcome("paused",
+                        if (credentialResult.isFailure) "登录凭据无法解密，请重新导入该账号凭证" else "登录凭据缺失，请更新该账号凭证", stateInput)
                 } else runCatching {
-                    val active = TaskCancellation {
+                    val active = TaskCancellation(checkActive = {
                         store.get(key.accountId, task.taskType) != null &&
                             store.accountGeneration(key.accountId) == accountGeneration
-                    }
+                    }, requestAllowed = {
+                        val current = store.get(key.accountId, task.taskType)
+                        store.executionEnabled() && ((requested != null && !task.enabled) ||
+                            current?.enabled == true) &&
+                            current?.configUpdatedAt == task.configUpdatedAt &&
+                            runCatching { store.token(key.accountId) == token }.getOrDefault(false)
+                    })
                     try {
                         TaskCancellation.current()?.register(active::cancel).use {
                             active.run {
@@ -76,20 +84,22 @@ internal class LocalTaskEngine(
                                     active.check()
                                     store.recordState(key.accountId, task.taskType, JSONObject(progress.toString())
                                         .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt)
+                                        .put(LocalTaskRuntimeMerge.DRAW_CONTEXT, LocalTaskRuntimeMerge.drawScheduleContext(task))
                                         .put(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT, accountGeneration))
                                 }
-                            }
+                            }.also { active.check() }
                         }
                     } finally {
                         active.cancel()
                     }
                 }.getOrElse {
-                    stopAfterTask = it is InterruptedException || it is java.util.concurrent.CancellationException ||
-                        Thread.currentThread().isInterrupted || com.reamicro.fix.reload.TaskCancellation.current()?.isCancelled == true
+                    stopAfterTask = it is InterruptedException || Thread.currentThread().isInterrupted ||
+                        TaskCancellation.current()?.isCancelled == true || !store.executionEnabled()
                     // FileChannel.lock 不接受中断标记；只在提交本次进度期间暂时清除。
                     if (stopAfterTask) Thread.interrupted()
                     CloudTaskLocalRunner.Outcome("failed", it.message ?: "本地任务执行失败",
-                        store.runtimeState(key.accountId, task.taskType), notify = !stopAfterTask)
+                        store.runtimeState(key.accountId, task.taskType),
+                        notify = !stopAfterTask && it !is java.util.concurrent.CancellationException)
                 }
                 if (store.get(key.accountId, task.taskType) == null ||
                     store.accountGeneration(key.accountId) != accountGeneration
@@ -110,11 +120,15 @@ internal class LocalTaskEngine(
                 state.remove("nextRunAtOverride")
                 val candidate = if (task.taskType == AutoReadTimeLock.TASK_TYPE && override <= 0L && outcome.result == "success") {
                     AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, finished)
+                } else if (task.taskType == "yeshe_draw_card" && !task.drawAtCustomTime && outcome.result == "success") {
+                    0L
                 } else nextLocalRunAt(task.taskType, task.timeOfDay, outcome.result, override, finished)
                 state.put("nextRunAt", AutoReadTimeLock.clampNextAt(task, state, candidate, finished))
                     .put("lastMessage", outcome.message).put("lastRunAt", finished)
+                    .put(LocalTaskRuntimeMerge.DRAW_CONTEXT, LocalTaskRuntimeMerge.drawScheduleContext(task))
                     .put(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT, accountGeneration)
                 if (task.taskType == "yeshe_draw_card") state.put("drawPending", outcome.result != "success")
+                    .put("drawScheduleVersion", LocalTaskRuntimeMerge.DRAW_SCHEDULE_VERSION)
                 val record = LocalTaskRecord(finished, task.taskType, outcome.result, outcome.message, outcome.detail.toString())
                 store.recordExecution(key.accountId, task, state, record, outcome.notify)
                 results += record
@@ -136,7 +150,15 @@ internal class LocalTaskEngine(
         for (accountId in store.accountIds()) {
             val generation = store.accountGeneration(accountId)
             for (task in store.list(accountId).filter { it.enabled }) {
-                val state = recoveredAutomationState(task.taskType, store.runtimeState(accountId, task.taskType), clock()) ?: continue
+                val runtime = store.runtimeState(accountId, task.taskType)
+                val state = if (task.taskType == "yeshe_draw_card" && !runtime.optBoolean("drawPending") &&
+                    (runtime.optInt("drawScheduleVersion") < LocalTaskRuntimeMerge.DRAW_SCHEDULE_VERSION ||
+                        (if (task.drawAtCustomTime) task.nextRunAt <= 0L else task.nextRunAt != 0L))) {
+                    JSONObject().put("drawScheduleVersion", LocalTaskRuntimeMerge.DRAW_SCHEDULE_VERSION)
+                        .put("nextRunAt", if (task.drawAtCustomTime) {
+                            task.nextRunAt.takeIf { it > 0L } ?: nextDailyRunAt(task.timeOfDay, clock())
+                        } else 0L)
+                } else recoveredAutomationState(task.taskType, runtime, clock()) ?: continue
                 store.recordState(accountId, task.taskType, state
                     .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt)
                     .put(LocalTaskRuntimeMerge.ACCOUNT_CONTEXT, generation))
@@ -148,7 +170,7 @@ internal class LocalTaskEngine(
         val now = clock()
         for (accountId in store.accountIds()) {
             val generation = store.accountGeneration(accountId)
-            val draw = store.get(accountId, "yeshe_draw_card")?.takeIf { it.enabled } ?: continue
+            val draw = store.get(accountId, "yeshe_draw_card")?.takeIf { it.enabled && !it.drawAtCustomTime } ?: continue
             val checkin = store.runtimeState(accountId, "yeshe_checkin")
             val state = store.runtimeState(accountId, draw.taskType)
             val pending = pendingRewardDrawState(checkin, state, now) ?: continue

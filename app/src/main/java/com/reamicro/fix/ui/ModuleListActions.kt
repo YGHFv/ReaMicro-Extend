@@ -46,7 +46,17 @@ internal fun ModuleToolbarAction(
     tint: Color = MiuixTheme.colorScheme.onSurface,
 ) {
     val vector = moduleActionIcon(icon)
-    val buttonSize = if (LocalModuleThemeConfig.current.style == ModuleUiStyle.OS4) {
+    val os4 = LocalModuleThemeConfig.current.style == ModuleUiStyle.OS4
+    // Compensate each glyph's viewport padding for a visible long edge of about 20dp.
+    val iconSize = when (icon) {
+        ModuleActionIcon.Accounts -> if (os4) 27.dp else 24.dp
+        ModuleActionIcon.Sort -> if (os4) 27.5.dp else 24.dp
+        ModuleActionIcon.Close -> if (os4) 31.5.dp else 27.dp
+        ModuleActionIcon.SelectAll -> if (os4) 27.5.dp else 25.dp
+        ModuleActionIcon.Delete -> if (os4) 25.dp else 24.dp
+        else -> vector.defaultWidth
+    }
+    val buttonSize = if (os4) {
         GlassTopAppBarDefaults.ButtonSize
     } else IconButtonDefaults.MinWidth
     val actionModifier = modifier.semantics {
@@ -55,15 +65,12 @@ internal fun ModuleToolbarAction(
     }
     val guardedClick = { if (enabled && canActivate) onClick() }
     val content = @Composable {
-        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-            // Contacts fills more of its viewport than the other toolbar glyphs.
-            Icon(
-                imageVector = vector,
-                contentDescription = description,
-                modifier = Modifier.size(if (icon == ModuleActionIcon.Accounts) 22.dp else 24.dp),
-                tint = if (enabled && canActivate) tint else MiuixTheme.colorScheme.disabledOnSurface,
-            )
-        }
+        Icon(
+            imageVector = vector,
+            contentDescription = description,
+            modifier = Modifier.size(iconSize),
+            tint = if (enabled && canActivate) tint else MiuixTheme.colorScheme.disabledOnSurface,
+        )
     }
     // Reserve touch space outside the visual surface. Each native button remains the only
     // click owner, and its actual bounds still anchor the sorting popup.

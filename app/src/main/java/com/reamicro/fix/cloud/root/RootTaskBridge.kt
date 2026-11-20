@@ -213,7 +213,8 @@ internal object RootTaskBridge {
     }
 
     @Synchronized
-    fun synchronize(context: Context, force: Boolean = false, requested: LocalTaskKey? = null): Boolean {
+    fun synchronize(context: Context, force: Boolean = false, requested: LocalTaskKey? = null,
+        expectedAccountGeneration: String? = null): Boolean {
         if (!isEnabled(context)) return false
         prepareTransport(context)
         try {
@@ -221,6 +222,10 @@ internal object RootTaskBridge {
                 cleanupLegacyWake(context)
             }
             val payload = LocalTaskStore { context }.executionPayload()
+            if (requested != null && expectedAccountGeneration != null) {
+                check(payload.getJSONObject("accounts").optJSONObject(requested.accountId)?.optString("accountGeneration") ==
+                    expectedAccountGeneration) { "账号已变更，请刷新后重试" }
+            }
             if (!handoff(context).synchronize(payload)) {
                 check(!force && requested == null) { context.moduleString(R.string.root_sync_stopped) }
                 return false
@@ -366,6 +371,8 @@ internal object RootTaskBridge {
         val response = JSONObject(line.removePrefix("REAMICRO_KSU:"))
         check(result.exitCode == 0 && !response.has("error")) { context.moduleString(R.string.error_ksu_command, response.optString("error", context.moduleString(R.string.error_exit_code, result.exitCode))) }
         check(response.optInt("schema") == RootTaskRepository.SCHEMA) { context.moduleString(R.string.error_ksu_protocol) }
-        return response
+        return if (action == "snapshot-part") response else RootTaskSnapshotTransport.collect(response) { part ->
+            command(context, "snapshot-part", part, timeoutSeconds)
+        }
     }
 }

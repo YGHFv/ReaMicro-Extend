@@ -9,7 +9,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** One transition decision for shelf, loading, book details and reading banners. */
 internal class CoverFadeHook(
-    private val loader: ClassLoader,
     private val settingsProvider: () -> ModuleSettingsSnapshot,
 ) {
     private val knownSources = CoverSources()

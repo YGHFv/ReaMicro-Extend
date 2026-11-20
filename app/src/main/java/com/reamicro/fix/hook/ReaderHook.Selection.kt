@@ -7,15 +7,12 @@ import com.reamicro.fix.reload.runOnModuleUiThread
 import android.app.Activity
 import android.app.Dialog
 import android.os.Build
-import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.Window
-import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView

@@ -25,7 +25,7 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
     }
     private val cache = LinkedHashMap<String, Chapter>()
 
-    private val scroll = ReaderSearchScrollResolver(reader)
+    private val scroll = ReaderSearchScrollResolver()
     fun clear() { cache.clear(); scroll.clear() }
     fun resolve(result: FullTextSearchResult, index: Int, vm: Any, epub: Any,
         loaded: ReaderSearchScrollBridge.Snapshot?, current: () -> Boolean): ResolvedSearchTarget {
@@ -64,7 +64,7 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
             }).text
             val digest = searchSourceDigest(raw)
             require(result.sourceDigest.isNotBlank() && digest == result.sourceDigest) { "章节已修改，请重新搜索" }
-            val sourceMapper = HostSelectionSourceMapper(reader.classLoader)
+            val sourceMapper = HostSelectionSourceMapper()
             val source = sourceMapper.map(raw, key)
             val point = sourceMapper.point(sourceMapper.hostCfi(requireNotNull(result.startCfi)))
             val items = host.list("epub.itemRefs", epub)
@@ -109,7 +109,7 @@ internal class ReaderSearchResolver(private val reader: ReaderHook) {
                     check(reader.currentViewModelRef?.get() === vm &&
                         (reader.currentEpubStrong ?: reader.currentEpubRef?.get()) === epub) { "搜索会话已更新" }
 
-                    val renderMapper = HostSelectionSourceMapper(reader.classLoader)
+                    val renderMapper = HostSelectionSourceMapper()
                     renderMapper.bindSearchDocument(document ?: error("目标章节没有可阅读页面"))
                     val rendered = renderMapper.map(raw, key)
                     chapter = Chapter(modified, length, epub, digest, sourceMapper, source, renderMapper, rendered,

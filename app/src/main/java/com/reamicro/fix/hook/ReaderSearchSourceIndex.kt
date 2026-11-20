@@ -7,7 +7,7 @@ import java.security.MessageDigest
 internal fun ReaderHook.hostIndexedSearchText(raw: String, base: CfiBase?): IndexedSearchText {
     requireNotNull(base) { "正文缺少 CFI 章节基址，无法完成可跳转搜索" }
     return runCatching {
-        val builder = searchSourceBuilder ?: HostSearchIndexBuilder(classLoader).also { searchSourceBuilder = it }
+        val builder = searchSourceBuilder ?: HostSearchIndexBuilder().also { searchSourceBuilder = it }
         builder.index(raw, base)
     }.getOrElse {
         if (it is InterruptedException || it is java.util.concurrent.CancellationException) throw it

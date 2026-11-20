@@ -29,7 +29,7 @@ internal object HostHomeSearchQueries {
         val cloud = cls("cloud", known("app.zhendong.reamicro.data.storage.CloudBook"))
         val state = cls("state", known("app.zhendong.reamicro.ui.home.HomeUiState"))
         val function = cls("function1", known("kotlin.jvm.functions.Function1"))
-        val function3 = cls("function3", known("kotlin.jvm.functions.Function3"))
+        cls("function3", known("kotlin.jvm.functions.Function3"))
         val event = cls("event", (search.interfaces + listOfNotNull(search.superClass)).single { candidate ->
             home.methods.any { it.isMethod && !Modifier.isStatic(it.modifiers) && it.paramTypeNames == listOf(candidate.name) && it.returnTypeName == "void" }
         })

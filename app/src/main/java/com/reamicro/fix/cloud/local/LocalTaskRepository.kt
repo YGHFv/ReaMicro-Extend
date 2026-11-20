@@ -32,6 +32,7 @@ internal fun localTaskFromJson(taskType: String, obj: JSONObject): LocalTask {
         },
         durationMinutes = obj.optInt("durationMinutes", 30).coerceIn(1, 720),
         dailyDrawLimit = obj.optInt("dailyLimit", 3).coerceIn(0, 20),
+        drawAtCustomTime = obj.optBoolean("drawAtCustomTime", false),
         books = books,
         merchantAutoComplete = obj.optBoolean("merchantAutoComplete", false),
         merchantCityCode = obj.optString("merchantCityCode"),
@@ -85,8 +86,12 @@ internal fun pendingRewardDrawState(checkin: JSONObject, draw: JSONObject, now: 
 internal fun nextLocalTaskAt(task: LocalTask, state: JSONObject, checkin: JSONObject, now: Long): Long? {
     if (!task.enabled) return null
     if (task.taskType == "yeshe_draw_card") {
-        if (pendingRewardDrawState(checkin, state, now) != null) return now
-        if (!state.optBoolean("drawPending")) return null
+        if (!task.drawAtCustomTime) {
+            if (pendingRewardDrawState(checkin, state, now) != null) return now
+            if (!state.optBoolean("drawPending")) return null
+        }
+        // Wake once to persist the legacy schedule; recomputing a future time on every read skips its first run.
+        if (!state.optBoolean("drawPending") && task.nextRunAt <= 0L) return now
     }
     return AutoReadTimeLock.clampNextAt(task, state, task.nextRunAt.coerceAtLeast(1L), now)
 }
@@ -117,11 +122,14 @@ internal fun rescheduleLocalTasks(store: LocalTaskRepository, now: Long): Int {
         val checkin = store.runtimeState(accountId, "yeshe_checkin")
         for (task in store.list(accountId)) {
             val state = store.runtimeState(accountId, task.taskType)
-            if (nextLocalTaskAt(task, state, checkin, now) == null) continue
+            val effectiveNext = nextLocalTaskAt(task, state, checkin, now) ?: continue
             val pendingClaim = if (task.taskType == "yeshe_checkin" &&
                 state.optString("claimCompletedDate") != state.optString("lastCheckinDate")
             ) state.optLong("claimDueAt") else 0L
-            val candidate = if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
+            val candidate = if (task.taskType == "yeshe_draw_card" &&
+                (state.optBoolean("drawPending") || !task.drawAtCustomTime)) {
+                effectiveNext.coerceAtLeast(now)
+            } else if (task.taskType == AutoReadTimeLock.TASK_TYPE) {
                 val daily = AutoReadTimeLock.nextDailyAt(task.timeOfDay, task.durationMinutes, now)
                 minOf(task.nextRunAt.takeIf { it > 0L } ?: daily, daily).coerceAtLeast(now)
             } else rescheduledNextRunAt(task.taskType, task.timeOfDay, task.nextRunAt.takeIf { it > 0L }, now, pendingClaim)
@@ -150,7 +158,7 @@ internal fun clearLocalTaskRecordsBefore(account: JSONObject, clearedAt: Long) {
 
 internal fun applyLocalTaskRecordsSnapshot(current: JSONObject, incoming: JSONObject) {
     val restoredAt = current.optLong(LocalTaskAccountBundle.RECORDS_IMPORTED_AT)
-    val restoredHistory = if (restoredAt > 0L && incoming.optJSONArray("records") != null) {
+    val restoredHistory = if ((restoredAt > 0L || incoming.optBoolean("recordsMerge")) && incoming.optJSONArray("records") != null) {
         // Apply new tombstones to the already restored baseline independently of raw module history.
         JSONObject(current.toString()).also { baseline ->
             val deletionOnly = JSONObject(incoming.toString()).apply { remove("records") }
