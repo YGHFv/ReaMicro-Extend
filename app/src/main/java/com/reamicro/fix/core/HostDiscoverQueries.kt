@@ -8,7 +8,7 @@ import org.luckypray.dexkit.query.FindMethod
 import org.luckypray.dexkit.query.matchers.MethodMatcher
 import org.luckypray.dexkit.result.MethodData
 
-/** Discover extends the native community row identified by its serialized navigation target. */
+/** Discover shares the stamps row when present, otherwise the original community row. */
 internal object HostDiscoverQueries {
     private fun List<MethodData>.one(label: String) = distinctBy { it.descriptor }.singleOrNull()
         ?: error("$label: expected one method, found ${distinctBy { it.descriptor }.map { it.descriptor }}")
@@ -29,8 +29,10 @@ internal object HostDiscoverQueries {
         val community = anchor("Colored.Book", "里程碑", "同好").filter { Modifier.isStatic(it.modifiers) &&
             it.returnTypeName == "void" && composer.name in it.paramTypeNames }.one("community content")
         save("community", community)
-        val serializer = anchor("app.zhendong.reamicro.Route.Community").one("community route serializer")
-        val route = flow.calls(serializer.descriptor).filter { it.arguments.contains(HostDexCalls.Text("app.zhendong.reamicro.Route.Community")) }
+        val stamps = "錾章" in community.usingStrings
+        val routeName = "app.zhendong.reamicro.Route.${if (stamps) "Stamps" else "Community"}"
+        val serializer = anchor(routeName).one("Discover anchor route serializer")
+        val route = flow.calls(serializer.descriptor).filter { it.arguments.contains(HostDexCalls.Text(routeName)) }
             .map { it.arguments.filterIsInstance<HostDexCalls.Field>().single() }.distinct().single()
         put("field:route", route.descriptor)
         val callback = community.invokes.filter { it.isConstructor }.mapNotNull { it.declaredClass }.distinctBy { it.descriptor }
@@ -57,6 +59,15 @@ internal object HostDiscoverQueries {
         val image = community.invokes.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
             it.paramTypeNames == listOf(vector.name, "java.lang.String", modifier.name, composer.name, "int", "int") }.one("community vector image")
         save("icon", icon); save("image", image)
+        val rowImage = if (stamps) community.invokes.filter { Modifier.isStatic(it.modifiers) &&
+            it.returnTypeName == "void" && it.paramCount == 10 &&
+            it.paramTypeNames.slice(1..2) == listOf("java.lang.String", modifier.name) &&
+            it.paramTypeNames[5] == "float" && it.paramTypeNames.takeLast(3) == listOf(composer.name, "int", "int")
+        }.one("stamps painter image") else image
+        save("rowImage", rowImage)
+        put("value:rowImage.composer", rowImage.paramTypeNames.indices.single { rowImage.paramTypeNames[it] == composer.name }.toString())
+        put("value:rowImage.modifier", "2")
+        put("value:rowImage.mask", (rowImage.paramCount - 1).toString())
         val spacer = community.invokes.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
             it.paramTypeNames.toSet() == setOf(composer.name, modifier.name) && it.paramCount == 2 }.one("community weighted spacer")
         save("spacer", spacer)

@@ -1,3 +1,33 @@
+# Versions used by the pinned Miuix v0.9.5-rc01 Android integration.
+# The dependency versions follow the supplied rc01 source catalog.
 [versions]
-miuix = "0.9.5-beta02"
+miuix = "0.9.5-rc01"
+agp = "9.5.2"
+kotlin = "2.4.21"
 compose = "1.13.0-rc01"
+activity = "1.13.0"
+navigationevent = "1.2.0"
+lifecycle = "2.11.0"
+materialkolor = "6.0.0"
+collections = "0.5.2"
+serialization = "1.13.0"
+hiddenapibypass = "6.2"
+
+[libraries]
+kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+androidx-activity = { module = "androidx.activity:activity-compose", version.ref = "activity" }
+androidx-navigationevent = { module = "androidx.navigationevent:navigationevent-compose", version.ref = "navigationevent" }
+compose-foundation = { module = "org.jetbrains.compose.foundation:foundation-android", version.ref = "compose" }
+lifecycle-runtime = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-android", version.ref = "lifecycle" }
+lifecycle-runtime-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose-android", version.ref = "lifecycle" }
+lifecycle-viewmodel = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-android", version.ref = "lifecycle" }
+lifecycle-viewmodel-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose-android", version.ref = "lifecycle" }
+materialkolor-utilities = { module = "com.materialkolor:material-color-utilities-android", version.ref = "materialkolor" }
+kotlinx-collections-immutable = { module = "org.jetbrains.kotlinx:kotlinx-collections-immutable", version.ref = "collections" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

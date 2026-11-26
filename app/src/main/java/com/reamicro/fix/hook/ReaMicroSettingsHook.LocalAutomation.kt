@@ -2,11 +2,10 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.reload.runOnModuleUiThread
 
-import android.text.InputType
-import android.widget.TextView
 import com.reamicro.fix.cloud.api.ApiServerClient
 import com.reamicro.fix.cloud.api.ApiServerSettingsStore
 import com.reamicro.fix.cloud.api.CloudTaskManager
+import com.reamicro.fix.cloud.local.CloudTaskLocalRunner
 import com.reamicro.fix.cloud.local.LocalTask
 import com.reamicro.fix.cloud.local.LocalTaskBook
 import com.reamicro.fix.cloud.local.LocalTaskRecord
@@ -53,6 +52,7 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
                 key = "local_automation_${spec.taskType}",
                 title = spec.title,
                 subtitle = localAutomationTaskSubtitle(spec, task, currentCredential),
+                detail = task?.takeIf { localAutomationError.isBlank() }?.let(::localAutomationLastRun),
                 onClick = {
                     val accountId = runCatching { accountController.currentCloudCredential().accountId }.getOrNull()
                     if (accountId == currentCredential?.accountId) openLocalAutomationTaskDialog(spec, task)
@@ -77,6 +77,7 @@ internal fun ReaMicroSettingsHook.renderLocalAutomationSettingsContent(innerPadd
         }
         addLazyItem(lazyListScope, "local_automation_task_card".hashCode()) { itemComposer ->
             renderHostActionCard(taskRows, itemComposer)
+            renderHostCardNote("已开启的任务在每次打开阅微时执行一次，配置与独立应用分开保存。", itemComposer)
         }
         addLazyItem(lazyListScope, "local_automation_history_card".hashCode()) { itemComposer ->
             renderHostActionCard(historyRows, itemComposer)
@@ -148,49 +149,40 @@ private fun ReaMicroSettingsHook.openLocalAutomationRecordsDialog() {
         val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, "任务记录", colors))
-        val status = TextView(activity).apply {
-            setTextColor(colors.body)
-            setPadding(24, 8, 24, 8)
-            text = "正在读取……"
+        val stored = localRecords(accountId)
+        val records = stored.take(LOCAL_RECORD_DISPLAY_LIMIT)
+        val history = HostLocalTaskRecords(activity)
+        if (records.isEmpty()) {
+            history.empty("暂无记录。下次打开阅微时执行已开启的任务。")
+        } else {
+            history.summary(
+                if (stored.size > records.size) "最近 ${records.size} 条，共 ${stored.size} 条。仅包含宿主任务。"
+                else "共 ${records.size} 条，最新在前。仅包含宿主任务。",
+            )
+            records.forEach { record ->
+                history.record(
+                    localTaskTitleOf(record.taskType), formatLocalRecordTime(record.at), record.result, record.message,
+                )
+            }
         }
-        card.addView(status, apiServerRowParams(activity))
-        val list = android.widget.LinearLayout(activity).apply { orientation = android.widget.LinearLayout.VERTICAL }
-        card.addView(list, apiServerRowParams(activity))
-
-        val records = localRecords(accountId).take(LOCAL_RECORD_DISPLAY_LIMIT)
-        status.text = if (records.isEmpty()) "暂无记录。下次打开阅微时执行已开启的任务。"
-        else "共 ${records.size} 条，最新在前。仅包含宿主任务。"
-        records.forEach { record ->
-            list.addView(TextView(activity).apply {
-                setTextColor(if (record.result == "success") colors.title else colors.destructiveText)
-                setPadding(24, 6, 24, 6)
-                text = "${formatLocalRecordTime(record.at)} · ${localTaskTitleOf(record.taskType)} · ${record.result}\n${record.message}"
-            })
-        }
-        val actions = settingsDialogActions(activity)
-        actions.addView(
-            settingsDialogButton(activity, "清空记录", colors, SettingsDialogButtonRole.Neutral).apply {
-                setOnClickListener {
-                    val appContext = activity.applicationContext
-                    val cleared = runCatching {
-                        check(accountController.currentCloudCredential().accountId == accountId) { "账号已切换，请重新打开记录" }
-                        LocalTaskStore { appContext }.clearRecords(accountId)
-                    }
-                    if (cleared.isFailure) { showToast(cleared.exceptionOrNull()?.message ?: "清空失败"); return@setOnClickListener }
+        card.addView(history.body)
+        HostSettingsDialogs.setActions(dialog, listOf(
+            HostSettingsDialogs.Action("清空记录", nativeButton = true) {
+                val appContext = activity.applicationContext
+                val cleared = runCatching {
+                    check(accountController.currentCloudCredential().accountId == accountId) { "账号已切换，请重新打开记录" }
+                    LocalTaskStore { appContext }.clearRecords(accountId)
+                }
+                if (cleared.isFailure) {
+                    showToast(cleared.exceptionOrNull()?.message ?: "清空失败")
+                } else {
                     dialog.dismiss()
                     showToast("宿主任务记录已清空")
                 }
             },
-            settingsDialogButtonParams(activity),
-        )
-        actions.addView(
-            settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-                setOnClickListener { dialog.dismiss() }
-            },
-            settingsDialogButtonParams(activity),
-        )
-        card.addView(actions)
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
+            HostSettingsDialogs.Action("关闭", nativeButton = true) { dialog.dismiss() },
+        ))
+        showSettingsDialog(dialog, HostFormScroll(activity, card), activity, dismissOnThemeChange = true)
     }
 }
 
@@ -213,9 +205,10 @@ private fun ReaMicroSettingsHook.localAutomationAccountSubtitle(
 ): String = when {
     current == null -> "请先在阅微登录账号"
     localAutomationError.isNotBlank() -> localAutomationError
-    else -> "账号 ${current.accountId} · 打开阅微时执行一次，配置与独立应用分开保存"
+    else -> "账号 ${current.accountId}"
 }
 
+/** What the task is set to do; the switch beside it already says whether it runs. */
 private fun ReaMicroSettingsHook.localAutomationTaskSubtitle(
     spec: CloudAutomationTaskSpec,
     task: LocalTask?,
@@ -223,30 +216,35 @@ private fun ReaMicroSettingsHook.localAutomationTaskSubtitle(
 ): String = when {
     current == null -> "请先登录阅微账号"
     localAutomationError.isNotBlank() -> localAutomationError
-    task == null -> "未配置 · 开启后在下次打开阅微时执行一次"
-    else -> buildString {
-        append(if (task.enabled) "已启用 · 打开阅微时执行一次" else "已关闭")
-        when {
-            spec.merchant -> {
-                append(" · ")
-                append(if (task.merchantAutoComplete) "自动完成行商" else "仅通知不自动完成")
-            }
-            spec.rewardTriggered -> {
-                append(" · ")
-                append(if (task.dailyDrawLimit == 0) "抽完全部彩筹" else "每日最多 ${task.dailyDrawLimit} 次")
-            }
-        }
-        if (spec.autoRead) {
-            append(" · ")
-            append(task.durationMinutes)
-            append(" 分钟 · ")
-            append(if (task.books.isEmpty()) "最近阅读" else "${task.books.size} 本指定图书")
-        }
-        if (task.lastMessage.isNotBlank()) {
-            append("\n")
-            append(task.lastMessage)
-        }
+    task == null -> "未配置"
+    spec.autoRead -> listOf(
+        if (task.hostReadOncePerDay) "每日一次" else "每次打开",
+        "${task.durationMinutes} 分钟",
+        if (task.books.isEmpty()) "最近阅读" else "${task.books.size} 本指定图书",
+    ).joinToString(" · ")
+    spec.merchant && !task.merchantAutoComplete -> "仅通知，不自动完成"
+    spec.merchant -> "自动完成行商 · ${localAutomationBlessing(spec, task)}"
+    spec.rewardTriggered -> if (task.dailyDrawLimit == 0) "抽完全部彩筹" else "每日最多 ${task.dailyDrawLimit} 次"
+    spec.blessingOptions.isNotEmpty() -> localAutomationBlessing(spec, task)
+    spec.taskType != "pawn" -> "已配置"
+    task.forbiddenPawnPropIds.isEmpty() -> "未锁定期物，全部可典当"
+    else -> "已锁定 ${task.forbiddenPawnPropIds.size} 项期物"
+}
+
+private fun localAutomationBlessing(spec: CloudAutomationTaskSpec, task: LocalTask): String =
+    when (spec.resolveBlessingChoice(task.blessingType)) {
+        CloudTaskLocalRunner.BLESSING_LUCK -> "无签时求运"
+        CloudTaskLocalRunner.BLESSING_SAFETY -> "无签时求安"
+        CloudTaskLocalRunner.BLESSING_WEALTH -> "无签时求财"
+        else -> "不自动祈签"
     }
+
+/** When the task last ran and what came of it, on one line. */
+private fun localAutomationLastRun(task: LocalTask): String {
+    val message = task.lastMessage.replace(Regex("\\s+"), " ").trim()
+    if (task.lastRunAt <= 0L) return message.ifEmpty { "尚未执行" }
+    val time = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(task.lastRunAt))
+    return if (message.isEmpty()) "上次 $time" else "上次 $time · $message"
 }
 
 private fun ReaMicroSettingsHook.renderLocalAutomationTaskSwitch(
@@ -294,7 +292,7 @@ private fun ReaMicroSettingsHook.setLocalAutomationTaskEnabled(
     }
     if (task == null) {
 
-        if (enabled) openLocalAutomationTaskDialog(spec, null, enableAfterSave = true)
+        if (enabled) openLocalAutomationTaskDialog(spec, null)
         return false
     }
     val accountId = currentCredential.accountId
@@ -317,7 +315,6 @@ private fun ReaMicroSettingsHook.setLocalAutomationTaskEnabled(
 private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
     spec: CloudAutomationTaskSpec,
     task: LocalTask?,
-    enableAfterSave: Boolean? = null,
 ) {
     val activity = activityProvider() ?: return
     val currentCredential = runCatching { accountController.currentCloudCredential() }.getOrNull()
@@ -331,40 +328,14 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         val dialog = settingsDialog(activity)
         val card = settingsDialogCard(activity, colors)
         card.addView(settingsDialogTitle(activity, spec.title, colors))
-        val account = TextView(activity).apply {
-            setTextColor(colors.body)
-            text = "阅微账号：${currentCredential.label.ifBlank { "阅微账号" }}（$accountId）"
-            setPadding(24, 8, 24, 8)
-        }
-        val duration = apiServerEdit(activity, colors, "阅读时长（分钟）", (task?.durationMinutes ?: 30).toString()).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        val drawLimit = apiServerEdit(
-            activity,
-            colors,
-            "每日抽卡上限（0-20，0 表示抽完全部彩筹）",
-            (task?.dailyDrawLimit ?: 3).toString(),
-        ).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        val books = apiServerEdit(
-            activity,
-            colors,
-            "自定义图书：每行 bookId|书名；留空读取最近阅读",
-            task?.books?.joinToString("\n") { "${it.bookId}|${it.name}" }.orEmpty(),
-        ).apply {
-            minLines = 3
-            setSingleLine(false)
-        }
-        val merchantAutoComplete = settingsDialogSwitchRow(activity, "自动完成行商", task?.merchantAutoComplete == true, colors)
-
         val pawnStore = LocalTaskStore { activity.applicationContext }
         val toPawnOptions = { state: JSONObject ->
             com.reamicro.fix.cloud.local.CloudTaskLocalRunner.pawnPropChoices(state).map {
                 com.reamicro.fix.ui.MultiSelectOption(
                     it.propId,
-                    it.label,
+                    it.name,
                     com.reamicro.fix.notification.cloudTaskQualityColor(it.quality),
+                    it.hint,
                 )
             }
         }
@@ -373,13 +344,12 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
         var pawnPropOptions = toPawnOptions(pawnStore.runtimeState(accountId, "pawn"))
 
         var refreshedPawnCatalog: JSONObject? = null
-        val forbiddenPawnProps = settingsDialogButton(
-            activity,
+        lateinit var editor: HostLocalTaskEditor
+        editor = HostLocalTaskEditor(
+            activity, spec, task,
+            "${currentCredential.label.ifBlank { "当前阅微账号" }} · $accountId",
             com.reamicro.fix.ui.multiSelectSummary(pawnPropOptions, pawnPropSelection),
-            colors,
-            SettingsDialogButtonRole.Neutral,
-        ).apply {
-            setOnClickListener {
+            onPawnClick = {
                 showNativeMultiSelectDialog(
                     activity,
                     "禁当期物",
@@ -387,6 +357,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                     pawnPropOptions,
                     pawnPropSelection,
                     refresh = {
+                        check(accountController.currentCloudCredential().accountId == accountId) { "账号已切换，请重新打开任务配置" }
 
                         if (currentCredential.token.isBlank()) {
                             null
@@ -408,85 +379,45 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                     refreshLabel = "刷新期物清单",
                 ) { confirmed ->
                     pawnPropSelection = confirmed
-                    text = com.reamicro.fix.ui.multiSelectSummary(pawnPropOptions, pawnPropSelection)
+                    editor.pawnSummaryView?.text = com.reamicro.fix.ui.multiSelectSummary(pawnPropOptions, pawnPropSelection)
                 }
-            }
-        }
-        val merchantCity = apiServerEdit(activity, colors, "新行商城池 cityCode（留空沿用上次行商）", task?.merchantCityCode.orEmpty())
-        val merchantPrincipal = apiServerEdit(activity, colors, "新行商本金（铜，留空沿用上次）", (task?.merchantPrincipal?.takeIf { it > 0L })?.toString().orEmpty()).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-        val merchantTransport = apiServerEdit(activity, colors, "新行商车马 transportId（留空沿用上次）", (task?.merchantTransportId?.takeIf { it > 0L })?.toString().orEmpty()).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-        }
-
-        var blessingChoice = spec.resolveBlessingChoice(task?.blessingType)
-        val blessingButton = spec.blessingOptions.takeIf { it.isNotEmpty() }?.let {
-            settingsDialogButton(
-                activity,
-                "运签：${com.reamicro.fix.cloud.local.CloudTaskLocalRunner.blessingLabel(blessingChoice)}",
-                colors,
-                SettingsDialogButtonRole.Neutral,
-            ).apply {
-                setOnClickListener {
-                    if (spec.blessingOptions.size <= 1) {
-                        showToast("${spec.title}固定使用求运签")
-                        return@setOnClickListener
-                    }
-                    val next = (spec.blessingOptions.indexOf(blessingChoice) + 1) % spec.blessingOptions.size
-                    blessingChoice = spec.blessingOptions[next]
-                    text = "运签：${com.reamicro.fix.cloud.local.CloudTaskLocalRunner.blessingLabel(blessingChoice)}"
-                }
-            }
-        }
-        card.addView(account, apiServerRowParams(activity))
-        if (spec.rewardTriggered) card.addView(drawLimit, apiServerRowParams(activity))
-        if (spec.autoRead) {
-            card.addView(duration, apiServerRowParams(activity))
-            card.addView(books, apiServerRowParams(activity))
-        }
-        blessingButton?.let { card.addView(it, apiServerRowParams(activity)) }
-        if (spec.taskType == "pawn") card.addView(forbiddenPawnProps, apiServerRowParams(activity))
-        if (spec.merchant) {
-            card.addView(merchantAutoComplete, apiServerRowParams(activity))
-            card.addView(merchantCity, apiServerRowParams(activity))
-            card.addView(merchantPrincipal, apiServerRowParams(activity))
-            card.addView(merchantTransport, apiServerRowParams(activity))
-        }
-        val status = TextView(activity).apply {
-            setTextColor(colors.body)
-            text = when {
-                spec.merchant -> "仅在打开阅微时检查一次行商并记录结果。开启自动完成后，可结算已完成的行商并按配置开启下一趟；离开阅微后不定时执行"
-                spec.taskType == "pawn" -> "按当日期物典当换铜钱；「禁当期物」里锁定的期物会跳过，一项都不锁则任何期物都典当"
-                spec.rewardTriggered -> "启用后按每日上限抽卡；填写 0 会抽到彩筹用完"
-                task == null -> "保存后，下次打开阅微时执行"
-                else -> "保存后，下次打开阅微时使用新配置"
-            }
-            setPadding(24, 8, 24, 8)
-        }
-        card.addView(status, apiServerRowParams(activity))
-        val actions = settingsDialogActions(activity)
-        val saveButton = settingsDialogButton(activity, "保存", colors, SettingsDialogButtonRole.Primary)
-        saveButton.setOnClickListener {
+            },
+        )
+        card.addView(editor.body)
+        val save: () -> Unit = save@{
+            editor.form.clearError()
             val normalizedTime = task?.timeOfDay?.ifBlank { "00:05" } ?: "00:05"
             val durationMinutes = if (spec.autoRead) {
-                duration.text.toString().toIntOrNull()?.takeIf { it in 1..720 }
-                    ?: run { status.text = "阅读时长应为 1 到 720 分钟"; return@setOnClickListener }
+                editor.duration?.text.toString().toIntOrNull()?.takeIf { it in 1..720 }
+                    ?: run { editor.form.showError("阅读时长应为 1 到 720 分钟", editor.duration); return@save }
             } else 30
             val dailyDrawLimit = if (spec.rewardTriggered) {
-                drawLimit.text.toString().toIntOrNull()?.takeIf { it in 0..20 }
-                    ?: run { status.text = "每日抽卡上限应为 0 到 20；0 表示抽完全部彩筹"; return@setOnClickListener }
+                editor.drawLimit?.text.toString().toIntOrNull()?.takeIf { it in 0..20 }
+                    ?: run { editor.form.showError("每日祈愿上限应为 0 到 20", editor.drawLimit); return@save }
             } else 3
-            val selectedBooks = if (spec.autoRead) {
-                runCatching { parseLocalReadingBooks(books.text.toString()) }
-                    .onFailure { status.text = it.message ?: "自定义图书格式无效" }
-                    .getOrNull() ?: return@setOnClickListener
+            val selectedBooks = if (spec.autoRead && !editor.usesRecentBooks) {
+                runCatching {
+                    parseLocalReadingBooks(editor.books?.text.toString()).also {
+                        require(it.isNotEmpty()) { "请至少填写一本图书，或选择最近阅读" }
+                    }
+                }.onFailure { editor.form.showError(it.message ?: "图书格式无效", editor.books) }
+                    .getOrNull() ?: return@save
             } else emptyList()
             if (currentCredential.token.isBlank() || accountId.isBlank()) {
-                status.text = "当前阅微登录密钥不完整，请重新登录后重试"
-                return@setOnClickListener
+                editor.form.showError("当前阅微登录密钥不完整，请重新登录后重试")
+                return@save
             }
-            val enabled = enableAfterSave ?: task?.enabled ?: false
+            fun nonnegative(field: android.widget.EditText?): Long? {
+                val value = field?.text?.toString()?.trim().orEmpty()
+                return if (value.isEmpty()) 0L else value.toLongOrNull()?.takeIf { it >= 0 }
+            }
+            val principal = nonnegative(editor.merchantPrincipal) ?: run {
+                editor.form.showError("本金应为非负整数，留空沿用上次", editor.merchantPrincipal); return@save
+            }
+            val transport = nonnegative(editor.merchantTransport) ?: run {
+                editor.form.showError("车马 ID 应为非负整数，留空沿用上次", editor.merchantTransport); return@save
+            }
+            val enabled = task?.enabled ?: false
             val localTask = LocalTask(
                 taskType = spec.taskType,
                 enabled = enabled,
@@ -494,16 +425,17 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                 durationMinutes = durationMinutes,
                 dailyDrawLimit = dailyDrawLimit,
                 books = selectedBooks,
-                merchantAutoComplete = spec.merchant && merchantAutoComplete.isChecked,
-                merchantCityCode = if (spec.merchant) merchantCity.text.toString().trim() else "",
-                merchantPrincipal = if (spec.merchant) merchantPrincipal.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L else 0L,
-                merchantTransportId = if (spec.merchant) merchantTransport.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L else 0L,
+                hostReadOncePerDay = if (spec.autoRead) editor.readOncePerDay?.isChecked != false else task?.hostReadOncePerDay ?: true,
+                merchantAutoComplete = spec.merchant && editor.merchantAutoComplete?.isChecked == true,
+                merchantCityCode = if (spec.merchant) editor.merchantCity?.text?.toString()?.trim().orEmpty() else "",
+                merchantPrincipal = if (spec.merchant) principal else 0L,
+                merchantTransportId = if (spec.merchant) transport else 0L,
                 forbiddenPawnPropIds = if (spec.taskType == "pawn") {
                     pawnPropSelection
                 } else {
                     task?.forbiddenPawnPropIds ?: emptySet()
                 },
-                blessingType = blessingChoice,
+                blessingType = editor.blessingChoice,
             )
             val store = LocalTaskStore { activity.applicationContext }
             val saved = runCatching {
@@ -512,7 +444,7 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
                 check(latestCredential.token.isNotBlank()) { "登录凭据不可用，请重新登录" }
                 store.saveEditedTask(accountId, localTask, latestCredential.token, task)
             }
-            if (saved.isFailure) { status.text = saved.exceptionOrNull()?.message ?: "任务保存失败"; return@setOnClickListener }
+            if (saved.isFailure) { editor.form.showError(saved.exceptionOrNull()?.message ?: "任务保存失败"); return@save }
 
             if (spec.taskType == "pawn") {
                 refreshedPawnCatalog?.let { catalog ->
@@ -528,20 +460,16 @@ private fun ReaMicroSettingsHook.openLocalAutomationTaskDialog(
             }
             if (enabled) disableCloudAutomationTask(accountId, spec.taskType)
             dialog.dismiss()
-            showToast(if (enableAfterSave == true) "已配置并启用${spec.title}" else "${spec.title}配置已保存")
+            showToast("${spec.title}配置已保存")
 
             publishLocalAutomationChange()
             reloadLocalAutomationState()
         }
-        actions.addView(saveButton, settingsDialogButtonParams(activity))
-        actions.addView(
-            settingsDialogButton(activity, "关闭", colors, SettingsDialogButtonRole.Neutral).apply {
-                setOnClickListener { dialog.dismiss() }
-            },
-            settingsDialogButtonParams(activity),
-        )
-        card.addView(actions)
-        showSettingsDialog(dialog, settingsDialogScroll(activity, card), activity, dismissOnThemeChange = true)
+        HostSettingsDialogs.setActions(dialog, listOf(
+            HostSettingsDialogs.Action("取消", nativeButton = true) { dialog.dismiss() },
+            HostSettingsDialogs.Action("保存", nativeButton = true, onClick = save),
+        ))
+        showSettingsDialog(dialog, HostFormScroll(activity, card), activity, dismissOnThemeChange = true)
     }
 }
 

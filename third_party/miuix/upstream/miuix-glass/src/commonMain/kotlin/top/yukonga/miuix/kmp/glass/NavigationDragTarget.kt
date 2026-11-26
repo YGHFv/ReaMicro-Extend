@@ -61,31 +61,3 @@ internal fun navigationIndicatorBounds(
     val start = left.coerceIn(min, max)
     return Offset(start, right.coerceIn(start, max))
 }
-
-/** Inverse mapping used by hit testing and drag spring targets for variable-width tabs. */
-internal fun navigationSlotAt(position: Float, widths: List<Float>): Float {
-    var start = 0f
-    widths.forEachIndexed { index, width ->
-        if (position < start + width || index == widths.lastIndex) {
-            return index + (position - start) / width.coerceAtLeast(1f)
-        }
-        start += width
-    }
-    return 0f
-}
-
-/** Interpolates the held width between destination centres without a jump at hit boundaries. */
-internal fun navigationDragWidth(position: Float, widths: List<Float>): Float {
-    if (widths.isEmpty()) return 0f
-    var centre = widths.first() / 2f
-    if (position <= centre) return widths.first()
-    for (index in 1..widths.lastIndex) {
-        val nextCentre = centre + (widths[index - 1] + widths[index]) / 2f
-        if (position <= nextCentre) {
-            val fraction = ((position - centre) / (nextCentre - centre).coerceAtLeast(1f)).coerceIn(0f, 1f)
-            return widths[index - 1] + (widths[index] - widths[index - 1]) * fraction
-        }
-        centre = nextCentre
-    }
-    return widths.last()
-}

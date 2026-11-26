@@ -5,7 +5,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
-import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
 import top.yukonga.miuix.kmp.glass.GlassPopupSizing
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
@@ -23,7 +22,7 @@ internal fun ModuleDropdownPreference(
     maxHeight: Dp? = null,
     onExpandedChange: ((Boolean) -> Unit)? = null,
 ) {
-    if (useModuleGlass() && isRuntimeShaderSupported()) {
+    if (useModuleGlass()) {
         GlassDropdownPreference(
             title = title,
             items = items,
@@ -33,7 +32,6 @@ internal fun ModuleDropdownPreference(
             enabled = enabled,
             summary = summary,
             backdrop = LocalModuleSceneBackdrop.current,
-            renderInRootScaffold = !LocalModuleWindowScaffold.current,
             insideMargin = insideMargin,
             sizing = if (maxHeight == null) GlassPopupSizing() else GlassPopupSizing(maxHeight = maxHeight),
             onExpandedChange = onExpandedChange,
@@ -47,7 +45,6 @@ internal fun ModuleDropdownPreference(
             modifier = modifier,
             enabled = enabled,
             summary = summary,
-            renderInRootScaffold = !LocalModuleWindowScaffold.current,
             insideMargin = insideMargin,
             maxHeight = maxHeight,
             onExpandedChange = onExpandedChange,

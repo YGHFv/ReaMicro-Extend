@@ -1502,16 +1502,22 @@ internal fun ReaMicroSettingsHook.renderHostActionCard(rows: List<ActionRow>, co
     nativeUi.column(settingsCardModifier(composer, backgroundOverride), arrangementTop(), alignmentStart(), content, composer)
 }
 internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: Any) {
+    val subtitle = row.subtitle?.takeIf { it.isNotBlank() }
+    val detail = row.detail?.takeIf { it.isNotBlank() && subtitle != null }
     val headline = composableLambda(row.key.hashCode(), FUNCTION2_CLASS) { args ->
         val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
-        renderHostText(row.title, innerComposer, resolvePreviewFontFamily(row.titleFontSelection.orEmpty()))
+        if (subtitle != null && detail != null) {
+            renderHostActionLines(row, subtitle, detail, innerComposer)
+        } else {
+            renderHostText(row.title, innerComposer, resolvePreviewFontFamily(row.titleFontSelection.orEmpty()))
+        }
         targetUnit()
     }
-    val supporting = row.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
+    val supporting = subtitle?.takeIf { detail == null }?.let { text ->
         composableLambda(row.key.hashCode() xor ACTION_SUPPORTING_KEY_MASK, FUNCTION2_CLASS) { args ->
             val innerComposer = args?.getOrNull(0) ?: return@composableLambda targetUnit()
 
-            renderHostSupportingText(subtitle, innerComposer, singleLine = true)
+            renderHostSupportingText(text, innerComposer, singleLine = true)
             targetUnit()
         }
     }
@@ -1530,7 +1536,8 @@ internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: 
         row.onClick != null -> nativeUi.settingsArrow()
         else -> null
     }
-    val baseModifier = rowModifier(true, if (supporting == null) 56 else 68)
+    // Three lines size themselves, so the row keeps its padding at any font scale.
+    val baseModifier = if (detail != null) modifierInstance() else rowModifier(true, if (supporting == null) 56 else 68)
     val modifier = when {
         row.onClick != null && row.onLongClick != null ->
             combinedClickableModifier(
@@ -1554,6 +1561,39 @@ internal fun ReaMicroSettingsHook.renderHostActionRow(row: ActionRow, composer: 
             hasSupporting = supporting != null,
             hasTrailing = trailing != null,
         ),
+    )
+}
+
+private const val ACTION_LINES_INSET = 8
+
+/**
+ * Title and two supporting lines in the headline slot: the host's list row centres that slot
+ * beside the trailing control, where its own three-line layout would pin both to the top.
+ */
+private fun ReaMicroSettingsHook.renderHostActionLines(row: ActionRow, subtitle: String, detail: String, composer: Any) {
+    val lines = functionProxy("ActionRowLines${row.key}", FUNCTION3_CLASS) { args ->
+        val innerComposer = args?.getOrNull(1) ?: return@functionProxy targetUnit()
+        renderHostText(row.title, innerComposer, resolvePreviewFontFamily(row.titleFontSelection.orEmpty()))
+        renderHostSupportingText(subtitle, innerComposer, singleLine = true)
+        renderHostSupportingText(detail, innerComposer, singleLine = true)
+        targetUnit()
+    }
+    val inset = udp(ACTION_LINES_INSET)
+    nativeUi.column(
+        nativeUi.padding(modifierInstance(), 0f, inset, 0f, inset), arrangementTop(), alignmentStart(), lines, composer,
+    )
+}
+
+/** Explanatory text under a settings card, in the host's secondary text colour. */
+internal fun ReaMicroSettingsHook.renderHostCardNote(text: String, composer: Any) {
+    val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
+    nativeUi.text(
+        text = text,
+        composer = composer,
+        color = ui.call("onBackgroundVariant", colorScheme(composer)) as Long,
+        style = typography(composer).method0("getBodyMedium"),
+        defaultMask = TEXT_DEFAULT_MASK and 2.inv(),
+        modifier = nativeUi.padding(modifierInstance(), udp(16), udp(8), udp(16), 0f),
     )
 }
 

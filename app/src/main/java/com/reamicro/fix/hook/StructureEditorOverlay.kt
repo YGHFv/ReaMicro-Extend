@@ -4,8 +4,9 @@ import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -36,10 +37,10 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import kotlinx.coroutines.flow.drop
 import com.reamicro.fix.ui.ModuleTheme
 import com.reamicro.fix.ui.ModuleCircularProgressIndicator
 
@@ -113,7 +114,15 @@ internal fun StructureEditorOverlay(
                 DisposableEffect(shown.identity) {
                     onDispose { if (!visible) retained = null }
                 }
-                var value by remember { mutableStateOf(TextFieldValue(shown.value, TextRange(0, shown.value.length))) }
+                val value = remember { TextFieldState(shown.value, TextRange(0, shown.value.length)) }
+                val currentOnEdited by rememberUpdatedState(onEdited)
+                val currentOnValueChanged by rememberUpdatedState(onValueChanged)
+                LaunchedEffect(value) {
+                    snapshotFlow { value.text.toString() }.drop(1).collect { text ->
+                        currentOnEdited()
+                        currentOnValueChanged(text)
+                    }
+                }
                 val requester = remember { FocusRequester() }
                 LaunchedEffect(shown.identity) {
                     withFrameNanos { }
@@ -126,7 +135,7 @@ internal fun StructureEditorOverlay(
                 val submit = {
                     if (canSave) {
                         keyboard?.hide()
-                        onSave(value.text)
+                        onSave(value.text.toString())
                     }
                 }
                 Column(Modifier.padding(horizontal = horizontal).padding(bottom = bottom)
@@ -146,14 +155,14 @@ internal fun StructureEditorOverlay(
                     HorizontalDivider(Modifier.padding(top = 12.dp), thickness = .8.dp, color = palette.borderVariant)
 
                     TextField(
-                        value = value,
-                        onValueChange = { value = it; onEdited(); onValueChanged(it.text) },
+                        state = value,
                         modifier = Modifier.fillMaxWidth().heightIn(max = fieldMaxHeight).focusRequester(requester)
                             .semantics { error?.let { this.error(it) } },
-                        enabled = visible && !busy, singleLine = shown.singleLine,
+                        enabled = visible && !busy,
+                        lineLimits = if (shown.singleLine) TextFieldLineLimits.SingleLine else TextFieldLineLimits.Default,
                         keyboardOptions = KeyboardOptions(imeAction = if (shown.singleLine) ImeAction.Search else ImeAction.Default,
                             autoCorrectEnabled = !shown.sourceMode),
-                        keyboardActions = KeyboardActions(onSearch = { submit() }),
+                        onKeyboardAction = if (shown.singleLine) ({ submit() }) else null,
                         textStyle = ModuleTheme.typography.bodyLarge.copy(
                             fontFamily = if (shown.sourceMode) FontFamily.Monospace else ModuleTheme.typography.bodyLarge.fontFamily,
                             color = if (visible && !busy) palette.text else palette.caption),

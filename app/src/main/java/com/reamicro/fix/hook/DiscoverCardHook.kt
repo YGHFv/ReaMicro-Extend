@@ -50,7 +50,7 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 val state = frame() ?: return@before
                 if (state.click != null) return@before
                 val click = param.args[host.index("clickable.callback")] ?: return@before
-                if (!host.isCommunityClick(click)) return@before
+                if (!host.isEntryClick(click)) return@before
                 if (ReaMicroSettingsHook.activeInstanceOrNull() == null || discoverIcon.imageVectorOrNull() == null) return@before
                 state.click = click; state.base = param.args[host.index("clickable.modifier")]; state.pendingPadding = true
                 param.result = state.base
@@ -63,12 +63,12 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
                 state.pendingPadding = false; state.row = true
                 param.result = ui.call("fillWidth", param.args[0], 1f)
             })
-            hook("image", before = before@{ param ->
+            hook("rowImage", before = before@{ param ->
                 val state = frame() ?: return@before
                 if (!state.row || state.iconDecorated || state.injected) return@before
                 val hook = ReaMicroSettingsHook.activeInstanceOrNull() ?: return@before
-                param.args[host.index("image.modifier")] = hook.leftCellIconModifier(param.args[host.index("image.composer")]!!, click(state))
-                clearDefault(param, "image", 4)
+                param.args[host.index("rowImage.modifier")] = hook.leftCellIconModifier(param.args[host.index("rowImage.composer")]!!, click(state))
+                clearDefault(param, "rowImage", 4)
                 state.iconDecorated = true
             })
             hook("text", before = before@{ param ->
@@ -109,7 +109,10 @@ internal class DiscoverCardHook(private val classLoader: ClassLoader) {
             hook("divider", before = before@{ param ->
                 val state = frame() ?: return@before
                 state.dividerColor = param.args[host.index("divider.color")] as Long
-                if (state.injected) param.args[host.index("divider.modifier")] = requireNotNull(HostUiBindings.current).value("modifier")
+                if (state.row && state.injected) {
+                    param.args[host.index("divider.modifier")] = requireNotNull(HostUiBindings.current).value("modifier")
+                    state.row = false
+                }
             })
             HookRuntime.deoptimize(host.method("community"))
             HookRuntime.deoptimize(host.method("divider"))

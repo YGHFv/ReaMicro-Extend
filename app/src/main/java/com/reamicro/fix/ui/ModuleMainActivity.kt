@@ -5,7 +5,7 @@ import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.DropdownEntry
 import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import android.content.Context
 import androidx.annotation.StringRes
 import androidx.annotation.PluralsRes
@@ -33,7 +33,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.CapturedAnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
@@ -82,7 +82,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -164,7 +164,6 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.integration.captureBackdrop
@@ -263,7 +262,7 @@ class ModuleMainActivity : ComponentActivity() {
     private val notificationSummary = mutableStateOf("")
     private val logSummary = mutableStateOf("")
     private val rootUi = mutableStateOf<RootModuleStatus?>(null)
-    private val suPathDialog = mutableStateOf<String?>(null)
+    private val suPathDialog = mutableStateOf<TextFieldState?>(null)
     private val rootConfirmation = mutableStateOf<RootEnhancementAction?>(null)
     private val rootModuleDialog = mutableStateOf(false)
     private val rootBusy = mutableStateOf(false)
@@ -427,6 +426,7 @@ class ModuleMainActivity : ComponentActivity() {
 
         setTaskExcludedFromRecents(hideRecentTaskEnabled())
         registerRecordObservers()
+        showPendingNotificationPermission()
         runBg(work = { LocalTaskRunner.retryNotifications(applicationContext) }, then = { refresh() })
         RootTaskBridge.requestSync(applicationContext) { recordRefreshHandler.post { refresh() } }
         refresh()
@@ -451,7 +451,10 @@ class ModuleMainActivity : ComponentActivity() {
     private val recordRefreshHandler = Handler(Looper.getMainLooper())
     private var observingRecords = false
     private val refreshRecords = Runnable {
-        if (observingRecords && !isFinishing && !isDestroyed) refresh()
+        if (observingRecords && !isFinishing && !isDestroyed) {
+            showPendingNotificationPermission()
+            refresh()
+        }
     }
     private val recordPrefsListener =
         android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -468,6 +471,8 @@ class ModuleMainActivity : ComponentActivity() {
             .registerOnSharedPreferenceChangeListener(recordPrefsListener)
         getSharedPreferences(NotificationRecordStore.PREFS_NAME, MODE_PRIVATE)
             .registerOnSharedPreferenceChangeListener(recordPrefsListener)
+        getSharedPreferences(com.reamicro.fix.notification.ModuleNotificationPermission.PREFS_NAME, MODE_PRIVATE)
+            .registerOnSharedPreferenceChangeListener(recordPrefsListener)
     }
 
     private fun unregisterRecordObservers() {
@@ -475,6 +480,8 @@ class ModuleMainActivity : ComponentActivity() {
         getSharedPreferences(LocalTaskStore.PREFS_NAME, MODE_PRIVATE)
             .unregisterOnSharedPreferenceChangeListener(recordPrefsListener)
         getSharedPreferences(NotificationRecordStore.PREFS_NAME, MODE_PRIVATE)
+            .unregisterOnSharedPreferenceChangeListener(recordPrefsListener)
+        getSharedPreferences(com.reamicro.fix.notification.ModuleNotificationPermission.PREFS_NAME, MODE_PRIVATE)
             .unregisterOnSharedPreferenceChangeListener(recordPrefsListener)
         recordRefreshHandler.removeCallbacks(refreshRecords)
     }
@@ -636,8 +643,10 @@ class ModuleMainActivity : ComponentActivity() {
         val pagerMode = settings.pagerMode
         val interceptPager = pagerMode == PagerInterceptionMode.CrossAxis
 
-        val overlayOpen = textDialog.value != null || editorDialog.value != null || suPathDialog.value != null ||
-            rootModuleDialog.value || rootConfirmation.value != null || recordsDeleteConfirmation || accountsUi.open
+        val overlayOpen = hasOpenOverlay()
+        LaunchedEffect(overlayOpen, aboutEffectResumed.value) {
+            if (!overlayOpen && aboutEffectResumed.value) showPendingNotificationPermission()
+        }
         val userScrollEnabled = !overlayOpen && !taskDragging && !taskSortPopupOpen && !recordsDeleting
         BackHandler(enabled = recordsSelecting && !overlayOpen && !recordsDeleting) { exitRecordSelection() }
         LaunchedEffect(pagerState.settledPage) {
@@ -688,7 +697,7 @@ class ModuleMainActivity : ComponentActivity() {
         val bottomBackdrop = rememberLayerBackdrop()
         val recordScene = themeConfig.needsSceneBackdrop(blurSupported)
         val visiblePageIndices = remember(pagerState) {
-            derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.map { it.index }.sorted() }
+            computedStateOf { pagerState.layoutInfo.visiblePagesInfo.map { it.index }.sorted() }
         }
         val visiblePages = remember(pagerState, visiblePageIndices) {
             {
@@ -798,7 +807,7 @@ class ModuleMainActivity : ComponentActivity() {
                     val pageScroll = scrollBehaviors[page]
                     val pageBackdrop = pageBackdrops[page]
                     val pageVisible = remember(pagerState, page) {
-                        derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.any { it.index == page } }
+                        computedStateOf { pagerState.layoutInfo.visiblePagesInfo.any { it.index == page } }
                     }
                     // A local Scaffold owns only page chrome. All popups stay in the global host.
                     Scaffold(
@@ -819,6 +828,11 @@ class ModuleMainActivity : ComponentActivity() {
                                             uiQuantity(R.plurals.records_selected_count, selectedRecordKeys.size)
                                         } else tabTitles[page],
                                         scrollBehavior = pageScroll,
+                                        isContentScrolled = when (page) {
+                                            TAB_TASKS -> tasksListState.canScrollBackward
+                                            TAB_RECORDS -> recordsState.canScrollBackward
+                                            else -> configListState.canScrollBackward
+                                        },
                                         config = themeConfig,
                                         backdrop = pageBackdrop,
                                         navigationIcon = {
@@ -902,6 +916,7 @@ class ModuleMainActivity : ComponentActivity() {
                                     TasksPage(
                                         contentPadding = listPadding,
                                         listState = tasksListState,
+                                        scrollBehavior = pageScroll,
                                         canStartDrag = {
                                             currentPage == TAB_TASKS && pagerState.settledPage == TAB_TASKS &&
                                                 !pagerState.isScrollInProgress && !isNavigating && !overlayOpen &&
@@ -921,10 +936,10 @@ class ModuleMainActivity : ComponentActivity() {
                             } else if (page == TAB_ABOUT) {
 
                                 val aboutVisible by remember(pagerState) {
-                                    derivedStateOf { pagerState.layoutInfo.visiblePagesInfo.any { it.index == TAB_ABOUT } }
+                                    computedStateOf { pagerState.layoutInfo.visiblePagesInfo.any { it.index == TAB_ABOUT } }
                                 }
                                 val aboutPlaying by remember(pagerState, isNavigating, blurSupported) {
-                                    derivedStateOf {
+                                    computedStateOf {
                                         blurSupported && aboutEffectResumed.value &&
                                             pagerState.currentPage == TAB_ABOUT && !isNavigating &&
                                             !pagerState.isScrollInProgress && pagerState.settledPage == TAB_ABOUT
@@ -960,7 +975,11 @@ class ModuleMainActivity : ComponentActivity() {
     @Composable
     private fun RecordsPage(contentPadding: PaddingValues, scrollBehavior: ScrollBehavior, listState: LazyListState) {
         val list = visibleRecords()
-        LaunchedEffect(recordsAccount) { listState.scrollToItem(0) }
+        LaunchedEffect(recordsAccount) {
+            listState.scrollToItem(0)
+            scrollBehavior.state.heightOffset = 0f
+            scrollBehavior.state.contentOffset = 0f
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -999,7 +1018,7 @@ class ModuleMainActivity : ComponentActivity() {
                 contentType = { _, _ -> "record" },
             ) { index, row ->
 
-                AnimatedVisibility(
+                CapturedAnimatedVisibility(
                     visible = row.key !in exitingRecordKeys,
                     modifier = if (recordsDeleting) Modifier else Modifier.animateItem(),
                     exit = fadeOut(tween(220)) + shrinkVertically(tween(260)),
@@ -1092,10 +1111,15 @@ class ModuleMainActivity : ComponentActivity() {
     @Composable
     private fun TasksPage(
         contentPadding: PaddingValues, listState: LazyListState,
+        scrollBehavior: ScrollBehavior,
         canStartDrag: () -> Boolean,
     ) {
         val sourceRows = taskRows.value.filter { tasksAccount == null || it.accountId == tasksAccount }
-        LaunchedEffect(tasksAccount) { listState.scrollToItem(0) }
+        LaunchedEffect(tasksAccount) {
+            listState.scrollToItem(0)
+            scrollBehavior.state.heightOffset = 0f
+            scrollBehavior.state.contentOffset = 0f
+        }
         val scopedOverview = if (tasksAccount == null) overviewText.value else {
             val now = System.currentTimeMillis()
             val next = sourceRows.filter { it.task.enabled && it.effectiveNextRunAt > now }
@@ -1132,7 +1156,7 @@ class ModuleMainActivity : ComponentActivity() {
             modifier = Modifier.fillMaxSize()
                 .taskReorderContainer(reorderState)
                 // PullToRefresh already forwards this page's top-bar scroll connection.
-                .modulePageScroll(),
+                .modulePageScroll(scrollBehavior, connectNestedScroll = false),
             overscrollEffect = null,
             contentPadding = contentPadding,
         ) {
@@ -1321,7 +1345,7 @@ class ModuleMainActivity : ComponentActivity() {
                 GroupTitle(uiText(R.string.section_notifications_logs))
                 Card(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp), insideMargin = PaddingValues(0.dp)) {
                     ArrowPreference(title = uiText(R.string.permission_notification_settings),
-                        summary = uiText(R.string.root_notification_hint), onClick = ::requestNotificationPermission)
+                        summary = uiText(R.string.root_notification_hint), onClick = { requestNotificationPermission() })
                 }
             }
             item(key = "notification-records", contentType = "actions") {
@@ -1392,7 +1416,7 @@ class ModuleMainActivity : ComponentActivity() {
             accountsUi.busy = false
             result.onSuccess { count ->
                 nicknameRefreshAttempts.clear()
-                accountsUi.credential = ""
+                accountsUi.credential = TextFieldState()
                 accountsUi.show(AccountDialog.Manage)
                 toast(uiText(R.string.accounts_imported, count))
                 refresh()
@@ -2161,7 +2185,7 @@ class ModuleMainActivity : ComponentActivity() {
                     ArrowPreference(
                         title = "Miuix",
                         summary = uiText(R.string.about_miuix_credit),
-                        onClick = { openUrl("https://github.com/miuix-kotlin-multiplatform/miuix") },
+                        onClick = { openUrl("https://github.com/compose-miuix-ui/miuix") },
                     )
                     ArrowPreference(
                         title = "Scripta",
@@ -2234,31 +2258,30 @@ class ModuleMainActivity : ComponentActivity() {
             onSaveRemark = ::saveAccountRemark,
             onDelete = ::deleteAccount,
         )
-        if (recordsDeleteConfirmation) {
-            AppWindowDialog(
-                show = true,
-                title = uiText(R.string.records_delete_title),
-                onClose = { if (!recordsDeleting) recordsDeleteConfirmation = false },
-                primaryLabel = uiText(R.string.records_delete_action),
-                onPrimary = ::deleteSelectedRecords,
-                primaryEnabled = selectedRecordKeys.isNotEmpty() && !recordsDeleting,
-                dangerous = true,
-                dismissEnabled = !recordsDeleting,
-            ) {
-                Text(uiQuantity(R.plurals.records_delete_confirm, selectedRecordKeys.size))
-            }
+        AppWindowDialog(
+            show = recordsDeleteConfirmation,
+            title = uiText(R.string.records_delete_title),
+            onClose = { if (!recordsDeleting) recordsDeleteConfirmation = false },
+            primaryLabel = uiText(R.string.records_delete_action),
+            onPrimary = ::deleteSelectedRecords,
+            primaryEnabled = selectedRecordKeys.isNotEmpty() && !recordsDeleting,
+            dangerous = true,
+            dismissEnabled = !recordsDeleting,
+        ) {
+            Text(uiQuantity(R.plurals.records_delete_confirm, selectedRecordKeys.size))
         }
         RootModuleDialog(
             show = rootModuleDialog.value, busy = rootBusy.value, status = rootUi.value,
             lastError = RootTaskBridge.lastOperationError(applicationContext),
             onClose = { rootModuleDialog.value = false },
             onInstall = { rootModuleDialog.value = false; rootAction { RootTaskBridge.installOrUpdate(uiContext) } },
-            onSuPath = { rootModuleDialog.value = false; suPathDialog.value = RootTaskBridge.customSuPath(applicationContext) },
+            onSuPath = { rootModuleDialog.value = false; suPathDialog.value = TextFieldState(RootTaskBridge.customSuPath(applicationContext)) },
             onUninstall = { rootModuleDialog.value = false; rootConfirmation.value = RootEnhancementAction.UNINSTALL },
         )
-        rootConfirmation.value?.let { action ->
+        RetainedWindowContent(rootConfirmation.value) { action, show, onDismissFinished ->
             RootEnhancementDialog(
-                show = true, title = uiText(R.string.root_enhancement_title),
+                show = show, title = uiText(R.string.root_enhancement_title),
+                onDismissFinished = onDismissFinished,
                 onClose = { rootConfirmation.value = null },
                 primaryLabel = uiText(when (action) {
                     RootEnhancementAction.ENABLE -> R.string.root_enable_action
@@ -2287,16 +2310,18 @@ class ModuleMainActivity : ComponentActivity() {
                 }
             }
         }
-        suPathDialog.value?.let { path ->
+        RetainedWindowContent(suPathDialog.value) { path, show, onDismissFinished ->
             RootEnhancementDialog(
-                show = true, title = uiText(R.string.execution_su_path),
+                show = show, title = uiText(R.string.execution_su_path),
+                onDismissFinished = onDismissFinished,
                 onClose = { suPathDialog.value = null },
                 primaryLabel = uiText(R.string.action_save), primaryEnabled = !rootBusy.value,
                 onPrimary = {
                     if (!rootBusy.value) {
+                        val requestedPath = path.text.toString()
                         rootBusy.value = true
                         runBg(
-                            work = { runCatching { RootTaskBridge.setCustomSuPath(applicationContext, path) } },
+                            work = { runCatching { RootTaskBridge.setCustomSuPath(applicationContext, requestedPath) } },
                             then = { result ->
                                 rootBusy.value = false
                                 result.onSuccess {
@@ -2309,21 +2334,22 @@ class ModuleMainActivity : ComponentActivity() {
                 },
             ) {
                 EditorField(label = uiText(R.string.execution_su_path), hint = uiText(R.string.execution_su_path_hint),
-                    value = path, onValue = { suPathDialog.value = it })
+                    state = path)
                 Text(uiText(R.string.execution_su_path_description),
                     style = MiuixTheme.textStyles.body2, modifier = Modifier.padding(vertical = 12.dp))
             }
         }
-        textDialog.value?.let { dialog ->
+        RetainedWindowContent(textDialog.value) { dialog, show, onDismissFinished ->
             val primary = dialog.actions.singleOrNull()
             AppWindowDialog(
-                show = true, title = dialog.title(), onClose = { textDialog.value = null },
+                show = show, title = dialog.title(), onClose = { textDialog.value = null },
+                onDismissFinished = onDismissFinished,
                 primaryLabel = primary?.let { uiText(it.first) }, onPrimary = primary?.second,
             ) {
                 Text(dialog.content(), style = MiuixTheme.textStyles.body2,
                     color = MiuixTheme.colorScheme.onSurfaceContainer)
                 if (dialog.actions.size > 1) {
-                    Card(insideMargin = PaddingValues(0.dp)) {
+                    ModuleDialogCard {
                         dialog.actions.forEach { (label, action) ->
                             ArrowPreference(title = uiText(label), onClick = action)
                         }
@@ -2331,126 +2357,103 @@ class ModuleMainActivity : ComponentActivity() {
                 }
             }
         }
-        editorDialog.value?.let { editor ->
-            key(editor) { TaskEditorDialog(editor) }
+        RetainedWindowContent(editorDialog.value) { editor, show, onDismissFinished ->
+            key(editor) { TaskEditorDialog(editor, show, onDismissFinished) }
         }
     }
 
     @Composable
-    private fun TaskEditorDialog(editor: TaskEditor) {
-
+    private fun TaskEditorDialog(editor: TaskEditor, show: Boolean, onDismissFinished: () -> Unit) {
         val taskTextStyles = MiuixTheme.textStyles.copy(
-            body2 = MiuixTheme.textStyles.body2.copy(fontSize = 15.sp, lineHeight = 20.sp),
+            body2 = MiuixTheme.textStyles.body2.copy(fontSize = 14.sp, lineHeight = 20.sp),
         )
         MiuixTheme(colors = MiuixTheme.colorScheme, textStyles = taskTextStyles) {
-        AppWindowDialog(
-            show = true, title = taskTitle(editor.task.taskType),
-            onClose = { if (!editor.saving) editorDialog.value = null },
-            dismissEnabled = !editor.saving,
-            primaryLabel = uiText(R.string.action_save),
-            primaryEnabled = !editor.saving,
-            onPrimary = { saveTaskEdits(editor) },
-        ) {
-            Text(accountLabel(editor.accountId), style = MiuixTheme.textStyles.body2,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary, modifier = Modifier.padding(bottom = 12.dp))
-            val spec = editor.spec
-            val customDrawTime = editor.values[FIELD_DRAW_CUSTOM_TIME] == "true"
-            if (spec?.rewardTriggered == true) {
-                SwitchPreference(
-                    title = uiText(R.string.task_wish_custom_time),
-                    summary = if (customDrawTime) uiText(R.string.task_wish_custom_time_hint)
-                        else uiText(R.string.task_wish_trigger),
-                    checked = customDrawTime,
-                    enabled = !editor.saving,
-                    onCheckedChange = { editor.values[FIELD_DRAW_CUSTOM_TIME] = it.toString() },
-                    insideMargin = PaddingValues(vertical = 12.dp),
-                )
-            }
-            if (spec?.merchant != true && (spec?.rewardTriggered != true || customDrawTime)) {
-                TaskTimePicker(
-                    label = uiText(R.string.field_time),
-                    value = editor.values[FIELD_TIME].orEmpty(),
-                    onValueChange = { editor.values[FIELD_TIME] = it },
-                    minMinutes = if (spec?.autoRead == true) {
-                        (editor.textFields[FIELD_DURATION]?.text?.toString()?.toIntOrNull() ?: editor.task.durationMinutes).coerceIn(1, 720)
-                    } else 0,
-                )
-            }
-            if (spec?.autoRead == true) {
-                val duration = (editor.textFields[FIELD_DURATION]?.text?.toString()?.toIntOrNull()
-                    ?: editor.task.durationMinutes).coerceIn(1, 720)
-                Text(
-                    text = uiText(R.string.auto_read_time_lock_hint, duration, AutoReadTimeLock.formatTime(duration)),
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    modifier = Modifier.padding(bottom = 12.dp),
-                )
-                EditorField(
-                    label = uiText(R.string.field_duration),
-                    hint = uiText(R.string.field_duration_hint),
-                    state = editor.textFields.getValue(FIELD_DURATION),
-                )
-                EditorField(
-                    label = uiText(R.string.field_books),
-                    hint = uiText(R.string.field_books_hint),
-                    state = editor.textFields.getValue(FIELD_BOOKS),
-                    maxLines = 6,
-                )
-            }
-            if (spec?.rewardTriggered == true) {
-                Text(
-                    text = uiText(R.string.task_wish_schedule_hint),
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    modifier = Modifier.padding(bottom = 12.dp),
-                )
-                EditorField(
-                    label = uiText(R.string.field_draw_limit),
-                    hint = uiText(R.string.field_draw_limit_hint),
-                    state = editor.textFields.getValue(FIELD_DRAW_LIMIT),
-                )
-            }
-            if (spec?.taskType == "pawn") {
-                PawnMultiSelectEntry(editor)
-            }
-            if (spec?.merchant == true) {
-                CityDropdown(editor, editor.merchantLoading)
-                TransportDropdown(editor, editor.merchantLoading)
-            }
-            if (spec != null && spec.blessingOptions.isNotEmpty()) {
-
-                BlessingChooser(editor, spec)
-            }
-            if (spec?.merchant == true) {
-                PrincipalSlider(editor)
-            }
-            editor.multiOpenLabel?.let { label ->
-                key(label) { MultiSelectOverlay(editor, label) }
+            AppWindowDialog(
+                show = show, title = taskTitle(editor.task.taskType),
+                onDismissFinished = onDismissFinished,
+                onClose = { if (!editor.saving) editorDialog.value = null },
+                dismissEnabled = !editor.saving,
+                primaryLabel = uiText(R.string.action_save),
+                primaryEnabled = !editor.saving,
+                onPrimary = { saveTaskEdits(editor) },
+            ) {
+                Text(accountLabel(editor.accountId), style = MiuixTheme.textStyles.body2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary, modifier = Modifier.padding(bottom = 12.dp))
+                val spec = editor.spec
+                val customDrawTime = editor.values[FIELD_DRAW_CUSTOM_TIME] == "true"
+                if (spec?.rewardTriggered == true) {
+                    SwitchPreference(
+                        title = uiText(R.string.task_wish_custom_time),
+                        summary = if (customDrawTime) uiText(R.string.task_wish_custom_time_hint)
+                            else uiText(R.string.task_wish_trigger),
+                        checked = customDrawTime,
+                        enabled = !editor.saving,
+                        onCheckedChange = { editor.values[FIELD_DRAW_CUSTOM_TIME] = it.toString() },
+                        insideMargin = PaddingValues(vertical = 12.dp),
+                    )
+                }
+                if (spec?.merchant != true && (spec?.rewardTriggered != true || customDrawTime)) {
+                    TaskTimePicker(
+                        label = uiText(R.string.field_time),
+                        value = editor.values[FIELD_TIME].orEmpty(),
+                        onValueChange = { editor.values[FIELD_TIME] = it },
+                        minMinutes = if (spec?.autoRead == true) {
+                            (editor.textFields[FIELD_DURATION]?.text?.toString()?.toIntOrNull() ?: editor.task.durationMinutes).coerceIn(1, 720)
+                        } else 0,
+                    )
+                }
+                if (spec?.autoRead == true) {
+                    val duration = (editor.textFields[FIELD_DURATION]?.text?.toString()?.toIntOrNull()
+                        ?: editor.task.durationMinutes).coerceIn(1, 720)
+                    Text(
+                        text = uiText(R.string.auto_read_time_lock_hint, duration, AutoReadTimeLock.formatTime(duration)),
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                    EditorField(
+                        label = uiText(R.string.field_duration),
+                        hint = uiText(R.string.field_duration_hint),
+                        state = editor.textFields.getValue(FIELD_DURATION),
+                    )
+                    EditorField(
+                        label = uiText(R.string.field_books),
+                        hint = uiText(R.string.field_books_hint),
+                        state = editor.textFields.getValue(FIELD_BOOKS),
+                        maxLines = 6,
+                    )
+                }
+                if (spec?.rewardTriggered == true) {
+                    Text(
+                        text = uiText(R.string.task_wish_schedule_hint),
+                        style = MiuixTheme.textStyles.body2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                    EditorField(
+                        label = uiText(R.string.field_draw_limit),
+                        hint = uiText(R.string.field_draw_limit_hint),
+                        state = editor.textFields.getValue(FIELD_DRAW_LIMIT),
+                    )
+                }
+                if (spec?.taskType == "pawn") {
+                    PawnMultiSelectEntry(editor)
+                }
+                if (spec?.merchant == true) {
+                    CityDropdown(editor, editor.merchantLoading)
+                    TransportDropdown(editor, editor.merchantLoading)
+                }
+                if (spec != null && spec.blessingOptions.isNotEmpty()) {
+                    BlessingChooser(editor, spec)
+                }
+                if (spec?.merchant == true) {
+                    PrincipalSlider(editor)
+                }
+                RetainedWindowContent(editor.multiOpenLabel.takeIf { show }) { label, pickerShown, pickerDismissed ->
+                    key(label) { MultiSelectOverlay(editor, label, pickerShown, pickerDismissed) }
+                }
             }
         }
-        }
-    }
-
-    @Composable
-    private fun EditorField(
-        label: String,
-        hint: String,
-        value: String,
-        onValue: (String) -> Unit,
-        maxLines: Int = 1,
-    ) {
-        Text(label, style = MiuixTheme.textStyles.main)
-        Spacer(Modifier.height(6.dp))
-
-        TextField(
-            value = value,
-            onValueChange = onValue,
-            label = hint,
-            modifier = Modifier.fillMaxWidth(),
-            maxLines = maxLines,
-            singleLine = maxLines == 1,
-        )
-        Spacer(Modifier.height(12.dp))
     }
 
     @Composable
@@ -2462,7 +2465,7 @@ class ModuleMainActivity : ComponentActivity() {
     ) {
         Text(label, style = MiuixTheme.textStyles.main)
         Spacer(Modifier.height(6.dp))
-        TextField(
+        ModuleDialogTextField(
             state = state,
             label = hint,
             modifier = Modifier.fillMaxWidth(),
@@ -2515,7 +2518,7 @@ class ModuleMainActivity : ComponentActivity() {
             ),
             textStyles = MiuixTheme.textStyles,
         ) {
-            if (useModuleGlass() && isRuntimeShaderSupported()) {
+            if (useModuleGlass()) {
                 top.yukonga.miuix.kmp.integration.EntryGlassDropdownPreference(
                     entry = entry,
                     title = title,
@@ -2524,34 +2527,22 @@ class ModuleMainActivity : ComponentActivity() {
                     enabled = choices.isNotEmpty(),
                     insideMargin = PaddingValues(vertical = 8.dp),
                     sizing = top.yukonga.miuix.kmp.glass.GlassPopupSizing(maxHeight = 320.dp),
-                    renderInRootScaffold = !LocalModuleWindowScaffold.current,
                     onExpandedChange = { expanded ->
                         if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
                     },
                 )
             } else {
-                if (LocalModuleWindowScaffold.current) {
-                    top.yukonga.miuix.kmp.preference.OverlayDropdownPreference(
-                        entry = entry,
-                        title = title,
-                        summary = summary,
-                        enabled = choices.isNotEmpty(),
-                        insideMargin = PaddingValues(vertical = 8.dp),
-                        maxHeight = 320.dp,
-                        renderInRootScaffold = false,
-                        onExpandedChange = { expanded ->
-                            if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
-                        },
-                    )
-                } else {
-                    WindowDropdownPreference(
-                        entry = entry, title = title, summary = summary, enabled = choices.isNotEmpty(),
-                        insideMargin = PaddingValues(vertical = 8.dp), maxHeight = 320.dp,
-                        onExpandedChange = { expanded ->
-                            if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
-                        },
-                    )
-                }
+                OverlayDropdownPreference(
+                    entry = entry,
+                    title = title,
+                    summary = summary,
+                    enabled = choices.isNotEmpty(),
+                    insideMargin = PaddingValues(vertical = 8.dp),
+                    maxHeight = 320.dp,
+                    onExpandedChange = { expanded ->
+                        if (expanded) { focusManager.clearFocus(); keyboard?.hide() }
+                    },
+                )
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -2735,7 +2726,7 @@ class ModuleMainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun MultiSelectOverlay(editor: TaskEditor, label: String) {
+    private fun MultiSelectOverlay(editor: TaskEditor, label: String, show: Boolean, onDismissFinished: () -> Unit) {
         val options = editor.multiOptions[label].orEmpty()
         val picked = remember(label) {
             mutableStateListOf<String>().apply {
@@ -2763,7 +2754,8 @@ class ModuleMainActivity : ComponentActivity() {
 
         ModuleWindowDialog(
             title = uiText(R.string.field_pawn),
-            show = true,
+            show = show,
+            onDismissFinished = onDismissFinished,
             onClose = { editor.multiOpenLabel = null },
         ) {
             Column(
@@ -2794,7 +2786,8 @@ class ModuleMainActivity : ComponentActivity() {
                                 .clickable {
                                     if (locked) picked.remove(option.value) else picked.add(option.value)
                                 }
-                                .padding(vertical = 6.dp),
+                                .heightIn(min = 48.dp)
+                                .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
 
@@ -2841,7 +2834,24 @@ class ModuleMainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestNotificationPermission() {
+    private fun showPendingNotificationPermission() {
+        if (hasOpenOverlay()) return
+        val channelId = com.reamicro.fix.notification.ModuleNotificationPermission.takePendingChannel(this) ?: return
+        textDialog.value = TextDialogUi(
+            title = { uiText(R.string.notification_permission_title) },
+            content = { uiText(R.string.notification_permission_explanation) },
+            actions = listOf(R.string.notification_permission_enable to {
+                textDialog.value = null
+                requestNotificationPermission(channelId)
+            }),
+        )
+    }
+
+    private fun hasOpenOverlay(): Boolean =
+        textDialog.value != null || editorDialog.value != null || suPathDialog.value != null ||
+            rootModuleDialog.value || rootConfirmation.value != null || recordsDeleteConfirmation || accountsUi.open
+
+    private fun requestNotificationPermission(channelId: String? = null) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
             (!uiPrefBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED) ||
@@ -2850,8 +2860,12 @@ class ModuleMainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             runCatching {
-                startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName))
+                val channelSettings = channelId != null && CloudTaskNotifications.hasPermission(this) &&
+                    getSystemService(android.app.NotificationManager::class.java)?.areNotificationsEnabled() == true
+                startActivity(Intent(if (channelSettings) android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS
+                    else android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                    .apply { if (channelSettings) putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, channelId) })
             }.onFailure { toast(uiText(R.string.error_open_settings)) }
         }
     }

@@ -60,8 +60,9 @@ internal class BookshelfCompletionHook(
     private val dexKitScanGeneration = AtomicInteger()
     private val dexKitGateGeneration = AtomicInteger()
     private var headerHook: BookshelfHeaderHook? = null
-    private val styleState by lazy { ui.mutableState(1) }
-    private val settingsState by lazy { ui.mutableState(settingsProvider()) }
+    // Fail installation before callbacks can run when the native UI contract is unavailable.
+    private val styleState = ui.mutableState(1)
+    private val settingsState = ui.mutableState(settingsProvider())
     private var observedPreferences: SharedPreferences? = null
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == ModuleSettings.KEY_MODULE_ENABLED || key?.startsWith("shelf_") == true) {

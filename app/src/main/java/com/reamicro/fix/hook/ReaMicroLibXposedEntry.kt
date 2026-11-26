@@ -54,9 +54,9 @@ class ReaMicroLibXposedEntry : XposedModule() {
         configureHostQueries(loader, applicationInfo)
         startup.observe(
             accept = { application ->
-                val version = com.reamicro.fix.core.HostSupportedVersions.inspect(application, applicationInfo.sourceDir)
-                if (!version.accepted) {
-                    HookRuntime.logAlways("ReaMicro skipped unsupported host: ${version.reason}")
+                val archive = HostPackages.inspect(application, applicationInfo.sourceDir)
+                if (!archive.accepted) {
+                    HookRuntime.logAlways("ReaMicro skipped host: ${archive.reason}")
                     false
                 } else {
                     HookRuntime.setFeaturesEnabled(application.getSharedPreferences(
@@ -101,10 +101,10 @@ class ReaMicroLibXposedEntry : XposedModule() {
         val resumed = state.getOrNull(4) as? Boolean ?: (composition != null)
         var scanStarted = false
         try {
-            val version = com.reamicro.fix.core.HostSupportedVersions.inspect(
+            val archive = HostPackages.inspect(
                 application, application.applicationInfo.sourceDir,
             )
-            check(version.accepted) { version.reason }
+            check(archive.accepted) { archive.reason }
             initializeGeneration(param)
             configureHostQueries(loader, application.applicationInfo)
             hookEntry.attachStartupContext(application)

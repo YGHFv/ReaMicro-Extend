@@ -241,48 +241,6 @@ fun DropdownImpl(
 }
 
 /**
- * The implementation of the spinner.
- *
- * @param entry the [DropdownItem] to be shown in the spinner.
- * @param entryCount the count of the entries in the spinner.
- * @param isSelected whether the entry is selected.
- * @param index the index of the entry.
- * @param spinnerColors the [DropdownColors] used to style the entry row.
- * @param dialogMode whether the spinner is in dialog mode.
- * @param onSelectedIndexChange the callback to be invoked when the selected index of the spinner is changed.
- */
-@Deprecated(
-    message = "Use DropdownImpl instead. SpinnerItemImpl is a thin alias kept for compatibility.",
-    replaceWith = ReplaceWith(
-        "DropdownImpl(item = entry, optionSize = entryCount, isSelected = isSelected, " +
-            "index = index, dropdownColors = spinnerColors, enabled = entry.enabled, " +
-            "dialogMode = dialogMode, onSelectedIndexChange = onSelectedIndexChange)",
-    ),
-    level = DeprecationLevel.WARNING,
-)
-@Composable
-fun SpinnerItemImpl(
-    entry: DropdownItem,
-    entryCount: Int,
-    isSelected: Boolean,
-    index: Int,
-    spinnerColors: DropdownColors,
-    dialogMode: Boolean = false,
-    onSelectedIndexChange: (Int) -> Unit,
-) {
-    DropdownImpl(
-        item = entry,
-        optionSize = entryCount,
-        isSelected = isSelected,
-        index = index,
-        dropdownColors = spinnerColors,
-        enabled = entry.enabled,
-        dialogMode = dialogMode,
-        onSelectedIndexChange = onSelectedIndexChange,
-    )
-}
-
-/**
  * Colors used by dropdown option rows.
  *
  * @param contentColor The text color of an unselected option.
@@ -316,10 +274,37 @@ data class DropdownColors(
  * when true, each item's [DropdownItem.enabled] value is still respected.
  */
 @Stable
-data class DropdownEntry(
-    val items: List<DropdownItem>,
+class DropdownEntry(
+    items: List<DropdownItem>,
     val enabled: Boolean = true,
-)
+) {
+    val items: List<DropdownItem> = if (items.isEmpty()) emptyList() else items.toList()
+
+    fun copy(
+        items: List<DropdownItem> = this.items,
+        enabled: Boolean = this.enabled,
+    ): DropdownEntry = DropdownEntry(
+        items = items,
+        enabled = enabled,
+    )
+
+    operator fun component1(): List<DropdownItem> = items
+    operator fun component2(): Boolean = enabled
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is DropdownEntry) return false
+        return items == other.items && enabled == other.enabled
+    }
+
+    override fun hashCode(): Int {
+        var result = items.hashCode()
+        result = 31 * result + enabled.hashCode()
+        return result
+    }
+
+    override fun toString(): String = "DropdownEntry(items=$items, enabled=$enabled)"
+}
 
 /**
  * An item shown inside a dropdown, spinner, or dropdown menu.
@@ -336,15 +321,17 @@ data class DropdownEntry(
  *   recursively. Stabilize this list (e.g. via `remember`) to avoid unnecessary recomposition.
  */
 @Stable
-data class DropdownItem(
+class DropdownItem(
     val text: String,
     val enabled: Boolean = true,
     val selected: Boolean = false,
     val onClick: (() -> Unit)? = null,
     val icon: @Composable ((Modifier) -> Unit)? = null,
     val summary: String? = null,
-    val children: List<DropdownItem>? = null,
+    children: List<DropdownItem>? = null,
 ) {
+    val children: List<DropdownItem>? = children?.let { if (it.isEmpty()) emptyList() else it.toList() }
+
     /**
      * [SpinnerEntry] compatibility
      */
@@ -357,6 +344,57 @@ data class DropdownItem(
         icon = icon,
         summary = summary,
     )
+
+    fun copy(
+        text: String = this.text,
+        enabled: Boolean = this.enabled,
+        selected: Boolean = this.selected,
+        onClick: (() -> Unit)? = this.onClick,
+        icon: @Composable ((Modifier) -> Unit)? = this.icon,
+        summary: String? = this.summary,
+        children: List<DropdownItem>? = this.children,
+    ): DropdownItem = DropdownItem(
+        text = text,
+        enabled = enabled,
+        selected = selected,
+        onClick = onClick,
+        icon = icon,
+        summary = summary,
+        children = children,
+    )
+
+    operator fun component1(): String = text
+    operator fun component2(): Boolean = enabled
+    operator fun component3(): Boolean = selected
+    operator fun component4(): (() -> Unit)? = onClick
+    operator fun component5(): @Composable ((Modifier) -> Unit)? = icon
+    operator fun component6(): String? = summary
+    operator fun component7(): List<DropdownItem>? = children
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is DropdownItem) return false
+        return text == other.text &&
+            enabled == other.enabled &&
+            selected == other.selected &&
+            onClick == other.onClick &&
+            icon == other.icon &&
+            summary == other.summary &&
+            children == other.children
+    }
+
+    override fun hashCode(): Int {
+        var result = text.hashCode()
+        result = 31 * result + enabled.hashCode()
+        result = 31 * result + selected.hashCode()
+        result = 31 * result + (onClick?.hashCode() ?: 0)
+        result = 31 * result + (icon?.hashCode() ?: 0)
+        result = 31 * result + (summary?.hashCode() ?: 0)
+        result = 31 * result + (children?.hashCode() ?: 0)
+        return result
+    }
+
+    override fun toString(): String = "DropdownItem(text=$text, enabled=$enabled, selected=$selected, onClick=$onClick, icon=$icon, summary=$summary, children=$children)"
 }
 
 object DropdownDefaults {
@@ -478,59 +516,3 @@ private val ChevronIconBaseModifier = Modifier
 private val IconCellModifier = Modifier
     .sizeIn(minWidth = DropdownDefaults.IconMinSize, minHeight = DropdownDefaults.IconMinSize)
     .padding(end = DropdownDefaults.IconEndPadding)
-
-@Deprecated(
-    message = "Use DropdownDefaults instead.",
-    replaceWith = ReplaceWith("DropdownDefaults"),
-)
-object SpinnerDefaults {
-    @Composable
-    fun spinnerColors(
-        contentColor: Color = MiuixTheme.colorScheme.onSurfaceContainer,
-        summaryColor: Color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        containerColor: Color = MiuixTheme.colorScheme.surfaceContainer,
-        selectedContentColor: Color = MiuixTheme.colorScheme.primary,
-        selectedSummaryColor: Color = MiuixTheme.colorScheme.primary,
-        selectedContainerColor: Color = MiuixTheme.colorScheme.surfaceContainer,
-        selectedIndicatorColor: Color = MiuixTheme.colorScheme.primary,
-    ): DropdownColors = DropdownDefaults.dropdownColors(
-        contentColor = contentColor,
-        summaryColor = summaryColor,
-        containerColor = containerColor,
-        selectedContentColor = selectedContentColor,
-        selectedSummaryColor = selectedSummaryColor,
-        selectedContainerColor = selectedContainerColor,
-        selectedIndicatorColor = selectedIndicatorColor,
-    )
-
-    @Composable
-    fun dialogSpinnerColors(
-        contentColor: Color = MiuixTheme.colorScheme.onSurfaceContainer,
-        summaryColor: Color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        containerColor: Color = Color.Transparent,
-        selectedContentColor: Color = MiuixTheme.colorScheme.onTertiaryContainer,
-        selectedSummaryColor: Color = MiuixTheme.colorScheme.onTertiaryContainer,
-        selectedContainerColor: Color = MiuixTheme.colorScheme.tertiaryContainer,
-        selectedIndicatorColor: Color = MiuixTheme.colorScheme.onTertiaryContainer,
-    ): DropdownColors = DropdownDefaults.dialogDropdownColors(
-        contentColor = contentColor,
-        summaryColor = summaryColor,
-        containerColor = containerColor,
-        selectedContentColor = selectedContentColor,
-        selectedSummaryColor = selectedSummaryColor,
-        selectedContainerColor = selectedContainerColor,
-        selectedIndicatorColor = selectedIndicatorColor,
-    )
-}
-
-@Deprecated(
-    message = "Use DropdownColors instead.",
-    replaceWith = ReplaceWith("DropdownColors"),
-)
-typealias SpinnerColors = DropdownColors
-
-@Deprecated(
-    message = "Use DropdownItem instead.",
-    replaceWith = ReplaceWith("DropdownItem"),
-)
-typealias SpinnerEntry = DropdownItem

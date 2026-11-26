@@ -27,6 +27,7 @@ internal object HostProfileBindings {
         fun type(role: String) = members.type(role)
         fun constructor(role: String) = members.constructor(role)
         fun number(role: String) = values.getValue("value:$role").toInt()
+        val hasNativeLayer get() = number("nativeLayer") == 1
         fun call(role: String, vararg args: Any?): Any? = method(role).invoke(null, *args)
         fun fromArgb(value: Int) = call("fromArgb", value) as Long
         fun toArgb(value: Long) = call("toArgb", value) as Int
@@ -42,7 +43,7 @@ internal object HostProfileBindings {
         val methods = listOf("root", "content", "systemBars", "community", "privilege", "surface", "brushBackground", "alpha", "fromArgb", "toArgb",
             "background", "materialize", "colorScheme", "backgroundAuto", "backgroundBright", "backgroundDim", "divider")
         val required = methods.map { "method:$it" } + listOf("modifier", "composer", "brush", "content", "scope", "shader").map { "class:$it" } +
-            listOf("constructor:shader", "value:brushMask") + listOf("community", "privilege").flatMap { role -> listOf("boolean", "flags", "mask").map { "value:$role.$it" } }
+            listOf("constructor:shader", "value:brushMask", "value:nativeLayer") + listOf("community", "privilege").flatMap { role -> listOf("boolean", "flags", "mask").map { "value:$role.$it" } }
         check(values.keys.containsAll(required)) { "Incomplete profile background contract: ${required - values.keys}" }
         val s = Contract(values, HostRuntimeBindings.Members(values, loader))
         val any = Any::class.java; val int = Integer.TYPE; val long = java.lang.Long.TYPE; val float = java.lang.Float.TYPE; val bool = java.lang.Boolean.TYPE
@@ -51,6 +52,17 @@ internal object HostProfileBindings {
         }
         signature("root", listOf(s.type("scope"), s.type("composer"), int), Void.TYPE)
         signature("systemBars", listOf(int, s.type("composer"), bool), Void.TYPE)
+        check(s.number("nativeLayer") in 0..1)
+        if (s.hasNativeLayer) {
+            signature("layer", listOf(Long::class.javaObjectType, float, s.type("composer"), int), Void.TYPE)
+            signature("layerImage", listOf(Long::class.javaObjectType, s.type("composer")), bool)
+            check(s.number("layer.composer") == 2)
+            val restart = s.method("layerRestart")
+            check(!Modifier.isStatic(restart.modifiers) && restart.returnType == any &&
+                restart.parameterTypes.toList() == List(2) { any } &&
+                restart.declaringClass == s.constructor("layerRestart").declaringClass &&
+                s.type("layerFunction").isInterface && s.type("layerFunction").isAssignableFrom(restart.declaringClass))
+        } else check("method:layer" !in values && "method:layerImage" !in values && "value:layer.composer" !in values)
         val content = s.method("content")
         check(!Modifier.isStatic(content.modifiers) && content.declaringClass == s.type("content") && content.parameterTypes.toList() == List(3) { any } && content.returnType == any)
         signature("surface", listOf(bool, float, s.type("composer")), s.type("modifier"))

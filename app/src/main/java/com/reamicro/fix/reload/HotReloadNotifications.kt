@@ -18,8 +18,13 @@ internal object HotReloadNotifications {
     }
 
     fun show(context: Context, pkg: String, message: String, finished: Boolean) {
+        if (context.packageName != com.reamicro.fix.notification.CloudTaskNotifications.MODULE_PACKAGE_NAME) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "模块热重载", NotificationManager.IMPORTANCE_DEFAULT))
+        if (!com.reamicro.fix.notification.ModuleNotificationPermission.canPost(context, CHANNEL)) {
+            if (finished) Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            return
+        }
         val launch = context.packageManager.getLaunchIntentForPackage(pkg)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }

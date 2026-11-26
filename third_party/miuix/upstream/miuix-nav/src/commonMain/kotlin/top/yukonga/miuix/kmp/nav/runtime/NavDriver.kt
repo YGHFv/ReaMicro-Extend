@@ -40,22 +40,6 @@ import kotlin.math.sqrt
 internal fun anchoredProgress(anchor: Float, fingerProgress: Float): Float = (anchor + fingerProgress).coerceIn(anchor.coerceAtMost(0f), NavDriverSpec.MAX_FINGER_PROGRESS)
 
 /**
- * Pure mapping from a rest-state gesture progress to the `animatedTop` target value.
- *
- * The `anchor == 0` special case of the grab-anchor model: a gesture starting from a settled
- * top (`animatedTop == topIndex`). A fully completed gesture (`progress == 1`) drives
- * `animatedTop` exactly one step toward the previous entry, i.e. `topIndex - 1`. The mapping is
- * strictly linear (1:1 with the finger): no easing lives on the `finger -> animatedTop` axis,
- * so no inverse-transform is ever needed (contrast nav3's SeekableTransitionState, which bakes
- * easing into its fraction).
- *
- * @param topIndex index of the current top entry in the back stack (`lastIndex`).
- * @param progress raw gesture progress; clamped to `0f..`[NavDriverSpec.MAX_FINGER_PROGRESS] by [anchoredProgress].
- * @return the `animatedTop` value the gesture should snap to.
- */
-internal fun fingerTarget(topIndex: Int, progress: Float): Float = topIndex - anchoredProgress(anchor = 0f, fingerProgress = progress)
-
-/**
  * Canonical constants of the shared `animatedTop` driver: the default spring/tween numbers
  * (consumed as [NavSettleSpec] defaults) and the release commit/cancel thresholds (consumed by
  * [navBackCommitDecision]). Settle curves themselves are per-transition

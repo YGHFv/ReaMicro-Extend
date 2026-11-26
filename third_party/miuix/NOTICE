@@ -1,17 +1,31 @@
 Miuix sources: https://github.com/compose-miuix-ui/miuix
-Upstream tag: v0.9.5-beta02
-Upstream commit: 66248bacc7be29ae6bdc0957de9458b42ac67732
-Integration version: 0.9.5-beta02
+Upstream tag: v0.9.5-rc01
+Upstream commit: 542463a0863b393a3d6052237daae6c3da217e70
+Integration version: 0.9.5-rc01
 Compose Multiplatform Android artifacts: 1.13.0-rc01
+Android Gradle Plugin: 9.5.2; Kotlin: 2.4.21; compileSdk: 37.2; build tools: 37.0.0
 
 Only the Android dependency closure used by this application is included.
 Shared commonMain sources are required by Android; other platform source sets are not included.
-Unused components and icon weights are omitted. The icon files and MiuixIcons.kt
-are derived subsets containing the default aliases and Regular glyphs only;
-their retained path data is unchanged. Other retained upstream Kotlin sources are unchanged.
-Android baseline profiles omit rules whose classes are absent from the application.
+SOURCE_MANIFEST.json records hashes for all 205 retained Kotlin files: 150 exact upstream
+files and 55 derived subsets. The derived files omit unused declarations/imports or icon
+weights; retained declaration bodies and icon path data are unchanged. Default aliases
+and Regular icon glyphs are included. No component rendering or animation is rewritten.
+231 Android baseline profile rules retain only classes present in the compiled application.
+
 Android build adapters and integration wrappers are provided by ReaMicro Extend.
-GlassDropdownPreference is used directly from beta02. The entry-based dropdown adapter
-follows beta02's value-anchor tracking, fresh-bound wait and disposal lifecycle.
-SizedGlassNavigationBar follows beta02's renderer with configurable content dimensions.
+GlassDialog, GlassDialogButton, GlassCard, GlassTopAppBar, GlassNavigationBar,
+GlassIconButton, GlassIconDropdownMenu, GlassDropdownPreference and GlassTextField
+use upstream renderers. Glass components retain their upstream opaque fallback.
+WindowDialogHost supplies upstream WindowComponentHost; GlassDialog/OverlayDialog
+own their contents, scrim and motion. The optional AOSP transition uses the upstream
+glassDialogSurface with the application's navigation transition.
+WindowPopupScope isolates a platform window's popup roots. Menus render outside the
+recorded dialog body, so each glass surface samples only content below it.
+The entry-based dropdown adapter follows rc01's value-anchor tracking, fresh-bound
+wait and disposal lifecycle while supporting disabled unknown selections.
+ScaffoldGlassIconMenu only hosts the menu and follows the upstream anchor lifecycle;
+it does not copy popup animation or rendering.
+CapturedBackdrop preserves single recording and visibility with rc01's recorder lifecycle.
+
 The upstream source is licensed under Apache License 2.0; see upstream/LICENSE.

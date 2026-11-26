@@ -37,55 +37,6 @@ object GlassDropdownDefaults {
     val StartCornerRadius: Dp = 4.dp
 }
 
-/**
- * A glass dropdown menu anchored to a settings row.
- *
- * Keep it composed until the exit animation finishes.
- *
- * @param show Whether the panel is open. Row input and accessibility actions stop immediately
- *   when this becomes false, while the exit animation finishes.
- * @param onDismissRequest Called when an outside tap or Back requests dismissal.
- * @param anchorBounds Row bounds in window coordinates (`boundsInWindow()`).
- * @param backdrop Background sampled by the panel. Exclude the popup itself. `null` uses an
- *   opaque fill while retaining the configured bloom stroke and shadow.
- * @param modifier The modifier applied to the panel.
- * @param anchor Optional row anchor. Hides the displayed value while open and aligns the panel
- *   to bounds reported by [glassPopupAnchorValue], or [anchorBounds] if unavailable.
- * @param sizing Panel size limits and window margin.
- * @param visuals Panel surface appearance.
- * @param cornerRadius Expanded panel corner radius.
- * @param contentPadding Padding around the rows.
- * @param content The rows. [GlassPopupItem] with `selected` shows a tick.
- */
-@Composable
-fun BoxScope.GlassDropdownPopup(
-    show: Boolean,
-    onDismissRequest: () -> Unit,
-    anchorBounds: Rect,
-    backdrop: Backdrop?,
-    modifier: Modifier = Modifier,
-    anchor: GlassPopupAnchor? = null,
-    sizing: GlassPopupSizing = GlassPopupSizing(),
-    visuals: GlassPopupVisuals = GlassPopupDefaults.visuals(),
-    cornerRadius: Dp = GlassDropdownDefaults.CornerRadius,
-    contentPadding: PaddingValues = PaddingValues(vertical = GlassPopupDefaults.ContentPaddingVertical),
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    GlassDropdownPopupContent(
-        show = show,
-        onDismissRequest = onDismissRequest,
-        anchorBounds = anchorBounds,
-        backdrop = backdrop,
-        modifier = modifier,
-        anchor = anchor,
-        sizing = sizing,
-        visuals = visuals,
-        cornerRadius = cornerRadius,
-        contentPadding = contentPadding,
-        content = content,
-    )
-}
-
 /** Shared dropdown renderer; the surface maps window bounds into the host. */
 @Composable
 internal fun BoxScope.GlassDropdownPopupContent(
@@ -112,19 +63,18 @@ internal fun BoxScope.GlassDropdownPopupContent(
         transitionSpec = { GlassMotion.popupProgressSpring(GlassMotion.arcBounds(targetState)) },
         label = "glassDropdownSize",
     ) { if (it) 1f else 0f }
-    val position by transition.animateFloat(
+    val position = transition.animateFloat(
         transitionSpec = { GlassMotion.popupProgressSpring(GlassMotion.arcPosition(targetState)) },
         label = "glassDropdownPosition",
     ) { if (it) 1f else 0f }
-    val fade by transition.animateFloat(
+    val fade = transition.animateFloat(
         transitionSpec = { GlassMotion.arcFade(targetState) },
         label = "glassDropdownFade",
     ) { if (it) 1f else 0f }
-    val sharpness by transition.animateFloat(
+    val sharpness = transition.animateFloat(
         transitionSpec = { GlassMotion.arcBlur(targetState) },
         label = "glassDropdownBlur",
     ) { if (it) 1f else 0f }
-
     val active by remember(show, size) {
         computedStateOf { show || size.value > 0.0001f }
     }
@@ -153,9 +103,9 @@ internal fun BoxScope.GlassDropdownPopupContent(
         }
     }
     fun geometryProgress() = popupFractionWithBack(size.value, backProgress.value)
-    fun positionProgress() = popupFractionWithBack(position, backProgress.value)
-    fun fadeProgress() = fade * (1f - backProgress.value.coerceIn(0f, 1f))
-    fun sharpnessProgress() = sharpness * (1f - backProgress.value.coerceIn(0f, 1f))
+    fun positionProgress() = popupFractionWithBack(position.value, backProgress.value)
+    fun fadeProgress() = fade.value * (1f - backProgress.value.coerceIn(0f, 1f))
+    fun sharpnessProgress() = sharpness.value * (1f - backProgress.value.coerceIn(0f, 1f))
     val standingDown = active
     DisposableEffect(anchor, standingDown) {
         anchor?.contentHidden = standingDown

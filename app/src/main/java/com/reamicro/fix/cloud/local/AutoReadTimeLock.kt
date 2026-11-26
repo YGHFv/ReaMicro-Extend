@@ -5,6 +5,12 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+internal const val HOST_READ_ATTEMPT_DATE = "hostReadAttemptDate"
+
+internal fun hostReadAlreadyAttempted(state: JSONObject, now: Long): Boolean =
+    state.optString(HOST_READ_ATTEMPT_DATE) == AutoReadTimeLock.recordDate(now) ||
+        AutoReadTimeLock.usedMinutes(state, now) > 0
+
 internal object AutoReadTimeLock {
     const val TASK_TYPE = "cloud_auto_read"
     private const val MINUTE_MS = 60_000L

@@ -29,7 +29,7 @@ internal class HostStorageRouteBridge(private val drive: WebDavDriveHook) {
                 handles += HookRuntime.hookMethod(register, object : HookCallback() {
                     override fun before(param: Call) {
                         val key = keys.singleOrNull { tokens.getValue(it) == param.args[1] } ?: return
-                        val content = c.field("$key.callback").get(param.args[2]) ?: return
+                        val content = c.field("$key.callback").get(param.args[c.value("$key.contentSlot")]) ?: return
                         check(c.type("$key.content").isInstance(content)) { "Unexpected storage route content" }
                         registered[content] = key
                     }

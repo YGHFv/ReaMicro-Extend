@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.captionBar
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,7 +31,6 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
@@ -43,22 +41,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Alignment.Companion.CenterHorizontally
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.dropShadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.shadow.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.offset
 import androidx.compose.ui.unit.sp
-import top.yukonga.miuix.kmp.squircle.squircleBackground
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.Platform
 import top.yukonga.miuix.kmp.utils.platform
@@ -171,6 +165,7 @@ fun RowScope.NavigationBarItem(
 
     val tint = colors.contentColor(selected, isPressed)
     val fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+    val tintFilter = remember(tint) { ColorFilter.tint(tint) }
     val mode = LocalNavigationBarDisplayMode.current
 
     Column(
@@ -200,7 +195,7 @@ fun RowScope.NavigationBarItem(
                         imageVector = icon,
                         // Decorative: the adjacent label already names the item; avoids TalkBack double-read.
                         contentDescription = null,
-                        colorFilter = ColorFilter.tint(tint),
+                        colorFilter = tintFilter,
                     )
                 }
                 Text(
@@ -241,7 +236,7 @@ fun RowScope.NavigationBarItem(
                         imageVector = icon,
                         // Decorative: the label (always present in the tree) names the item; avoids double-read.
                         contentDescription = null,
-                        colorFilter = ColorFilter.tint(tint),
+                        colorFilter = tintFilter,
                     )
                 }
                 Text(
@@ -262,176 +257,10 @@ fun RowScope.NavigationBarItem(
                         modifier = iconModifier.size(NavigationBarDefaults.IconSize),
                         imageVector = icon,
                         contentDescription = label,
-                        colorFilter = ColorFilter.tint(tint),
+                        colorFilter = tintFilter,
                     )
                 }
             }
-        }
-    }
-}
-
-/**
- * A floating navigation bar that supports 2 to 5 items.
- *
- * @param modifier A [Modifier] to be applied to the [FloatingNavigationBar] for additional customization.
- * @param color The background color of the [FloatingNavigationBar].
- * @param cornerRadius The corner radius of the [FloatingNavigationBar], used for rounded corners.
- * @param horizontalAlignment The alignment of the [FloatingNavigationBar] within its parent, typically used to center it horizontally.
- * @param horizontalOutSidePadding The horizontal padding to be applied outside the [FloatingNavigationBar].
- * @param shadowElevation The shadow elevation of the [FloatingNavigationBar].
- * @param showDivider Whether to show the divider line around the [FloatingNavigationBar].
- * @param defaultWindowInsetsPadding whether to apply default window insets padding to the [FloatingNavigationBar].
- * @param content The content of the [FloatingNavigationBar], usually [FloatingNavigationBarItem]s.
- */
-@Suppress("ktlint:compose:modifier-not-used-at-root")
-@Composable
-fun FloatingNavigationBar(
-    modifier: Modifier = Modifier,
-    color: Color = MiuixTheme.colorScheme.surfaceContainer,
-    cornerRadius: Dp = FloatingToolbarDefaults.CornerRadius,
-    horizontalAlignment: Alignment.Horizontal = CenterHorizontally,
-    horizontalOutSidePadding: Dp = FloatingNavigationBarDefaults.HorizontalOutSidePadding,
-    shadowElevation: Dp = FloatingNavigationBarDefaults.ShadowElevation,
-    showDivider: Boolean = false,
-    defaultWindowInsetsPadding: Boolean = true,
-    content: @Composable () -> Unit,
-) {
-    val bottomPadding = if (defaultWindowInsetsPadding) {
-        val navigationBarBottom = WindowInsets.navigationBars.only(WindowInsetsSides.Bottom).asPaddingValues().calculateBottomPadding()
-        val captionBarBottomPaddingValue = WindowInsets.captionBar.only(WindowInsetsSides.Bottom).asPaddingValues().calculateBottomPadding()
-        val animatedCaptionBarHeight by animateDpAsState(
-            targetValue = if (captionBarBottomPaddingValue > 0.dp) captionBarBottomPaddingValue else 0.dp,
-            animationSpec = tween(durationMillis = 300),
-        )
-        val systemBottom = maxOf(navigationBarBottom, animatedCaptionBarHeight)
-        when {
-            platform() == Platform.IOS -> 28.dp
-            systemBottom <= 16.dp -> 24.dp
-            systemBottom >= 32.dp -> systemBottom
-            else -> 12.dp + systemBottom
-        }
-    } else {
-        0.dp
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(
-                if (defaultWindowInsetsPadding) {
-                    Modifier.windowInsetsPadding(
-                        WindowInsets.displayCutout.union(WindowInsets.navigationBars)
-                            .only(WindowInsetsSides.Horizontal),
-                    )
-                } else {
-                    Modifier
-                },
-            )
-            .padding(
-                start = if (horizontalAlignment == Alignment.Start) horizontalOutSidePadding else 0.dp,
-                end = if (horizontalAlignment == Alignment.End) horizontalOutSidePadding else 0.dp,
-            ),
-    ) {
-        Row(
-            modifier = Modifier
-                .selectableGroup()
-                .padding(bottom = bottomPadding)
-                .defaultMinSize(minHeight = 52.dp)
-                .then(
-                    if (showDivider) {
-                        Modifier
-                            .squircleBackground(
-                                color = MiuixTheme.colorScheme.dividerLine,
-                                cornerRadius = cornerRadius,
-                            )
-                            .padding(0.75.dp)
-                    } else {
-                        Modifier
-                    },
-                )
-                .then(
-                    if (shadowElevation > 0.dp) {
-                        Modifier.dropShadow(
-                            shape = RoundedCornerShape(cornerRadius),
-                            shadow = Shadow(
-                                radius = 10.dp,
-                                color = Color.Black,
-                                alpha = 0.2f,
-                            ),
-                        )
-                    } else {
-                        Modifier
-                    },
-                )
-                .squircleBackground(color = color, cornerRadius = cornerRadius)
-                .then(modifier)
-                .padding(horizontal = FloatingNavigationBarDefaults.HorizontalPadding)
-                .align(horizontalAlignment)
-                .pointerInput(Unit) {
-                    detectTapGestures { /* Consume click */ }
-                },
-            horizontalArrangement = Arrangement.spacedBy(FloatingNavigationBarDefaults.ItemSpacing),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            content()
-        }
-    }
-}
-
-/**
- * A [FloatingNavigationBarItem] that is suitable for [FloatingNavigationBar].
- *
- * @param selected Whether the item is selected.
- * @param onClick The callback when the item is clicked.
- * @param icon The icon of the item.
- * @param label The label of the item.
- * @param modifier The modifier to be applied to the [FloatingNavigationBarItem].
- * @param enabled Whether the item is enabled.
- * @param colors The icon and label colors, with state opacity applied to their alpha.
- * @param badge The optional badge shown on the item's icon, typically a [Badge].
- */
-@Composable
-fun FloatingNavigationBarItem(
-    selected: Boolean,
-    onClick: () -> Unit,
-    icon: ImageVector,
-    label: String,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    colors: NavigationBarItemColors = NavigationBarDefaults.navigationBarItemColors(),
-    badge: (@Composable () -> Unit)? = null,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-
-    val tint = colors.contentColor(selected, isPressed)
-
-    Column(
-        modifier = modifier
-            .selectable(
-                selected = selected,
-                onClick = onClick,
-                enabled = enabled,
-                role = Role.Tab,
-                interactionSource = interactionSource,
-                indication = null,
-            )
-            .then(if (badge != null) Modifier.badgeBounds() else Modifier),
-        horizontalAlignment = CenterHorizontally,
-    ) {
-        NavigationItemIcon(
-            badge = badge,
-            modifier = Modifier.padding(
-                vertical = FloatingNavigationBarDefaults.IconPadding,
-                horizontal = FloatingNavigationBarDefaults.IconPadding,
-            ),
-        ) { iconModifier ->
-            Image(
-                modifier = iconModifier.size(FloatingNavigationBarDefaults.IconSize),
-                imageVector = icon,
-                contentDescription = label,
-                colorFilter = ColorFilter.tint(tint),
-            )
         }
     }
 }
@@ -523,30 +352,6 @@ data class NavigationBarItemColors(
     }
 }
 
-/** Contains default values used by [FloatingNavigationBar] and [FloatingNavigationBarItem]. */
-object FloatingNavigationBarDefaults {
-    /** The default horizontal outside padding. */
-    val HorizontalOutSidePadding = 36.dp
-
-    /** The default shadow elevation. */
-    val ShadowElevation = 1.dp
-
-    /** The default horizontal padding inside the bar. */
-    val HorizontalPadding = 12.dp
-
-    /** The default spacing between items. */
-    val ItemSpacing = 12.dp
-
-    /** The icon size for items in [FloatingNavigationBar]. */
-    val IconSize = 28.dp
-
-    /** The padding around the icon in [FloatingNavigationBar]. */
-    val IconPadding = 10.dp
-
-    /** The alpha value for an unselected item. */
-    val UnselectedAlpha = 0.4f
-}
-
 /**
  * Defines the display mode for items in a NavigationBar.
  *
@@ -567,15 +372,3 @@ enum class NavigationBarDisplayMode {
  * A composition local to control the display mode for items in a NavigationBar.
  */
 val LocalNavigationBarDisplayMode = compositionLocalOf { NavigationBarDisplayMode.IconAndText }
-
-/**
- * The data class for [NavigationBar].
- *
- * @param label The label of the item.
- * @param icon The icon of the item.
- */
-@Immutable
-data class NavigationItem(
-    val label: String,
-    val icon: ImageVector,
-)

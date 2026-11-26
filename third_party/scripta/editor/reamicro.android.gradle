@@ -9,7 +9,7 @@ android {
     namespace 'top.yukonga.scripta.editor'
     compileSdk {
         version = release(37) {
-            minorApiLevel = 1
+            minorApiLevel = 2
         }
     }
     defaultConfig { minSdk 26 }
@@ -26,7 +26,6 @@ def commonSources = fileTree('src/commonMain/kotlin') { include '**/*.kt' }
 tasks.withType(KotlinCompile).configureEach {
     if (!name.contains('Test')) {
 
-        incremental = false
         source(commonSources, fileTree('src/androidMain/kotlin') { include '**/*.kt' })
         compilerOptions.freeCompilerArgs.addAll(
             '-Xmulti-platform',
@@ -35,7 +34,14 @@ tasks.withType(KotlinCompile).configureEach {
         )
     }
 }
+// Apply after AGP's task defaults: expect/actual sources must compile as one complete module.
+afterEvaluate {
+    tasks.withType(KotlinCompile).configureEach {
+        if (!name.contains('Test')) incremental = false
+    }
+}
+
 dependencies {
 
-    api "org.jetbrains.compose.foundation:foundation-android:${libs.versions.compose.get()}"
+    api libs.compose.foundation
 }

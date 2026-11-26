@@ -18,8 +18,8 @@ val MiuixIcons.Glass.ClockFill: ImageVector
 
 val MiuixIcons.Glass.Regular.ClockFill: ImageVector
     get() {
-        if (_worldClockRegular != null) return _worldClockRegular!!
-        _worldClockRegular = ImageVector.Builder(
+        if (_clockFillRegular != null) return _clockFillRegular!!
+        _clockFillRegular = ImageVector.Builder(
             name = "ClockFill.Glass.Regular",
             defaultWidth = 28.0f.dp,
             defaultHeight = 28.0f.dp,
@@ -69,7 +69,7 @@ val MiuixIcons.Glass.Regular.ClockFill: ImageVector
                 )
             }
         }.build()
-        return _worldClockRegular!!
+        return _clockFillRegular!!
     }
 
-private var _worldClockRegular: ImageVector? = null
+private var _clockFillRegular: ImageVector? = null

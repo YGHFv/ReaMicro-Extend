@@ -4,17 +4,12 @@ import com.reamicro.fix.reload.runOnModuleUiThread
 
 import com.reamicro.fix.core.HostNativeUi
 
-import com.reamicro.fix.notification.setReaMicroSmallIcon
-
-import android.app.Notification
 import android.graphics.drawable.GradientDrawable
 import android.os.Looper
-import android.os.Build
 import android.widget.Toast
 import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.xposed.HookRuntime
 import com.reamicro.fix.hook.webdav.*
-import com.reamicro.fix.logging.logWebDav
 
 internal fun WebDavDriveHook.clickableModifier(baseModifier: Any, name: String, onClick: () -> Unit): Any =
     HostNativeUi(classLoader).clickable(baseModifier, functionProxy(name, FUNCTION0_CLASS) { onClick(); targetUnit() })
@@ -81,20 +76,6 @@ internal fun WebDavDriveHook.isOnlineCompletionRenderType(type: Int): Boolean =
     onlineCompletionRenderTitles.containsKey(type)
 
 internal fun cloudPathOf(value: Any?): String = value?.callString("getPath").orEmpty()
-
-internal fun setOnlineCompletionSmallIcon(builder: Notification.Builder) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-        runCatching {
-            builder.setReaMicroSmallIcon()
-        }.onSuccess {
-            return
-        }.onFailure {
-            logWebDav("online completion module notification icon fallback: ${it.message}")
-        }
-    }
-    @Suppress("DEPRECATION")
-    builder.setSmallIcon(android.R.drawable.stat_sys_download)
-}
 
 internal fun roundedDrawable(color: Int, radius: Float): GradientDrawable =
     GradientDrawable().apply {

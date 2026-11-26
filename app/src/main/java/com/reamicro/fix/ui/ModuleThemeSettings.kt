@@ -117,7 +117,6 @@ private fun ModuleThemePreference(
         ModuleThemePreferenceRow.Glass -> SwitchPreference(
             title = stringResource(R.string.pref_os4_glass_title),
             summary = stringResource(if (supported) R.string.pref_os4_glass_summary else R.string.pref_glass_unsupported),
-            enabled = supported,
             checked = settings.glassEnabled,
             onCheckedChange = { update(settings.copy(glassEnabled = it)) },
         )

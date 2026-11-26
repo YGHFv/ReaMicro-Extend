@@ -1,27 +1,38 @@
 package com.reamicro.fix.notification
 
-import android.Manifest
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Build
 import com.reamicro.fix.logging.ModuleAndroidLog
+import com.reamicro.fix.logging.ModuleLogBuffer
 import com.reamicro.fix.logging.ModuleLogState
 
 class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (context.packageName != CloudTaskNotifications.MODULE_PACKAGE_NAME) {
+            if (isOrderedBroadcast) resultCode = Activity.RESULT_CANCELED
+            return
+        }
         ModuleLogState.applyFromIntent(intent)
+        ModuleLogBuffer.attach(context.applicationContext)
         when (intent.action) {
             ACTION_ONLINE_COMPLETION_NOTIFICATION -> {
                 if (intent.getBooleanExtra(BookshelfUpdateNotifications.EXTRA_REPORT, false)) {
                     runCatching { BookshelfUpdateNotifications.receive(context, intent) }.onFailure {
                         ModuleAndroidLog.legacy(LOG_TAG, "bookshelf report notification failed", it)
                     }
-                } else postProgressNotification(context, intent)
+                } else {
+                    val posted = runCatching { postProgressNotification(context, intent) }.getOrElse {
+                        ModuleAndroidLog.legacy(LOG_TAG, "module receiver notification failed", it)
+                        false
+                    }
+                    if (isOrderedBroadcast) resultCode = if (posted) Activity.RESULT_OK else Activity.RESULT_CANCELED
+                }
             }
             ACTION_ONLINE_COMPLETION_CANCEL, OnlineCompletionNotificationActions.PAUSE -> handleStop(context, intent)
         }
@@ -42,26 +53,18 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
         ModuleAndroidLog.legacy(LOG_TAG, "module receiver stop relayed id=$id action=${intent.action}")
     }
 
-    private fun postProgressNotification(context: Context, intent: Intent) {
-        val id = intent.getIntExtra(EXTRA_ID, 0).takeIf { it > 0 } ?: return
+    private fun postProgressNotification(context: Context, intent: Intent): Boolean {
+        val id = intent.getIntExtra(EXTRA_ID, 0).takeIf { it > 0 } ?: return false
         if (!OnlineNotificationEventOrder.accept(id,
                 intent.getLongExtra(OnlineNotificationEventOrder.EXTRA_ISSUED_AT, 0L),
-                intent.getStringExtra(EXTRA_KEY).orEmpty())) return
-        if (startForegroundNotificationService(context, intent)) return
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ModuleAndroidLog.legacy(LOG_TAG, "module notification permission denied")
-            return
-        }
+                intent.getStringExtra(EXTRA_KEY).orEmpty())) return true
         val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { ONLINE_COMPLETION_TITLE }
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty()
         val key = intent.getStringExtra(EXTRA_KEY).orEmpty()
         val cancellable = intent.getBooleanExtra(EXTRA_CANCELLABLE, false)
         val progress = intent.getIntExtra(EXTRA_PROGRESS, 0).coerceIn(0, 100)
         val done = intent.getBooleanExtra(EXTRA_DONE, false)
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
                 NotificationChannel(
@@ -71,6 +74,8 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
                 ),
             )
         }
+        if (!ModuleNotificationPermission.canPost(context, ONLINE_COMPLETION_NOTIFICATION_CHANNEL)) return false
+        if (!isOrderedBroadcast && startForegroundNotificationService(context, intent)) return true
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(context, ONLINE_COMPLETION_NOTIFICATION_CHANNEL)
         } else {
@@ -91,7 +96,9 @@ class OnlineCompletionNotificationReceiver : BroadcastReceiver() {
         }
         manager.notify(id, builder.build())
         cancelOnlineCompletionNotificationIfDone(manager, id, done, text)
-        ModuleAndroidLog.legacy(LOG_TAG, "module receiver notification posted fallback id=$id progress=$progress done=$done title=$title")
+        if (isOrderedBroadcast) startForegroundNotificationService(context, intent)
+        ModuleAndroidLog.legacy(LOG_TAG, "module receiver notification posted id=$id progress=$progress done=$done title=$title")
+        return true
     }
 
     private fun startForegroundNotificationService(context: Context, source: Intent): Boolean =

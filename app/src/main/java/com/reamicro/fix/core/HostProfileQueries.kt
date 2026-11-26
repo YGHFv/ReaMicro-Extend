@@ -39,10 +39,39 @@ internal object HostProfileQueries {
         val surface = community.invokes.filter { Modifier.isStatic(it.modifiers) &&
             it.paramTypeNames == listOf("boolean", "float", composer.name) && it.returnTypeName == modifier.name }.one("community background")
         val brush = requireNotNull(requireNotNull(bridge.getMethodData(base.getValue("method:androidx.compose.ui.text.TextStyle#getBrush"))).returnType)
-        val brushBackground = content.invokes.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == modifier.name &&
-            it.paramCount == 4 && it.paramTypeNames.take(2) == listOf(modifier.name, brush.name) &&
-            it.paramTypeNames.last() == "int" }.one("brush background")
-        val brushCall = flow.calls(content.descriptor).filter { it.descriptor == brushBackground.descriptor }
+        fun brushes(painter: MethodData) = painter.invokes.filter { Modifier.isStatic(it.modifiers) &&
+            it.returnTypeName == modifier.name && it.paramCount == 4 &&
+            it.paramTypeNames.take(2) == listOf(modifier.name, brush.name) && it.paramTypeNames.last() == "int" }
+        val layer = if (brushes(content).isNotEmpty()) null else content.invokes.filter {
+            Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
+                it.paramTypeNames == listOf("java.lang.Long", "float", composer.name, "int") &&
+                brushes(it).isNotEmpty() && it.invokes.any { call -> call.descriptor == materialize.descriptor } &&
+                it.invokes.any { call -> call.descriptor == background.descriptor }
+        }.one("native background layer")
+        put("value:nativeLayer", if (layer == null) "0" else "1")
+        if (layer != null) {
+            check(contentCalls.indexOfFirst { it.descriptor == layer.descriptor } >
+                contentCalls.indexOfFirst { it.descriptor == materialize.descriptor })
+            save("layer", layer)
+            put("value:layer.composer", layer.paramTypeNames.indexOf(composer.name).toString())
+            save("layerImage", layer.invokes.filter {
+                Modifier.isStatic(it.modifiers) && it.paramTypeNames == listOf("java.lang.Long", composer.name) &&
+                    it.returnTypeName == "boolean"
+            }.one("native background image selection"))
+            val function2 = requireNotNull(bridge.getClassData(ui.getValue("class:function2")))
+            val restart = layer.callers.filter {
+                !Modifier.isStatic(it.modifiers) && it.paramTypeNames == List(2) { "java.lang.Object" } &&
+                    it.returnTypeName == "java.lang.Object" && it.declaredClass?.isA(function2) == true
+            }.one("native background restart")
+            save("layerRestart", restart)
+            put("class:layerFunction", function2.descriptor)
+            put("constructor:layerRestart", layer.invokes.filter {
+                it.isConstructor && it.className == restart.className
+            }.one("native background restart capture").descriptor)
+        }
+        val painter = layer ?: content
+        val brushBackground = brushes(painter).one("brush background")
+        val brushCall = flow.calls(painter.descriptor).filter { it.descriptor == brushBackground.descriptor }
             .filter { it.arguments[2] == HostDexCalls.Literal(0) && it.arguments[3] is HostDexCalls.Literal }.distinct().single()
         put("value:brushMask", (brushCall.arguments[3] as HostDexCalls.Literal).value.toString())
         val alpha = surface.invokes.filter { Modifier.isStatic(it.modifiers) && it.paramTypeNames == listOf("float", "long") &&

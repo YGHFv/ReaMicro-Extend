@@ -663,17 +663,20 @@ internal fun onlineCompletionFailedChaptersJson(
 }
 
 internal fun cancelOnlineCompletionNotification(context: Context, id: Int, key: String) {
-    cancelOnlineCompletionHostNotification(context, id)
     sendOnlineCompletionCancelBroadcastToModule(context, id, key)
 }
 
-internal fun cancelOnlineCompletionHostNotification(context: Context, id: Int) {
-    if (id <= 0) return
+/** Remove only this module's obsolete host channel when the new hook starts. */
+internal fun clearLegacyOnlineCompletionHostNotifications(context: Context) {
+    if (!com.reamicro.fix.core.HostPackages.contains(context.packageName)) return
     runCatching {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-        manager.cancel(id)
+        manager.activeNotifications.filter {
+            it.packageName == context.packageName && it.notification.channelId == ONLINE_COMPLETION_NOTIFICATION_CHANNEL
+        }.forEach { manager.cancel(it.tag, it.id) }
+        manager.deleteNotificationChannel(ONLINE_COMPLETION_NOTIFICATION_CHANNEL)
     }.onFailure {
-        logWebDav("online completion host notification cancel failed id=$id: ${it.message}")
+        logWebDav("online completion legacy host notification cleanup failed: ${it.javaClass.simpleName}")
     }
 }
 

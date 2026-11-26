@@ -1,9 +1,2 @@
-# ReaMicro Android subset: retain profile rules for compiled classes only.
-PLtop/yukonga/miuix/kmp/popup/OverlayDropdownPopupKt**->**(**)**
-PLtop/yukonga/miuix/kmp/popup/WindowDropdownPopupKt**->**(**)**
 PLtop/yukonga/miuix/kmp/preference/ArrowPreferenceDefaults;->**(**)**
-PLtop/yukonga/miuix/kmp/preference/ArrowPreferenceKt**->**(**)**
 PLtop/yukonga/miuix/kmp/preference/EndActionColors;->**(**)**
-PLtop/yukonga/miuix/kmp/preference/OverlayDropdownPreferenceKt**->**(**)**
-PLtop/yukonga/miuix/kmp/preference/WindowDropdownPreferenceKt**->**(**)**
-SPLtop/yukonga/miuix/kmp/preference/SwitchPreferenceKt**->**(**)**

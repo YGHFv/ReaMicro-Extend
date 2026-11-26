@@ -40,6 +40,10 @@ class ProfileBackgroundHook(
     )
     private val frames = ThreadLocal<java.util.ArrayDeque<Frame>>()
     private fun frame(): Frame? = frames.get()?.peekLast()?.takeIf { it.active }
+    private data class Layer(val composer: Any, val modifier: Any, var rootPending: Boolean = true)
+    private val layers = ThreadLocal<java.util.ArrayDeque<Layer>>()
+    private val layerRestarts = com.reamicro.fix.reload.WeakResourceRegistry<Any>()
+    private val restartDepth = ThreadLocal<Int>()
     private var cachedBitmap: Bitmap? = null
     private var cachedImagePath: String? = null
     private var cachedScreenBackgroundBitmap: Bitmap? = null
@@ -100,25 +104,81 @@ class ProfileBackgroundHook(
                     current.pendingPrivilege = null
                 }
                 override fun after(param: Call) {
+                    val layer = layers.get()?.peekLast()
+                    if (layer != null && param.args[0] === layer.composer) {
+                        if (param.throwable != null) return
+                        if (param.result == null) return
+                        val native = com.reamicro.fix.core.HostNativeUi(requireNotNull(symbols.type("composer").classLoader))
+                        // 保留原生重组与参数捕获；外层绘制用户背景，内层原生装饰不占高度。
+                        param.result = if (layer.rootPending) layer.modifier else native.height(native.fillWidth(native.modifier()), 0f)
+                        layer.rootPending = false
+                        return
+                    }
                     val current = frame() ?: return
                     if (!current.rootPending || current.rootBlocked != 0 || current.cards != 0 ||
                         param.args[0] !== current.composer || param.throwable != null) return
                     current.rootPending = false
+                    if (symbols.hasNativeLayer) return
                     val modifier = param.result ?: return
-                    val snapshot = settingsProvider()
-                    if (canUseProfileImageBackground(snapshot)) {
-                        val bitmap = loadBitmap(snapshot.profileBackgroundImage) ?: return
-                        val brush = profileBackgroundImageBrush(snapshot.profileBackgroundImage, bitmap, snapshot) ?: return
-                        param.result = symbols.background(modifier, brush)
-                    } else if (canHandleProfileBackground(snapshot) && !snapshot.profileBackgroundUseImage) {
-                        val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
-                        param.result = symbols.call("background", modifier, symbols.fromArgb(parseArgb(snapshot.profileBackgroundColor)), ui.value("rectangle"))
-                    }
+                    profileBackgroundModifier(modifier, settingsProvider())?.let { param.result = it }
                 }
             })
+            if (symbols.hasNativeLayer) hook("layer", object : HookCallback() {
+                override fun before(param: Call) {
+                    val current = frame()
+                    if (current == null && (restartDepth.get() ?: 0) == 0) return
+                    if (current != null) {
+                        current.rootBlocked++
+                        param.setObjectExtra(PROFILE_FRAME_EXTRA, current)
+                    }
+                    val snapshot = settingsProvider()
+                    if (!canHandleProfileBackground(snapshot)) return
+                    val composer = param.args[symbols.number("layer.composer")] ?: return
+                    val native = com.reamicro.fix.core.HostNativeUi(requireNotNull(symbols.type("composer").classLoader))
+                    if (current == null && snapshot.profileBackgroundUseImage) cachedColorScheme = symbols.call("colorScheme", composer)
+                    val modifier = profileBackgroundModifier(native.fillSize(native.modifier()), snapshot) ?: return
+                    val layer = Layer(composer, modifier)
+                    (layers.get() ?: java.util.ArrayDeque<Layer>().also(layers::set)).addLast(layer)
+                    param.setObjectExtra(PROFILE_LAYER_EXTRA, layer)
+                }
+                override fun after(param: Call) {
+                    (param.getObjectExtra(PROFILE_FRAME_EXTRA) as? Frame)?.let { it.rootBlocked-- }
+                    val layer = param.getObjectExtra(PROFILE_LAYER_EXTRA) as? Layer ?: return
+                    val stack = layers.get() ?: return
+                    if (stack.peekLast() === layer) stack.removeLast() else stack.remove(layer)
+                    if (stack.isEmpty()) layers.remove()
+                }
+            })
+            if (symbols.hasNativeLayer) hook("layerImage", object : HookCallback() {
+                override fun before(param: Call) {
+                    if (layers.get()?.peekLast()?.composer === param.args[1]) param.result = false
+                }
+            })
+            if (symbols.hasNativeLayer) {
+                handles += HookRuntime.hookMethod(symbols.constructor("layerRestart"), object : HookCallback() {
+                    override fun after(param: Call) {
+                        if (param.throwable == null && layers.get()?.peekLast() != null) {
+                            param.thisObject?.let(layerRestarts::add)
+                        }
+                    }
+                })
+                hook("layerRestart", object : HookCallback() {
+                    override fun before(param: Call) {
+                        if (layerRestarts.snapshot().none { it === param.thisObject }) return
+                        restartDepth.set((restartDepth.get() ?: 0) + 1)
+                        param.setObjectExtra(PROFILE_LAYER_EXTRA, true)
+                    }
+                    override fun after(param: Call) {
+                        if (param.getObjectExtra(PROFILE_LAYER_EXTRA) != true) return
+                        val depth = (restartDepth.get() ?: 1) - 1
+                        if (depth == 0) restartDepth.remove() else restartDepth.set(depth)
+                    }
+                })
+            }
             hook("background", object : HookCallback() {
                 override fun before(param: Call) {
                     val current = frame() ?: return
+                    if (current.rootBlocked != 0) return
                     val snapshot = settingsProvider()
                     if (!canHandleProfileBackground(snapshot)) return
                     if (current.cards > 0 && current.surfaces == 0) {
@@ -170,10 +230,14 @@ class ProfileBackgroundHook(
             listOf("root", "content", "systemBars", "community", "privilege", "surface", "materialize", "background", "alpha", "divider").forEach {
                 HookRuntime.deoptimize(symbols.method(it))
             }
+            if (symbols.hasNativeLayer) listOf("layer", "layerImage", "layerRestart").forEach { HookRuntime.deoptimize(symbols.method(it)) }
             activeInstance = this
             com.reamicro.fix.reload.ModuleResources.cleanup {
                 if (activeInstance === this) activeInstance = null
                 frames.remove()
+                layers.remove()
+                restartDepth.remove()
+                layerRestarts.drain()
                 releaseMemory("module cleanup")
             }
         } catch (error: Throwable) {
@@ -269,6 +333,18 @@ class ProfileBackgroundHook(
 
     private fun canHandleProfileBackground(snapshot: ModuleSettingsSnapshot): Boolean =
         snapshot.moduleEnabled && snapshot.profileBackgroundEnabled
+
+    private fun profileBackgroundModifier(modifier: Any, snapshot: ModuleSettingsSnapshot): Any? {
+        if (!canHandleProfileBackground(snapshot)) return null
+        if (snapshot.profileBackgroundUseImage) {
+            if (!canUseProfileImageBackground(snapshot)) return null
+            val bitmap = loadBitmap(snapshot.profileBackgroundImage) ?: return null
+            val brush = profileBackgroundImageBrush(snapshot.profileBackgroundImage, bitmap, snapshot) ?: return null
+            return host.background(modifier, brush)
+        }
+        val native = com.reamicro.fix.core.HostNativeUi(requireNotNull(host.type("composer").classLoader))
+        return native.background(modifier, host.fromArgb(parseArgb(snapshot.profileBackgroundColor)))
+    }
 
     private fun canUseProfileImageBackground(snapshot: ModuleSettingsSnapshot): Boolean =
         canHandleProfileBackground(snapshot) &&
@@ -926,6 +1002,7 @@ class ProfileBackgroundHook(
         const val LOG_PREFIX = "ReaMicro LSP profile background"
         const val PROFILE_CARD_SCOPE_EXTRA = "reamicro.profileBackgroundCardScope"
         const val PROFILE_SURFACE_SCOPE_EXTRA = "reamicro.profileBackgroundSurfaceScope"
+        private const val PROFILE_LAYER_EXTRA = "reamicro.profileBackgroundLayer"
 
         const val BACKGROUND_ARGB_FALLBACK = 0x80000000.toInt()
         const val PROFILE_BACKGROUND_DARK_PAGE_ARGB_FALLBACK = 0xFF000000.toInt()

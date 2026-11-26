@@ -18,6 +18,7 @@ internal class LocalTaskEngine(
     fun runDue(
         maxTasks: Int = 8, force: Boolean = false, requested: LocalTaskKey? = null,
         expectedAccountGeneration: String? = null,
+        hostBatch: Boolean = false,
     ): List<LocalTaskRecord> {
         val results = mutableListOf<LocalTaskRecord>()
         val processed = mutableSetOf<LocalTaskKey>()
@@ -32,7 +33,10 @@ internal class LocalTaskEngine(
                 val generation = store.accountGeneration(accountId)
                 store.list(accountId).map { Triple(LocalTaskKey(accountId, it.taskType), it, generation) }
             }.filter { (key, task) ->
-                key !in processed && if (requested != null) key == requested else
+                key !in processed &&
+                    !(hostBatch && task.hostReadOncePerDay && task.taskType == AutoReadTimeLock.TASK_TYPE &&
+                        hostReadAlreadyAttempted(store.runtimeState(key.accountId, task.taskType), now)) &&
+                    if (requested != null) key == requested else
                     task.enabled &&
                         (force || nextLocalTaskAt(
                             task, store.runtimeState(key.accountId, task.taskType), JSONObject(), now,
@@ -79,8 +83,13 @@ internal class LocalTaskEngine(
                                 }
                                 runCatching { onExecuting(key.accountId, task) }
                                 val credential = JSONObject().put("baseUrl", CloudTaskLocalRunner.REAMICRO_BASE_URL).put("token", token)
-                                if (execute != null) execute.invoke(task.taskType, stateInput, localTaskRequest(task), credential)
-                                else CloudTaskLocalRunner.runTask(task.taskType, stateInput, localTaskRequest(task), credential, clock = clock) { progress ->
+                                val request = localTaskRequest(task).apply {
+                                    if (hostBatch && task.taskType == AutoReadTimeLock.TASK_TYPE) {
+                                        put("hostReadOncePerDay", task.hostReadOncePerDay)
+                                    }
+                                }
+                                if (execute != null) execute.invoke(task.taskType, stateInput, request, credential)
+                                else CloudTaskLocalRunner.runTask(task.taskType, stateInput, request, credential, clock = clock) { progress ->
                                     active.check()
                                     store.recordState(key.accountId, task.taskType, JSONObject(progress.toString())
                                         .put(LocalTaskRuntimeMerge.CONFIG_CONTEXT, task.configUpdatedAt)

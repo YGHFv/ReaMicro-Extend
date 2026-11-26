@@ -1,6 +1,12 @@
 package com.reamicro.fix.ui
 
-internal data class MultiSelectOption(val value: String, val label: String, val color: Int? = null)
+/** [detail] says what the option is for, shown under its [label]. */
+internal data class MultiSelectOption(
+    val value: String,
+    val label: String,
+    val color: Int? = null,
+    val detail: String = "",
+)
 
 internal fun multiSelectSummary(options: List<MultiSelectOption>, selected: Set<String>): String {
     val locked = options.count { it.value in selected }

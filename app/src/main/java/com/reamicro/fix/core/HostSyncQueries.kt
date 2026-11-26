@@ -75,9 +75,11 @@ internal object HostSyncQueries {
 
         val transport = type("transport", requireNotNull(anchor(bridge, "S3 request: ", "S3Sync")
             .one("S3 transport request").declaredClass))
-        val api = type("transportApi", transport.interfaces.filter { it.methods.count { m -> m.isMethod && !Modifier.isStatic(m.modifiers) } == 8 }
+        val api = type("transportApi", transport.interfaces.filter { it.methods.count { m ->
+            m.isMethod && Modifier.isAbstract(m.modifiers)
+        } == HostSyncBindings.OPERATIONS.size }
             .single())
-        val operations = api.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) }.map { contract ->
+        val operations = api.methods.filter { it.isMethod && Modifier.isAbstract(it.modifiers) }.map { contract ->
             transport.methods.filter { it.name == contract.name && it.paramTypeNames == contract.paramTypeNames &&
                 it.returnTypeName == contract.returnTypeName && !Modifier.isStatic(it.modifiers) }.one("sync operation ${contract.descriptor}")
         }
@@ -90,8 +92,10 @@ internal object HostSyncQueries {
         operation("putBytes") { it.paramCount == 5 && it.paramTypeNames.take(4) ==
             listOf("java.lang.String", "byte[]", "java.lang.String", "java.lang.String") }
         operation("putProgress") { it.paramCount == 6 && it.paramTypeNames[1] == "byte[]" && it.usingStrings.contains("If-None-Match: *") }
-        val putFile = operation("putFile") { it.paramCount == 6 && it.paramTypeNames[1] != "byte[]" &&
-            it.usingStrings.containsAll(listOf("Content-Type", "Content-Length")) }
+        val putFile = operation("putFile") { it.paramCount == 6 &&
+            it.paramTypeNames[0] == "java.lang.String" && it.paramTypeNames.subList(2, 4) == List(2) { "java.lang.String" } &&
+            it.paramTypes[1].methods.any { method -> method.isMethod && !Modifier.isStatic(method.modifiers) &&
+                method.paramCount == 0 && method.returnTypeName == "java.io.File" } }
         operation("getFile") { it.paramCount == 4 && it.usingStrings.contains("GET") }
         val transportConstructor = method("transport", transport.methods.filter { it.isConstructor && it.paramTypeNames.contains(config.name) }
             .one("S3 transport constructor"))
@@ -116,10 +120,22 @@ internal object HostSyncQueries {
         val file = type("file", requireNotNull(putFile.paramTypes[1]))
         method("toFile", file.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) && it.paramCount == 0 &&
             it.returnTypeName == "java.io.File" }.one("sync platform file"))
-        val pack = method("onlinePack", planner.invokes.filter {
+        val packParameters = listOf(file.name, file.name, "java.util.Set")
+        // 新宿主在协程锁内调用同步打包；Hook 必须落在关闭 ZIP 后返回的实现上。
+        val packCalls = planner.invokes
+        val packWrappers = packCalls.filter {
+            Modifier.isStatic(it.modifiers) && it.returnTypeName == "java.lang.Object" &&
+                it.paramCount == 4 && it.paramTypeNames.take(3) == packParameters &&
+                it.usingStrings.contains("call to 'resume' before 'invoke' with coroutine")
+        }
+        val pack = method("onlinePack", (packCalls + packWrappers.flatMap { it.invokes }).filter {
             Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
-                it.paramTypeNames == listOf(file.name, file.name, "java.util.Set") &&
-                it.invokes.any { call -> call.returnTypeName == "java.io.File" }
+                it.paramTypeNames == packParameters &&
+                it.invokes.any { call -> call.descriptor == "Ljava/util/Set;->contains(Ljava/lang/Object;)Z" } &&
+                it.invokes.any { call -> call.name == "close" && call.paramCount == 0 && call.returnTypeName == "void" &&
+                    generateSequence(call.declaredClass) { owner -> owner.superClass }.any { owner ->
+                        owner.name == "java.io.OutputStream"
+                    } }
         }.one("sync EPUB packaging"))
         check(pack.usingStrings.contains("/")) { "EPUB packaging path contract differs" }
         val restoreBook = method("onlineRestore", anchor(bridge, "EPUB 校验失败，保留本地书籍")

@@ -51,14 +51,25 @@ internal object RootNightDiagnostics {
             .put("dnsElapsedMs", event.dnsElapsedMs ?: JSONObject.NULL)
             .put("gaiError", event.dns?.gaiError ?: JSONObject.NULL)
             .put("errno", event.dns?.errno ?: JSONObject.NULL)
+            .put("dnsNetworkHandle", event.dns?.networkHandle ?: JSONObject.NULL)
+            .put("dnsVpnPresent", event.dns?.vpnPresent ?: JSONObject.NULL)
+            .put("dnsIpv4Count", event.dns?.ipv4Count ?: JSONObject.NULL)
+            .put("dnsIpv6Count", event.dns?.ipv6Count ?: JSONObject.NULL)
+            .put("dnsRoute", if (event.dns != null) "direct" else JSONObject.NULL)
             .put("motionAccepted", event.motionAccepted ?: JSONObject.NULL)
-            .put("vendorWakeAccepted", event.vendorWakeAccepted ?: JSONObject.NULL))
+            .put("idleExitAccepted", event.idleExitAccepted ?: JSONObject.NULL)
+            .put("idleExitError", event.idleExitError)
+            .put("vendorWakeAccepted", event.vendorWakeAccepted ?: JSONObject.NULL)
+            .put("uidNetworkRestore", event.uidNetworkRestore?.let {
+                JSONObject(it.fields()).put("accepted", it.accepted)
+            } ?: JSONObject.NULL))
     }
 
     fun requestFailure(url: String, error: Throwable, elapsedMs: Long) {
         if (!enabled) return
         val detail = JSONObject().put("host", runCatching { URI(url).host }.getOrNull().orEmpty())
             .put("requestElapsedMs", elapsedMs).put("exceptionChain", exceptionChain(error))
+            .put("requestRoute", "direct")
         // 每轮最多补采一次真实失败时状态，避免诊断把多个失败拖成额外长等待。
         if (!failureProbed && error !is InterruptedException && !Thread.currentThread().isInterrupted) {
             failureProbed = true
@@ -99,6 +110,8 @@ internal object RootNightDiagnostics {
         .put("oplusDeepSleep", state.oplusDeepSleep ?: JSONObject.NULL)
         .put("oplusNetworkDisabled", state.oplusNetworkDisabled ?: JSONObject.NULL)
         .put("oplusNetworkType", state.oplusNetworkType ?: JSONObject.NULL)
+        .put("oplusDisNetType", state.oplusDisNetType ?: JSONObject.NULL)
+        .put("oplusUidDisconnected", state.oplusUidDisconnected ?: JSONObject.NULL)
         .put("oplusNetworkRestricted", state.oplusNetworkRestricted)
         .put("xiaomiSleep", state.xiaomiSleep ?: JSONObject.NULL)
 
@@ -106,7 +119,7 @@ internal object RootNightDiagnostics {
     private fun capture(event: String, detail: JSONObject) {
         if (!enabled) return
         runCatching {
-            val entry = JSONObject().put("diagnosticSchema", 4).put("event", event)
+            val entry = JSONObject().put("diagnosticSchema", 8).put("event", event)
                 .put("wallTimeMs", System.currentTimeMillis()).put("elapsedRealtimeMs", SystemClock.elapsedRealtime())
                 .put("sinceRunStartMs", SystemClock.elapsedRealtime() - startedAt)
                 .put("uid", Process.myUid()).put("pid", Process.myPid()).put("detail", detail)

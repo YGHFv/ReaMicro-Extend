@@ -159,9 +159,7 @@ class WebDavDriveHook(
     internal val onlineCompletionNotificationIds = AtomicInteger(
         0x30000000 or (java.util.UUID.randomUUID().hashCode() and 0x0fffffff),
     )
-    internal val onlineCompletionNotificationBlockedLogged = AtomicBoolean(false)
     internal val onlineCompletionCancelReceiverRegistered = AtomicBoolean(false)
-    internal val onlineCompletionModuleActivityPromptAt = ConcurrentHashMap<Int, Long>()
     internal val onlineCompletionMetadataRepairAt = AtomicLong(0L)
     internal val cloudStorageScreenRefreshAt = ConcurrentHashMap<String, Long>()
     internal val localLibraryListCache = ConcurrentHashMap<String, LocalLibraryListCache>()
@@ -195,6 +193,7 @@ class WebDavDriveHook(
             ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS,
         )
         private val progressFailureLogged = AtomicBoolean()
+        private val notificationDelivery = com.reamicro.fix.notification.OnlineNotificationDelivery()
 
         private fun publish(update: com.reamicro.fix.online.download.OnlineProgressState.Update, data: String?): Boolean {
             val status = update.status
@@ -220,7 +219,7 @@ class WebDavDriveHook(
                 val control = onlineCompletionRunningDownloadsByNotificationId[notificationId]?.control
                     ?: notificationKey.takeIf { it.startsWith("update:") }
                         ?.let { onlineCompletionUpdateControls[it.removePrefix("update:")] }
-                updateOnlineCompletionNotification(context, notificationId, notificationKey,
+                updateOnlineCompletionNotification(notificationDelivery, context, notificationId, notificationKey,
                     cancellable && control?.canStop != false,
                     bookName, update.message, update.progress, update.finished)
             }.getOrElse {

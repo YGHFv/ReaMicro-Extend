@@ -1,10 +1,13 @@
 package com.reamicro.fix.ui
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.captionBar
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,7 +50,7 @@ import top.yukonga.miuix.kmp.blur.progressiveTextureBlur
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.material.GlassDefaults
 import top.yukonga.miuix.kmp.material.GlassMaterials
-import top.yukonga.miuix.kmp.integration.SizedGlassNavigationBar
+import top.yukonga.miuix.kmp.glass.GlassNavigationBar
 import top.yukonga.miuix.kmp.glass.GlassNavigationItem
 import top.yukonga.miuix.kmp.material.GlassShape
 import top.yukonga.miuix.kmp.glass.GlassTopAppBar
@@ -61,6 +65,7 @@ internal fun ModuleTopBar(
     scrollBehavior: ScrollBehavior,
     config: ModuleThemeConfig,
     backdrop: Backdrop,
+    isContentScrolled: Boolean,
     navigationIcon: @Composable () -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
 ) {
@@ -69,7 +74,7 @@ internal fun ModuleTopBar(
     val blurred = settings.blurEnabled && supported
     val surface = MiuixTheme.colorScheme.surface
     val dark = surface.luminance() < 0.5f
-    val glassTopBar = config.glassComponents && supported
+    val glassTopBar = config.glassComponents
     val progressive = settings.topBarBlur == ModuleTopBarBlur.Progressive
     val gaussianColors = BlurDefaults.blurColors(
         blendColors = listOf(BlendColorEntry(surface.copy(alpha = 0.87f))),
@@ -83,7 +88,7 @@ internal fun ModuleTopBar(
         if (blurred && (!glassTopBar || !progressive)) {
             val visibility = if (glassTopBar || progressive) {
                 Modifier.graphicsLayer {
-                    alpha = (-scrollBehavior.state.contentOffset /
+                    alpha = (-scrollBehavior.state.visualContentOffset /
                         GlassTopAppBarDefaults.ProgressiveBlurRampDistance.toPx()).coerceIn(0f, 1f)
                 }
             } else Modifier
@@ -109,6 +114,7 @@ internal fun ModuleTopBar(
         if (glassTopBar) {
             GlassTopAppBar(
                 title = title,
+                isContentScrolled = isContentScrolled,
                 largeTitle = title,
                 navigationIcon = navigationIcon,
                 actions = actions,
@@ -152,6 +158,12 @@ internal fun ModuleBottomBar(
     val style = GlassDefaults.style(dark)
     if (settings.floatingNavigation) {
         val navigationInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val captionInset by animateDpAsState(
+            targetValue = WindowInsets.captionBar.asPaddingValues().calculateBottomPadding(),
+            animationSpec = tween(durationMillis = 300),
+            label = "moduleFloatingCaptionInset",
+        )
+        val bottomInset = maxOf(navigationInset, captionInset)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -159,7 +171,7 @@ internal fun ModuleBottomBar(
                     WindowInsets.navigationBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal),
                 )
                 .padding(horizontal = if (config.style == ModuleUiStyle.OS4) 24.dp else 28.dp)
-                .padding(bottom = if (navigationInset > 0.dp) navigationInset + 8.dp else 28.dp),
+                .padding(bottom = if (bottomInset > 0.dp) bottomInset + 8.dp else 28.dp),
             contentAlignment = Alignment.Center,
         ) {
             val width = Modifier.widthIn(max = 600.dp).fillMaxWidth()
@@ -197,25 +209,13 @@ internal fun ModuleBottomBar(
                 val items = remember(titles, os4Icons) {
                     os4Icons.mapIndexed { index, icon -> GlassNavigationItem(icon = icon, label = titles[index]) }
                 }
-                SizedGlassNavigationBar(
+                GlassNavigationBar(
                     items = items,
                     selectedIndex = selectedIndex,
                     onSelect = onSelect,
                     backdrop = if (settings.glassEnabled && blurred) backdrop else null,
                     defaultWindowInsetsPadding = false,
                     style = style,
-                    height = 56.dp,
-                    iconSize = 25.dp,
-                    labelSize = 12.sp,
-                    contentPaddingVertical = 6.dp,
-                    labelSpacing = 2.dp,
-                    shape = GlassShape(
-                        androidx.compose.foundation.shape.CornerSize(50),
-                        androidx.compose.foundation.shape.CornerSize(50),
-                        androidx.compose.foundation.shape.CornerSize(50),
-                        androidx.compose.foundation.shape.CornerSize(50),
-                        smoothing = GlassDefaults.Smoothing,
-                    ),
                     modifier = width,
                 )
             }

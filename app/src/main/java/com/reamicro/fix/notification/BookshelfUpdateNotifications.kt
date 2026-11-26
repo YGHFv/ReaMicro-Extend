@@ -1,13 +1,10 @@
 package com.reamicro.fix.notification
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import com.reamicro.fix.BuildConfig
 import com.reamicro.fix.logging.ModuleAndroidLog
 import com.reamicro.fix.logging.ModuleLogState
@@ -35,16 +32,13 @@ internal object BookshelfUpdateNotifications {
     }
 
     fun receive(context: Context, intent: Intent) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            ModuleAndroidLog.legacy("ReaMicroNotify", "bookshelf report notification permission denied")
-            return
-        }
+        if (context.packageName != BuildConfig.APPLICATION_ID) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         val title = intent.getStringExtra(EXTRA_TITLE)?.take(100) ?: return
         val summary = intent.getStringExtra(EXTRA_SUMMARY)?.take(500) ?: return
         val details = intent.getStringExtra(EXTRA_DETAILS)?.take(30_000) ?: return
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "书架更新详情", NotificationManager.IMPORTANCE_LOW))
+        if (!ModuleNotificationPermission.canPost(context, CHANNEL)) return
         val notification = Notification.Builder(context, CHANNEL)
             .setReaMicroSmallIcon()
             .setContentTitle(title)

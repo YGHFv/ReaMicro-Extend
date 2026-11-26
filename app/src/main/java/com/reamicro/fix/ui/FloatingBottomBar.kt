@@ -25,7 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -122,7 +122,7 @@ private fun rememberQuantizedGravityAngle(enabled: Boolean): State<Float> {
     if (!enabled) return remember { mutableFloatStateOf((-PI / 2).toFloat()) }
     val tiltState = rememberDeviceTilt()
     return remember(tiltState) {
-        derivedStateOf {
+        computedStateOf {
             val tilt = tiltState.value
             val magnitudeSquared = tilt.gravityX * tilt.gravityX + tilt.gravityY * tilt.gravityY
             if (magnitudeSquared > GRAVITY_DIR_THRESHOLD_SQ) {
@@ -141,7 +141,7 @@ private fun rememberGravityRotatedStroke(
     extraDegrees: Float = 0f,
 ): State<EdgeStroke> {
     return remember(angle, base, extraDegrees) {
-        derivedStateOf {
+        computedStateOf {
             val rad = angle.value + (extraDegrees * PI / 180.0).toFloat()
             val opposite = rad + PI.toFloat()
             base.copy(
@@ -233,7 +233,7 @@ fun FloatingBottomBar(
     val offsetAnimation = remember { Animatable(0f) }
     val rubberBandPx = with(density) { 4.dp.toPx() }
     val panelOffset by remember(rubberBandPx) {
-        derivedStateOf {
+        computedStateOf {
             if (totalWidthPx == 0f) {
                 0f
             } else {

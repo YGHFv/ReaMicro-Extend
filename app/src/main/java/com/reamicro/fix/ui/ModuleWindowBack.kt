@@ -23,12 +23,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.State
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -53,7 +52,6 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.reamicro.fix.R
-import kotlinx.coroutines.launch
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
@@ -108,6 +106,7 @@ internal fun ModuleAospWindowDialog(
     onClose: () -> Unit,
     dismissEnabled: Boolean = true,
     insideMargin: DpSize = DialogDefaults.insideMargin,
+    onDismissFinished: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     var mounted by remember { mutableStateOf(show) }
@@ -115,17 +114,16 @@ internal fun ModuleAospWindowDialog(
     val currentOnClose by rememberUpdatedState(onClose)
     val currentShow by rememberUpdatedState(show)
     val currentDismissEnabled by rememberUpdatedState(dismissEnabled)
-    var pendingClose by remember { mutableStateOf(false) }
+    val currentDismissFinished by rememberUpdatedState(onDismissFinished)
     val requestClose = {
         if (currentDismissEnabled && backStack.size > 1) {
-            pendingClose = true
             backStack.removeLastOrNull()
+            currentOnClose()
         }
     }
     LaunchedEffect(show) {
         if (show) {
             mounted = true
-            pendingClose = false
             if (backStack.size == 1) backStack.add(WindowBackPanel)
         } else if (backStack.size > 1) {
             backStack.removeLastOrNull()
@@ -149,7 +147,6 @@ internal fun ModuleAospWindowDialog(
                     val keyboard = LocalSoftwareKeyboardController.current
                     val imeInsets = WindowInsets.ime
                     val density = LocalDensity.current
-                    val closeScope = rememberCoroutineScope()
                     NavDisplay(
                         backStack = backStack,
                         onBack = {
@@ -169,18 +166,9 @@ internal fun ModuleAospWindowDialog(
                             LaunchedEffect(transitionScope) {
                                 snapshotFlow { backStack.size == 1 && !transitionScope.isRunning }
                                     .collect { finished ->
-                                        if (finished) {
-                                            if (pendingClose) {
-                                                pendingClose = false
-                                                if (currentDismissEnabled) {
-                                                    currentOnClose()
-                                                    closeScope.launch {
-                                                        androidx.compose.runtime.withFrameNanos { }
-                                                        if (currentShow) backStack.add(WindowBackPanel)
-                                                        else mounted = false
-                                                    }
-                                                } else backStack.add(WindowBackPanel)
-                                            } else if (!currentShow) mounted = false
+                                        if (finished && !currentShow) {
+                                            mounted = false
+                                            currentDismissFinished?.invoke()
                                         }
                                     }
                             }
@@ -192,6 +180,7 @@ internal fun ModuleAospWindowDialog(
                         ) {
                             androidx.compose.runtime.CompositionLocalProvider(
                                 LocalModuleWindowCloseRequest provides requestClose,
+                                LocalModuleWindowClosing provides !show,
                             ) {
                                 val backState = rememberNavigationEventState(NavigationEventInfo.None)
                                 NavigationBackHandler(
@@ -239,7 +228,7 @@ private fun AospDialogPanel(
         }
     }
     val scrim = remember(below, dimAmount) {
-        derivedStateOf {
+        computedStateOf {
             androidx.compose.ui.graphics.Color.Black.copy(
                 alpha = dimAmount * WindowAospTransition.scrimFraction(below).coerceIn(0f, 1f),
             )

@@ -20,8 +20,6 @@ import androidx.compose.ui.window.DialogWindowProvider
 
 actual fun platform(): Platform = Platform.Android
 
-actual val hasFocusReassignBug: Boolean = Build.VERSION.SDK_INT <= Build.VERSION_CODES.O_MR1
-
 @Composable
 actual fun getRoundedCorner(): Dp = getSystemCornerRadius()
 

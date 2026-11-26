@@ -16,13 +16,8 @@ import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.blur.BlurColors
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
-import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.blur.textureBlur
-import top.yukonga.miuix.kmp.material.GlassDefaults
-import top.yukonga.miuix.kmp.material.GlassMaterials
-import top.yukonga.miuix.kmp.material.GlassShape
-import top.yukonga.miuix.kmp.material.GlassEdgeStrokes
-import top.yukonga.miuix.kmp.glass.glassPanel
+import top.yukonga.miuix.kmp.glass.GlassCard
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal val LocalAboutBackdrop = staticCompositionLocalOf<LayerBackdrop?> { null }
@@ -36,8 +31,10 @@ internal fun AboutEffectCard(
     val backdrop = LocalAboutBackdrop.current
     val config = LocalModuleThemeConfig.current
     val os4 = config.style == ModuleUiStyle.OS4
-    val glassActive = os4 && config.active.glassEnabled && config.active.blurEnabled &&
-        isRuntimeShaderSupported() && backdrop != null
+    if (config.glassComponents) {
+        GlassCard(modifier = modifier, insideMargin = insideMargin, content = content)
+        return
+    }
     val dark = MiuixTheme.colorScheme.surface.luminance() < 0.5f
     val blendColors = remember(dark) {
         BlurColors(
@@ -46,19 +43,6 @@ internal fun AboutEffectCard(
         )
     }
     val effectModifier = when {
-        glassActive -> Modifier.glassPanel(
-            backdrop = backdrop,
-            shape = remember { GlassShape(16.dp) },
-            style = GlassDefaults.style(dark),
-            material = GlassMaterials.puredThinGlass(dark),
-            stroke = GlassEdgeStrokes.forTheme(
-                isDark = dark,
-                light = GlassEdgeStrokes.SmallLight,
-                dark = GlassEdgeStrokes.SmallDark,
-            ),
-            shadow = null,
-            shading = false,
-        )
         os4 -> Modifier
         backdrop != null -> Modifier.textureBlur(
             backdrop = backdrop,
@@ -73,7 +57,7 @@ internal fun AboutEffectCard(
         cornerRadius = 16.dp,
         insideMargin = insideMargin,
         colors = CardDefaults.defaultColors(
-            color = if (glassActive || (!os4 && backdrop != null)) Color.Transparent
+            color = if (!os4 && backdrop != null) Color.Transparent
                 else MiuixTheme.colorScheme.surfaceContainer,
         ),
         content = content,

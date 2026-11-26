@@ -104,10 +104,10 @@ class MiuixPopupUtils {
         private fun rememberDefaultDialogEnterTransition(largeScreen: Boolean): EnterTransition = remember(largeScreen) {
             if (largeScreen) {
                 fadeIn(
-                    animationSpec = spring(dampingRatio = 0.9f, stiffness = 438.6f, visibilityThreshold = 0.0001f),
+                    animationSpec = spring(dampingRatio = 0.9f, stiffness = 438.6f, visibilityThreshold = 0.001f),
                 ) + scaleIn(
                     initialScale = 0.8f,
-                    animationSpec = spring(dampingRatio = 0.9f, stiffness = 438.6f, visibilityThreshold = 0.0001f),
+                    animationSpec = spring(dampingRatio = 0.9f, stiffness = 438.6f, visibilityThreshold = 0.001f),
                 )
             } else {
                 slideInVertically(
@@ -384,6 +384,8 @@ class MiuixPopupUtils {
                     AnimatedVisibility(
                         visibleState = visibleState,
                         modifier = Modifier.zIndex(dialogState.zIndex - 0.002f),
+                        enter = dialogState.dimEnterTransition ?: EnterTransition.None,
+                        exit = dialogState.dimExitTransition ?: ExitTransition.None,
                     ) {
                         Box(
                             modifier = Modifier
@@ -487,6 +489,8 @@ class MiuixPopupUtils {
                     AnimatedVisibility(
                         visibleState = visibleState,
                         modifier = Modifier.zIndex(popupState.zIndex - 0.002f),
+                        enter = popupState.dimEnterTransition ?: EnterTransition.None,
+                        exit = popupState.dimExitTransition ?: ExitTransition.None,
                     ) {
                         Box(
                             modifier = Modifier

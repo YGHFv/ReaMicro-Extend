@@ -1,0 +1,1031 @@
+{
+  "tag": "v0.9.5-rc01",
+  "commit": "542463a0863b393a3d6052237daae6c3da217e70",
+  "files": [
+    {
+      "path": "miuix-blur/src/androidMain/kotlin/top/yukonga/miuix/kmp/blur/internal/RenderEffectCompat.android.kt",
+      "sha256": "e516b80cc62e135f6f40001f718a7d8644fa6a82e27b03db190246f5f7c6a405",
+      "upstreamSha256": "e516b80cc62e135f6f40001f718a7d8644fa6a82e27b03db190246f5f7c6a405"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/Backdrop.kt",
+      "sha256": "fcea0c6ed1fbc549071c7f8725057f000da6b2170a195fd68ac367643af5c76c",
+      "upstreamSha256": "fcea0c6ed1fbc549071c7f8725057f000da6b2170a195fd68ac367643af5c76c"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/BackdropEffectScope.kt",
+      "sha256": "be4ea407f664691bbf3d5f6b339affa54a5cd11e5859f73061041fe7614df39c",
+      "upstreamSha256": "be4ea407f664691bbf3d5f6b339affa54a5cd11e5859f73061041fe7614df39c"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/BackdropEffects.kt",
+      "sha256": "86c4885cd53cea6252bc8b453f791bd9d0e3eae935c6e78a4d8f1e25ccd082ee",
+      "upstreamSha256": "86c4885cd53cea6252bc8b453f791bd9d0e3eae935c6e78a4d8f1e25ccd082ee"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/BlurDefaults.kt",
+      "sha256": "31ea28bc65022ed297775d41220e3455683418d21eb5a6765bc89eb3362d7cd9",
+      "upstreamSha256": "31ea28bc65022ed297775d41220e3455683418d21eb5a6765bc89eb3362d7cd9"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/DrawBackdropModifier.kt",
+      "sha256": "61a1d58ccd3a506a05fadd8945b3059da5dec1219ec6f8d564a3de4214319543",
+      "upstreamSha256": "61a1d58ccd3a506a05fadd8945b3059da5dec1219ec6f8d564a3de4214319543"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/LayerBackdrop.kt",
+      "sha256": "ad9161c1ee1123db5f83f0ad2d50d80c5b9f3ecfb5f4d5c3ddb09d529ff25a46",
+      "upstreamSha256": "ad9161c1ee1123db5f83f0ad2d50d80c5b9f3ecfb5f4d5c3ddb09d529ff25a46"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/LayerBackdropModifier.kt",
+      "sha256": "5d32ec8ba11a5e8b817f483e63d42b7ec35d7923c48ef26cdc6792c786ea1427",
+      "upstreamSha256": "5d32ec8ba11a5e8b817f483e63d42b7ec35d7923c48ef26cdc6792c786ea1427"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/ProgressiveBlur.kt",
+      "sha256": "c963b4d485c6397f9f0b4842b81b91b4aea1ff2ae3555a39a0c1afc89d470e4d",
+      "upstreamSha256": "c963b4d485c6397f9f0b4842b81b91b4aea1ff2ae3555a39a0c1afc89d470e4d"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/TextureEffect.kt",
+      "sha256": "f77c77e346eafaaea5a54b1662d8a619a1a3b4416c776e20a012b5089da870cd",
+      "upstreamSha256": "f77c77e346eafaaea5a54b1662d8a619a1a3b4416c776e20a012b5089da870cd"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/internal/BlurEffect.kt",
+      "sha256": "24ac314e180ae0ff2180b0c61d49e52a4f4fff779485ab3d794fd972bb8d52f3",
+      "upstreamSha256": "24ac314e180ae0ff2180b0c61d49e52a4f4fff779485ab3d794fd972bb8d52f3"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/internal/InverseLayerScope.kt",
+      "sha256": "52930a84ea1802cb3afcadcc650b922145faa5779f73a57893d508c76d7efa85",
+      "upstreamSha256": "52930a84ea1802cb3afcadcc650b922145faa5779f73a57893d508c76d7efa85"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/internal/LayerRecorder.kt",
+      "sha256": "d5a29bec71105794ab9f055382dbdeb2d3f5196457bb4fc14922ee3079ca3d5b",
+      "upstreamSha256": "d5a29bec71105794ab9f055382dbdeb2d3f5196457bb4fc14922ee3079ca3d5b"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/internal/RenderEffectCompat.kt",
+      "sha256": "d71dccabf0714f50ab60aab58c1e4e4cda615834ff477d9ce5e0b093e0deeb0a",
+      "upstreamSha256": "d71dccabf0714f50ab60aab58c1e4e4cda615834ff477d9ce5e0b093e0deeb0a"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/internal/Shaders.kt",
+      "sha256": "756a9d9ca195c00ab9a3999585338b0e142c05eee57a29cfb6292ee2991c8944",
+      "upstreamSha256": "756a9d9ca195c00ab9a3999585338b0e142c05eee57a29cfb6292ee2991c8944"
+    },
+    {
+      "path": "miuix-blur/src/commonMain/kotlin/top/yukonga/miuix/kmp/blur/internal/ShapeProvider.kt",
+      "sha256": "fe28accbae08787b6df1f2028482eeba46c24d5d05400565f5a1cc1e55fb7fef",
+      "upstreamSha256": "fe28accbae08787b6df1f2028482eeba46c24d5d05400565f5a1cc1e55fb7fef"
+    },
+    {
+      "path": "miuix-core/src/androidMain/kotlin/top/yukonga/miuix/kmp/utils/Utils.android.kt",
+      "sha256": "965f26aeac2b8fa1dd1ef601edac457748032515ba85b48c994b70cc039d2094",
+      "upstreamSha256": "b1b86ced3d66c9b6de56efb9b5c47ae00537db8dc3e1c253adf94cd2249503a4"
+    },
+    {
+      "path": "miuix-core/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/MiuixIcons.kt",
+      "sha256": "94c7934e86aecd984055e24cab24fb4b049b005188826414b47c0ea324a4fefd",
+      "upstreamSha256": "06ecbf9bba1742621ee40f11b217179ccc3fb44a163198181e29558a8c7f5fff"
+    },
+    {
+      "path": "miuix-core/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/Utils.kt",
+      "sha256": "f752c33f50c1f46c8f6f05551826c35d1164cac5ae47a966bd6099c20acbca64",
+      "upstreamSha256": "56a6627869bf554819bb141a73aafd865019aed19e2759b6651f969388973d58"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/Glass.kt",
+      "sha256": "106f40ac8d2613910f65e0fd0ec6fbf480742e0b9397daa7c7801ad2c2fd956d",
+      "upstreamSha256": "106f40ac8d2613910f65e0fd0ec6fbf480742e0b9397daa7c7801ad2c2fd956d"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassCard.kt",
+      "sha256": "b483153732caa0779f739add74e0fcbc2ffa1e8821ba9f25decd028686a58b61",
+      "upstreamSha256": "b483153732caa0779f739add74e0fcbc2ffa1e8821ba9f25decd028686a58b61"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassDialog.kt",
+      "sha256": "5f14fd13851a96a7394fcdacee52a46d51fb9033ec4ddb58be0c90bd3ce4c941",
+      "upstreamSha256": "5f14fd13851a96a7394fcdacee52a46d51fb9033ec4ddb58be0c90bd3ce4c941"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassDialogButton.kt",
+      "sha256": "c885685412e9daf677b2b677ca11cc0081d676f470dc12795d4ccd8ccc81d024",
+      "upstreamSha256": "c885685412e9daf677b2b677ca11cc0081d676f470dc12795d4ccd8ccc81d024"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassDialogSurface.kt",
+      "sha256": "a41cc3f70c7d53dee1bde687863ae4f9cc73c23eb50007e910ad8203ab5221f2",
+      "upstreamSha256": "a41cc3f70c7d53dee1bde687863ae4f9cc73c23eb50007e910ad8203ab5221f2"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassDropdownPopup.kt",
+      "sha256": "2febd51115136dbde285c3c973364353ebfe4c38e1afbe50ee095afcad208579",
+      "upstreamSha256": "d2def14620ec8c0df444c57137a76af6e51fd550e026502d754cb63429099e49"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassDropdownPreference.kt",
+      "sha256": "5149e1baca5495d16913e2c6afef972f6f5098c5dabd91001f217f01f8c1ec62",
+      "upstreamSha256": "5149e1baca5495d16913e2c6afef972f6f5098c5dabd91001f217f01f8c1ec62"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassIconButton.kt",
+      "sha256": "8f1325ac0dab3abaa3b35f8ffe6bec029cdb2130c4141694eea53db0beb4ed76",
+      "upstreamSha256": "8f1325ac0dab3abaa3b35f8ffe6bec029cdb2130c4141694eea53db0beb4ed76"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassIconDropdownMenu.kt",
+      "sha256": "3d81e7e25ddab223caac168bec4c200a2e462aa108d080fc0daaba626ff7e257",
+      "upstreamSha256": "3d81e7e25ddab223caac168bec4c200a2e462aa108d080fc0daaba626ff7e257"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassMotion.kt",
+      "sha256": "86f74beb91d7079f7cb1bce591498cf961e4925caa06ca6960c4f5b2ea95216c",
+      "upstreamSha256": "86f74beb91d7079f7cb1bce591498cf961e4925caa06ca6960c4f5b2ea95216c"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassNavigationBar.kt",
+      "sha256": "02269ea9c3c7d410f8913115516dd0f43c01a6bbe19687d0823e7ffde87b72c6",
+      "upstreamSha256": "02269ea9c3c7d410f8913115516dd0f43c01a6bbe19687d0823e7ffde87b72c6"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassNavigationBarLayout.kt",
+      "sha256": "923a292826ce69a619b99109ec3e4e665be044f772a0886d1cb62e0b0e128b46",
+      "upstreamSha256": "923a292826ce69a619b99109ec3e4e665be044f772a0886d1cb62e0b0e128b46"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassNavigationIndicator.kt",
+      "sha256": "b4469c8fa1a684beb8db634998b6668e8af49b0e5043ebc720741365f90bfe39",
+      "upstreamSha256": "b4469c8fa1a684beb8db634998b6668e8af49b0e5043ebc720741365f90bfe39"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassPanel.kt",
+      "sha256": "f5d7edd0218a9bbff6add02f4594d8c0d282a31c5c768b2d6e8fb9b1f7c036eb",
+      "upstreamSha256": "f5d7edd0218a9bbff6add02f4594d8c0d282a31c5c768b2d6e8fb9b1f7c036eb"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassPopup.kt",
+      "sha256": "9b94e12652a4894df85985a78ca53082b92309347e880bbbcda656a6527bc13f",
+      "upstreamSha256": "a2c8ba6cc2ba8437e02771646c28f5211ba6285756f455cca67d51dc3ae44323"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassPopupBackProgress.kt",
+      "sha256": "146c91e732c0bf7ca92984175f9570b6054da358bd6f6a37202aac52f5e39a3b",
+      "upstreamSha256": "146c91e732c0bf7ca92984175f9570b6054da358bd6f6a37202aac52f5e39a3b"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassPopupColumn.kt",
+      "sha256": "7dfe40232a6957328a82ededce032542124e9892f3b58e065065ffd60b469a5f",
+      "upstreamSha256": "7dfe40232a6957328a82ededce032542124e9892f3b58e065065ffd60b469a5f"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassPopupSurface.kt",
+      "sha256": "7e169a40b480271bc65327a5f423a43651a3dfecf3e69f64cfc494dec5367731",
+      "upstreamSha256": "7e169a40b480271bc65327a5f423a43651a3dfecf3e69f64cfc494dec5367731"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassPress.kt",
+      "sha256": "8abee963ce6b9902a2de8386bbca9398da8979936b7ce7c13d39912e13666788",
+      "upstreamSha256": "8abee963ce6b9902a2de8386bbca9398da8979936b7ce7c13d39912e13666788"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassSecondaryPopup.kt",
+      "sha256": "0146f2ad38d3adebfebbbda3b096aeeffd84b8ee8961db373e7800919bfbad9a",
+      "upstreamSha256": "0146f2ad38d3adebfebbbda3b096aeeffd84b8ee8961db373e7800919bfbad9a"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassTextField.kt",
+      "sha256": "a821741f530801b55e6ee93768b67337b7b0845705860607c839fadb3514384b",
+      "upstreamSha256": "a821741f530801b55e6ee93768b67337b7b0845705860607c839fadb3514384b"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassTopAppBar.kt",
+      "sha256": "69a757a8894d82c8b8b4418a1d4f5bbf211e2853a30774cf9a462588e4cd38dc",
+      "upstreamSha256": "69a757a8894d82c8b8b4418a1d4f5bbf211e2853a30774cf9a462588e4cd38dc"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/GlassTransformPopup.kt",
+      "sha256": "21f532fe3ee034cd5d52553ce84550e159c43ed75d032fb8d8f6eb71ff9a7f07",
+      "upstreamSha256": "3a4b17de6c433d40d7666b2dccde57673f84a57e50ac26a13948124454bcabba"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/NavigationDragTarget.kt",
+      "sha256": "6a053a2202c4fbba06c1e20d26a6493fed7e5fca96a48ef4a02a65209213f659",
+      "upstreamSha256": "21f9cc5f4192ad838cabe4bd897ef979b459d721eef22e9311e607db4266b8bd"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/internal/GlassHeaderContext.kt",
+      "sha256": "50082a38f0d582b1cf9a59cbbacb312ba9c7161069060ec3e47919bdb253ebe8",
+      "upstreamSha256": "50082a38f0d582b1cf9a59cbbacb312ba9c7161069060ec3e47919bdb253ebe8"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/internal/GlassShader.kt",
+      "sha256": "2c1e1ea8dd407a43637c6fc82d211b8e069675845861a65f62bd217fa45fc60a",
+      "upstreamSha256": "2c1e1ea8dd407a43637c6fc82d211b8e069675845861a65f62bd217fa45fc60a"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/internal/GlassUniforms.kt",
+      "sha256": "482826c3d78564e6b0e2a19ca25b225d85d3af819c328581fb5ad80a3513a53d",
+      "upstreamSha256": "6de21d5d2b7f4775eca22bba62094f7d1ded27dbe6065971e64ceac1fb7a47f2"
+    },
+    {
+      "path": "miuix-glass/src/commonMain/kotlin/top/yukonga/miuix/kmp/glass/internal/ScrimBackdrop.kt",
+      "sha256": "f17435373fca93653a016b12c10afee9ca8ae3e98d60a9f16882559409877da6",
+      "upstreamSha256": "f17435373fca93653a016b12c10afee9ca8ae3e98d60a9f16882559409877da6"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/ClockFill.kt",
+      "sha256": "241eadf64896394c6fd8eef7bfbda014577a16b15df483e22a2eb37e3700bf74",
+      "upstreamSha256": "766fd1ac2f0fc3b08e5f4a528cb5dc6bbf4efe290a6f54c29e6e3ad4f883027c"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Close.kt",
+      "sha256": "3e00b9b587b0bd4ffbd79cab62484ef9dff656f02dea95973ade8ae27a983feb",
+      "upstreamSha256": "fb947ab34df531129dc1312b11c9788cd47818a0797895c0eac4900d729ae9e9"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Contacts.kt",
+      "sha256": "bf9899490bcec1e354e257c19786a232f5de81be6fbd9ef62ba8575b5ccb1c29",
+      "upstreamSha256": "0ea589908d9edf10905129a0890017ff551213b61f8fabb4be91dd1de90127b2"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Delete.kt",
+      "sha256": "26b085509d5a05b01b85340f40d2ed1ef80dbd776131c5c8b607a157050c6edd",
+      "upstreamSha256": "2ffdb56e8f7f06799d1c7f3dfa42ec8939c6997555bd235b7328313573d30024"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/HyperOSIconBuilder.kt",
+      "sha256": "23404b1cc21f12b2d294b07837176bb6a4236600ab0862a8bf53485e1b34b704",
+      "upstreamSha256": "b532cacb86d1e16ee4403721fa63a8d2c5a405bb6b561fb385523d92234a83f2"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Info.kt",
+      "sha256": "9ba1bb37f8b7614b2d0256e380b57af95dfba2a8245e20f58567346483827ba0",
+      "upstreamSha256": "245728160976f542b22db6197fb9e62b7f67ebbc0e26f1a78cc2aa15d53de364"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Play.kt",
+      "sha256": "663a16be138b3910531ccc18d0e3929f3c69dc9e2d8692f698d646d6b49f80f8",
+      "upstreamSha256": "fc76c42ecefaa7e3721bcd2f086aa96b612da1d2f2c76e3a4c2515d9ab45eea3"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/SelectAll.kt",
+      "sha256": "94a895a50d736fef14f8a73f2c1d43b64d8c272cbbed242302bc0ca8ce0259f9",
+      "upstreamSha256": "c7276f7f42030d970142c5ae3c7c583d9837f2710d3bc257b8ab11c60063e57b"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/SettingsOutline.kt",
+      "sha256": "fece1afec8e3970493f7a984fb6567c2fa3be12ccce55d05483880cfbe74ae79",
+      "upstreamSha256": "fa22fd5a85f94681ed0ccfefc4e64aacb2bc4ed00739ea9c66ddac9141925792"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Sort.kt",
+      "sha256": "b2d83f828dd693c7e68b2858ae8d11fbc579d146c7e5cd3a655fb81edfc18b01",
+      "upstreamSha256": "84ccee8e42ca1aaa63d3700c9421fde715641c6e4459f4e48a9ed5f017c30f4e"
+    },
+    {
+      "path": "miuix-glass-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/glass/Tasks.kt",
+      "sha256": "83aa5ac167bf3df2a50e5adfacde0be75c76d294017e03bb9c8bb4b3262768eb",
+      "upstreamSha256": "6c34ee983c78e35c55682535c5895ae0d6151a8fc225352fc2993dd1a6cd5343"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Close.kt",
+      "sha256": "5749740374c05ca1923afe5834e44e05bdaafe764267ac1114381fa960ddba49",
+      "upstreamSha256": "023dd0c76b4c0c8ca06f165c0fe71be481bc0de251c0fde762e8cd9f44e38a79"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Contacts.kt",
+      "sha256": "1eb19eda46605ddf2167a8e914b569e2bd6d19ff9b868df60e019f55934ab933",
+      "upstreamSha256": "0ff82377e6e04f71b850491f703cf340a3f3344229f95c9aa759ea529c392385"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Delete.kt",
+      "sha256": "9709c9762c599f91eb4783db99b906ecfedde5f709442c57e729ecbe45570f73",
+      "upstreamSha256": "30833e8a1cfc44f1c760d059db05024815de49cc2004a7f67e55c4183a670e75"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Info.kt",
+      "sha256": "38116085399b11685d681e6b3de4a9c7a005dc1f26267a06fea8b2b103591f9c",
+      "upstreamSha256": "b8ed9f958f50d1684900b106c251a57ac7e84d681ce5d2389dd3b9632de2a9a5"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Play.kt",
+      "sha256": "057b528e1420e53db36236f985b6bd921cf101cda047cbf1932c2ae673435b8e",
+      "upstreamSha256": "9763f7bc1d6a962be81fc59d2cda650d83b31a5e53267ef9c1ea879b15c37ea6"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Recent.kt",
+      "sha256": "65b2a97d12a58ef1b0a606754417fae90209434aba6ccea04f677085a08fcdf2",
+      "upstreamSha256": "abb39cc3b79401efc89813f1ffe579f410c3dd3d003b1078bfb7a42b62ee6211"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/SelectAll.kt",
+      "sha256": "419a9de85d8f9f71d82044cab3461cfa847b5c28a51e06f47873349e76f3f080",
+      "upstreamSha256": "08a8641ad0e0e5dcffcf279032d94c940ef5c5975c905a06f6f2af78de566ca9"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Settings.kt",
+      "sha256": "12a8c60265a7533ada5fcdecf731fb2cfe4e3bf2e2153eb7a21f635f45a5fdd4",
+      "upstreamSha256": "8056f7c9f6fc35bcf67f5c5ca5c760754c6d7fa6e7251bd1cd18e25f053774c6"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Sort.kt",
+      "sha256": "3c0d3bdbec3388e6306df7c856c6cf3f752a635ba00c81798fd1614966f26f37",
+      "upstreamSha256": "dff09e6a2e941c45ef2a0114fbf052a9ccea5e57b0e3c31520ca72cf1ff939b0"
+    },
+    {
+      "path": "miuix-icons/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/extended/Tasks.kt",
+      "sha256": "5908da0675e16034811a8f8facde011463195cde651fc9204bc8eca51841a4d7",
+      "upstreamSha256": "c5ba1474a2e0075f25b1bd44907bcdb098ae43b67e15acfd9ae66a394dccaf50"
+    },
+    {
+      "path": "miuix-material/src/androidMain/kotlin/top/yukonga/miuix/kmp/material/RuntimeShader.android.kt",
+      "sha256": "9af9c2c2889d8f4b5f87f984328cd9b7504f84e02daa110c1b3b69f07f966952",
+      "upstreamSha256": "d091e228a8e8d88053c302073556119535bdac6d343fdef1160a4ad17a827402"
+    },
+    {
+      "path": "miuix-material/src/androidMain/kotlin/top/yukonga/miuix/kmp/material/sensor/DeviceTilt.android.kt",
+      "sha256": "d32a26a4dc9d49f78def3854467b6494420bc4db3febaeca041a6a741e097a14",
+      "upstreamSha256": "d32a26a4dc9d49f78def3854467b6494420bc4db3febaeca041a6a741e097a14"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/EdgeStroke.kt",
+      "sha256": "9d700cedf18e90bdbe7f574f7fc95420d7233f5b8eaef35060864676d5788956",
+      "upstreamSha256": "65bfb2d499eddf4f675f21d61d036770d9e34105b6b66e352b755fb558b23e2e"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/EdgeStrokeDrawing.kt",
+      "sha256": "52f76a61333a70b6c81bcf242cec644b5201e90534601fc526faebef6c3051e9",
+      "upstreamSha256": "52f76a61333a70b6c81bcf242cec644b5201e90534601fc526faebef6c3051e9"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/EdgeStrokeModifier.kt",
+      "sha256": "cdaf284d2e326afd9eea03016cb580dac09472c09758ede2b74d8204c6243369",
+      "upstreamSha256": "cdaf284d2e326afd9eea03016cb580dac09472c09758ede2b74d8204c6243369"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassDefaults.kt",
+      "sha256": "fe25deb3e479143b3ae5e396694f856e12305d757f957d49f28c19e5b3f74910",
+      "upstreamSha256": "fe25deb3e479143b3ae5e396694f856e12305d757f957d49f28c19e5b3f74910"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassMaterial.kt",
+      "sha256": "6a369115a143786cb3581114895478cce5c02a10b5a9c74bb10e4cdcb24541b7",
+      "upstreamSha256": "6a369115a143786cb3581114895478cce5c02a10b5a9c74bb10e4cdcb24541b7"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassMaterials.kt",
+      "sha256": "4b79d5ebb0c843d63e1fc43e4e9f1ebeba94eef180604bff811464d31f7943d3",
+      "upstreamSha256": "4b79d5ebb0c843d63e1fc43e4e9f1ebeba94eef180604bff811464d31f7943d3"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassOverlays.kt",
+      "sha256": "78092d49a6d5e0a7003dc49e2650afad8f7b79c59925d2826883fc74fa2e6b10",
+      "upstreamSha256": "78092d49a6d5e0a7003dc49e2650afad8f7b79c59925d2826883fc74fa2e6b10"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassShadow.kt",
+      "sha256": "fff99983c06ec096d66647142006369b076f61b0c2fc2fe8becfe62288f7f22f",
+      "upstreamSha256": "fff99983c06ec096d66647142006369b076f61b0c2fc2fe8becfe62288f7f22f"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassShape.kt",
+      "sha256": "6b99b0e0d1594fb47ac11505ff26d0b16c075a65a96c1901eaa7fcd783df4a59",
+      "upstreamSha256": "6b99b0e0d1594fb47ac11505ff26d0b16c075a65a96c1901eaa7fcd783df4a59"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassStyle.kt",
+      "sha256": "6e2b3cf41bf2ed0b390d4c4a27d848a1159fbffabb594095755e06dcf7f0919c",
+      "upstreamSha256": "6e2b3cf41bf2ed0b390d4c4a27d848a1159fbffabb594095755e06dcf7f0919c"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/GlassStyles.kt",
+      "sha256": "db0ec29975e9e17219e13da17feb7c7b4e3235c41ddb835b45f3a30fd637a2cb",
+      "upstreamSha256": "db0ec29975e9e17219e13da17feb7c7b4e3235c41ddb835b45f3a30fd637a2cb"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/RuntimeShader.kt",
+      "sha256": "c712d8aa58eeebd644531c7ef24c526dc91a982be019ca38189457b32d0c16a3",
+      "upstreamSha256": "ee95838564f97e0707a3eb1151bea557f71749ec3039e8bb6bcef7e9385fa30e"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/RuntimeShaderCache.kt",
+      "sha256": "b7cd450ba21aebeb3106f36f429ff1caf7582889ff04621f92a6700f5bddcbb4",
+      "upstreamSha256": "b7cd450ba21aebeb3106f36f429ff1caf7582889ff04621f92a6700f5bddcbb4"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/agsl/MaterialAgsl.kt",
+      "sha256": "4b558f626529b147eeaacd5fc1edb292423535f1a2e52608c069ad29e305f536",
+      "upstreamSha256": "4b558f626529b147eeaacd5fc1edb292423535f1a2e52608c069ad29e305f536"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/internal/EdgeStrokeDrawing.kt",
+      "sha256": "820f210904b8d51230f655c20c08eaaf27b1f009a92b119d70e92da33b9fbaed",
+      "upstreamSha256": "820f210904b8d51230f655c20c08eaaf27b1f009a92b119d70e92da33b9fbaed"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/internal/EdgeStrokeShader.kt",
+      "sha256": "8e7049f4e4c6bd9aaf2c977fbcb27085f320a08926997fd4e033e020f26b4a7a",
+      "upstreamSha256": "8e7049f4e4c6bd9aaf2c977fbcb27085f320a08926997fd4e033e020f26b4a7a"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/internal/GlassShaderCore.kt",
+      "sha256": "f6334b3204d0c683cbecafc4fccc073fba430edb0ee5f1f1fb94bcbdd9a880fe",
+      "upstreamSha256": "f6334b3204d0c683cbecafc4fccc073fba430edb0ee5f1f1fb94bcbdd9a880fe"
+    },
+    {
+      "path": "miuix-material/src/commonMain/kotlin/top/yukonga/miuix/kmp/material/sensor/DeviceTilt.kt",
+      "sha256": "bd47301c596a3f62a47f12090d72a1d5ec3d9e9e877f6385254fd3b8d344fad2",
+      "upstreamSha256": "bd47301c596a3f62a47f12090d72a1d5ec3d9e9e877f6385254fd3b8d344fad2"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/LiveNavTransitionScope.kt",
+      "sha256": "5ec9be95fe36121058d603fdd61bf9e1da8aadece0719613dbb37ca97882d913",
+      "upstreamSha256": "5ec9be95fe36121058d603fdd61bf9e1da8aadece0719613dbb37ca97882d913"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/LocalNavTransitionScope.kt",
+      "sha256": "af79c44044a8924a48e3bcb553e25361aca12050903298177b6f74da09741e27",
+      "upstreamSha256": "af79c44044a8924a48e3bcb553e25361aca12050903298177b6f74da09741e27"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/NavBackStack.kt",
+      "sha256": "47bfad703f9039d12faef0626ae5905717e31d8d8d6856518d90d83a53ba9c32",
+      "upstreamSha256": "4f7ca1bd3df0a202dae1c6d1fbe11f8cc570b8ff4d943cf3421717f9b4b7a4bd"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/NavController.kt",
+      "sha256": "7d9b187a90636992f8564f758b1d3e3ef84e464dd8b7c246965568751a589eff",
+      "upstreamSha256": "ea5ea1792c3daf1ee695f3cff4a3263a2895a0d5dac29abc634692b3ec0e3578"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/NavDisplay.kt",
+      "sha256": "eb786e83f9f6051ea49a19c5eed563b83638dc8c79929c09318d86967a8af431",
+      "upstreamSha256": "eb786e83f9f6051ea49a19c5eed563b83638dc8c79929c09318d86967a8af431"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/NavDisplayEffects.kt",
+      "sha256": "06cdf1b6ac24e2895ee126f68841f0540737e7f511da593372074db8688394b5",
+      "upstreamSha256": "06cdf1b6ac24e2895ee126f68841f0540737e7f511da593372074db8688394b5"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/NavEntry.kt",
+      "sha256": "135f21ccbda30dccee9a1981ef48fad1da4287797d4c5a8f148f0ffaf401c871",
+      "upstreamSha256": "135f21ccbda30dccee9a1981ef48fad1da4287797d4c5a8f148f0ffaf401c871"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/core/NavKey.kt",
+      "sha256": "de94a5378c33b2f539c4892c6109f4ab5e3ba6fa9961b6747bff361abe243241",
+      "upstreamSha256": "de94a5378c33b2f539c4892c6109f4ab5e3ba6fa9961b6747bff361abe243241"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/gesture/NavPredictiveBackDriver.kt",
+      "sha256": "6782eb2c7e459e5398ab9e54f1432b8da71389453b29d4231c5db66478e34c7a",
+      "upstreamSha256": "6782eb2c7e459e5398ab9e54f1432b8da71389453b29d4231c5db66478e34c7a"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/gesture/NavReentryInput.kt",
+      "sha256": "a8240f44662b33905f61d73834466cc5a81c4c5b0053276850f7b64220f1be24",
+      "upstreamSha256": "a8240f44662b33905f61d73834466cc5a81c4c5b0053276850f7b64220f1be24"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/gesture/NavSwipeArbitrator.kt",
+      "sha256": "7b424205440d6e3b7313f1a802871bb4f2d1489de0ebe3fc8f3f16222d1f614c",
+      "upstreamSha256": "7b424205440d6e3b7313f1a802871bb4f2d1489de0ebe3fc8f3f16222d1f614c"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/gesture/NavSwipeDismiss.kt",
+      "sha256": "d6f7bb9e904e8691409caeae73097f3118e27b35eba73960419081ed778bcb7d",
+      "upstreamSha256": "d16b3d37d63a48a3a2f73f4eec875eb624650536a9c445e7b5309aa057757a9e"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/gesture/PredictiveBackHandler.kt",
+      "sha256": "a746079b3ff886a341670e82503911fe63aa43f2794978eed1c3b7e8eefd8421",
+      "upstreamSha256": "0fb1deef75e82c3eb6e6a13f23f926cc153542b98d1591a67fd6ea04ceb038a2"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/runtime/NavChange.kt",
+      "sha256": "2c6141d76ba514c975ab6e208c0ca27c8920426ba9408f3db4ae54402812cfdf",
+      "upstreamSha256": "2c6141d76ba514c975ab6e208c0ca27c8920426ba9408f3db4ae54402812cfdf"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/runtime/NavDriver.kt",
+      "sha256": "b0950f494e6d052e63b962ddeb8bc4fdc4bd9f5639d44554fdaccaa51833c768",
+      "upstreamSha256": "7bf819a442c30d01ae3b7f1a01ff1274e489328ed6f2d99893c7f806bbc6dabf"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/runtime/NavPresentation.kt",
+      "sha256": "ea4f121e36940d79384feb617bd02985b39be287556ba318be712268ced77274",
+      "upstreamSha256": "ea4f121e36940d79384feb617bd02985b39be287556ba318be712268ced77274"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/runtime/NavReconciler.kt",
+      "sha256": "9b285ef96e4b0a5cd2ca0b8a0a0f6f9eb355de68e51ea974cd4d15cc095905af",
+      "upstreamSha256": "9b285ef96e4b0a5cd2ca0b8a0a0f6f9eb355de68e51ea974cd4d15cc095905af"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/runtime/NavSettleEasing.kt",
+      "sha256": "05df7e6f7977716c562675385c4f645148095383e28be97711854b2e975659dc",
+      "upstreamSha256": "05df7e6f7977716c562675385c4f645148095383e28be97711854b2e975659dc"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/state/NavEntryLifecycle.kt",
+      "sha256": "57bb58004aad4714100226bb104fe891be90e5f2cd533ae1c53c47e13edf6942",
+      "upstreamSha256": "57bb58004aad4714100226bb104fe891be90e5f2cd533ae1c53c47e13edf6942"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/state/NavEntryViewModel.kt",
+      "sha256": "522e62783a9ea881ea01ec22cf23d4d2f15c2bdea9db7e0b8dd60ebd5d812d52",
+      "upstreamSha256": "522e62783a9ea881ea01ec22cf23d4d2f15c2bdea9db7e0b8dd60ebd5d812d52"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/state/NavSaveableStateHolder.kt",
+      "sha256": "ce81465354efcbc169b517e1a473ee6fd6c66ed76d723b231635ba4d30c54be3",
+      "upstreamSha256": "ce81465354efcbc169b517e1a473ee6fd6c66ed76d723b231635ba4d30c54be3"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavDirectionalTransition.kt",
+      "sha256": "cc55258ac20c73fc7633a57d4bc81cadc8131257400ae647e3fca57f1d4a0d77",
+      "upstreamSha256": "cc55258ac20c73fc7633a57d4bc81cadc8131257400ae647e3fca57f1d4a0d77"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavMotion.kt",
+      "sha256": "e284425e6e73bf121499915162f1f876b96654b6ed46cbe8ebf331e0eaa9ea80",
+      "upstreamSha256": "e284425e6e73bf121499915162f1f876b96654b6ed46cbe8ebf331e0eaa9ea80"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavRole.kt",
+      "sha256": "237132fa96b27af882cc3defd7a72785369a6c25aac35932c49a7664996781df",
+      "upstreamSha256": "237132fa96b27af882cc3defd7a72785369a6c25aac35932c49a7664996781df"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavTransition.kt",
+      "sha256": "0e0b2aaa52a93210152b3f4127b290e175702679eaafab0cdf5626feca4f73a2",
+      "upstreamSha256": "0e0b2aaa52a93210152b3f4127b290e175702679eaafab0cdf5626feca4f73a2"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavTransitionAnchor.kt",
+      "sha256": "80f206220e0e7b06b95e466f0aa83835e7eb174e3a96fe81dae292666e7918c4",
+      "upstreamSha256": "80f206220e0e7b06b95e466f0aa83835e7eb174e3a96fe81dae292666e7918c4"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavTransitionScope.kt",
+      "sha256": "7c4d4f67cb47c62b699868db25a00526100d73a21459276b7c64f1da6d5b9e19",
+      "upstreamSha256": "7c4d4f67cb47c62b699868db25a00526100d73a21459276b7c64f1da6d5b9e19"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavTransitionSource.kt",
+      "sha256": "5d21412714219541d8ff6989456dc7352286e9c3a558be2d061ee38f465fa9cb",
+      "upstreamSha256": "c3405a01ee0a4a370570f4b2803cbfd7483e41c7350d569e726fd95e71cf880d"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/NavTransitions.kt",
+      "sha256": "c7d358c7d1897198437dfd6ba9064659d312b134f80b533ad8a0854ed1457b5f",
+      "upstreamSha256": "c7d358c7d1897198437dfd6ba9064659d312b134f80b533ad8a0854ed1457b5f"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavConcavePolygon.kt",
+      "sha256": "d91e655bf3ba32f427d7ab00b781c29057a6eee6169a98f4241e25b6b3aeb1d5",
+      "upstreamSha256": "d91e655bf3ba32f427d7ab00b781c29057a6eee6169a98f4241e25b6b3aeb1d5"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavExpandRenderer.kt",
+      "sha256": "4239f156b9ab719b9d5839b446d13d59b06dddf541643f9d13b8569d0907118f",
+      "upstreamSha256": "4239f156b9ab719b9d5839b446d13d59b06dddf541643f9d13b8569d0907118f"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavExpandTransition.kt",
+      "sha256": "465a8fdf874515156e224718525dde06ac3584968025227ab3717113401d1668",
+      "upstreamSha256": "465a8fdf874515156e224718525dde06ac3584968025227ab3717113401d1668"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavExpansionPreset.kt",
+      "sha256": "c53cb7a9bfef1c1a90aef3e76d62def15555cde788138d386f9bd541e578157c",
+      "upstreamSha256": "c53cb7a9bfef1c1a90aef3e76d62def15555cde788138d386f9bd541e578157c"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavExpansionState.kt",
+      "sha256": "487dfee65dc936cd34f71316236c5bdc64a672c0422b143a3fba89983b09c5ee",
+      "upstreamSha256": "487dfee65dc936cd34f71316236c5bdc64a672c0422b143a3fba89983b09c5ee"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavOutlineMorph.kt",
+      "sha256": "c34d7927472a43c2435b3506a21f91eece734cad9ee490c05c18ce59ad1d882f",
+      "upstreamSha256": "c34d7927472a43c2435b3506a21f91eece734cad9ee490c05c18ce59ad1d882f"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavSourceOutline.kt",
+      "sha256": "22d0bbcaa25841e2a0b55278da9a895e61b40c1333ac817342d7efa6ce865c99",
+      "upstreamSha256": "22d0bbcaa25841e2a0b55278da9a895e61b40c1333ac817342d7efa6ce865c99"
+    },
+    {
+      "path": "miuix-nav/src/commonMain/kotlin/top/yukonga/miuix/kmp/nav/transition/internal/NavTransitionHost.kt",
+      "sha256": "0d24f80bdd428a5112cd0f787d2d9cfe12b4c60dbdf1efb266d7af877c2fd371",
+      "upstreamSha256": "0d24f80bdd428a5112cd0f787d2d9cfe12b4c60dbdf1efb266d7af877c2fd371"
+    },
+    {
+      "path": "miuix-preference/src/commonMain/kotlin/top/yukonga/miuix/kmp/popup/DropdownEntriesContent.kt",
+      "sha256": "cd835c6907ac13195acd35b9b65875cc9934e5e52a05a8385fee413097d6fdac",
+      "upstreamSha256": "878908c6b36b1dfa50ff150f948b7a218a6c782c23e4563c91e4f71a51f65931"
+    },
+    {
+      "path": "miuix-preference/src/commonMain/kotlin/top/yukonga/miuix/kmp/popup/OverlayDropdownPopup.kt",
+      "sha256": "ce0083047809b3f1797171eb29b50f6b03a460f517fc1c1ada9ef287b3b61f47",
+      "upstreamSha256": "ca3fe3086a447945333d6c40bdf70f011d37dfd1eba2bc1c30e3f70e17997a3d"
+    },
+    {
+      "path": "miuix-preference/src/commonMain/kotlin/top/yukonga/miuix/kmp/preference/ArrowPreference.kt",
+      "sha256": "610709299b5c64490f46e32bbef0ccfdd7757195e9af40e02697127734d5f5e3",
+      "upstreamSha256": "610709299b5c64490f46e32bbef0ccfdd7757195e9af40e02697127734d5f5e3"
+    },
+    {
+      "path": "miuix-preference/src/commonMain/kotlin/top/yukonga/miuix/kmp/preference/OverlayDropdownPreference.kt",
+      "sha256": "51a1e625e46f518f6667ed40f5c6006ed4503ccacfe21fbef1385c9fc2b63a26",
+      "upstreamSha256": "51a1e625e46f518f6667ed40f5c6006ed4503ccacfe21fbef1385c9fc2b63a26"
+    },
+    {
+      "path": "miuix-preference/src/commonMain/kotlin/top/yukonga/miuix/kmp/preference/SwitchPreference.kt",
+      "sha256": "1fe0927c31f667e35c7fd370b940f1111e555f06192e900f5e1a6543a221e28e",
+      "upstreamSha256": "1fe0927c31f667e35c7fd370b940f1111e555f06192e900f5e1a6543a221e28e"
+    },
+    {
+      "path": "miuix-squircle/src/androidMain/kotlin/top/yukonga/miuix/kmp/squircle/internal/AlphaImageBitmap.android.kt",
+      "sha256": "68b5653ccf0b6579234368ac29a12f53459ff8d711e59b59278e46258d99a681",
+      "upstreamSha256": "68b5653ccf0b6579234368ac29a12f53459ff8d711e59b59278e46258d99a681"
+    },
+    {
+      "path": "miuix-squircle/src/commonMain/kotlin/top/yukonga/miuix/kmp/squircle/LocalSquircleEnabled.kt",
+      "sha256": "a1749751a4fa71bd35b1352eebd44c15acfd43ee826bfc13f8c1f2fc5f57c27f",
+      "upstreamSha256": "a1749751a4fa71bd35b1352eebd44c15acfd43ee826bfc13f8c1f2fc5f57c27f"
+    },
+    {
+      "path": "miuix-squircle/src/commonMain/kotlin/top/yukonga/miuix/kmp/squircle/SquircleBackground.kt",
+      "sha256": "6d7866edba6e670f0f157e4ee3add01cbb4ab30f1ccb75580f168875bc063070",
+      "upstreamSha256": "cc917e80f58823fefb0413f88f9ee16da2b8f586236803182ee790dc58bcfaf5"
+    },
+    {
+      "path": "miuix-squircle/src/commonMain/kotlin/top/yukonga/miuix/kmp/squircle/SquircleBorder.kt",
+      "sha256": "96eae6a2ce49f7b6b2dd96a6f812e3b4a4d184acc955ab6b0abb32079880caa3",
+      "upstreamSha256": "96eae6a2ce49f7b6b2dd96a6f812e3b4a4d184acc955ab6b0abb32079880caa3"
+    },
+    {
+      "path": "miuix-squircle/src/commonMain/kotlin/top/yukonga/miuix/kmp/squircle/SquirclePath.kt",
+      "sha256": "03d7976fec39b2b2b26335be277d19f08ab8b230e68f2ff1c995a2ad7700ce69",
+      "upstreamSha256": "03d7976fec39b2b2b26335be277d19f08ab8b230e68f2ff1c995a2ad7700ce69"
+    },
+    {
+      "path": "miuix-squircle/src/commonMain/kotlin/top/yukonga/miuix/kmp/squircle/internal/AlphaImageBitmap.kt",
+      "sha256": "6b59b4345bc47a75abe93add8e6af0db508f0497672101e130d5a6a3b4b15970",
+      "upstreamSha256": "6b59b4345bc47a75abe93add8e6af0db508f0497672101e130d5a6a3b4b15970"
+    },
+    {
+      "path": "miuix-ui/src/androidMain/kotlin/top/yukonga/miuix/kmp/theme/DynamicColors.android.kt",
+      "sha256": "f50d81aa1673087ff599db0d7889758e8548500e5750099ad99b0cdb659c696e",
+      "upstreamSha256": "f50d81aa1673087ff599db0d7889758e8548500e5750099ad99b0cdb659c696e"
+    },
+    {
+      "path": "miuix-ui/src/androidMain/kotlin/top/yukonga/miuix/kmp/theme/ProvideDisplayCutoutFix.android.kt",
+      "sha256": "4fddde7a27dcd6c8d7354ceb6d581a089437ecb2c12dc18392113ab2177c4692",
+      "upstreamSha256": "4fddde7a27dcd6c8d7354ceb6d581a089437ecb2c12dc18392113ab2177c4692"
+    },
+    {
+      "path": "miuix-ui/src/androidMain/kotlin/top/yukonga/miuix/kmp/utils/PagerNonTouchScroll.android.kt",
+      "sha256": "ad356b070c54eaa73fc63cfc719e6d0f5028db48c3aebcda5c81cfda4dc9d5ac",
+      "upstreamSha256": "ad356b070c54eaa73fc63cfc719e6d0f5028db48c3aebcda5c81cfda4dc9d5ac"
+    },
+    {
+      "path": "miuix-ui/src/androidMain/kotlin/top/yukonga/miuix/kmp/utils/WindowNavigationEventScope.android.kt",
+      "sha256": "b1240856f1d0769a699b6a34bf2a6c948ba362d2843a5f2563079480483f4603",
+      "upstreamSha256": "b1240856f1d0769a699b6a34bf2a6c948ba362d2843a5f2563079480483f4603"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/anim/AccelerateEasing.kt",
+      "sha256": "443f96899e81385884ebf03e4271f85650c1a4bb55e70012a65e0a2f69577f98",
+      "upstreamSha256": "443f96899e81385884ebf03e4271f85650c1a4bb55e70012a65e0a2f69577f98"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/anim/DecelerateEasing.kt",
+      "sha256": "3c5877e63432c812c0b47cbb90896c883a130e5508442cfbfe21448b582f3b62",
+      "upstreamSha256": "3c5877e63432c812c0b47cbb90896c883a130e5508442cfbfe21448b582f3b62"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/anim/MiuixEasing.kt",
+      "sha256": "997a0dda3c9258e609858e24ddc27058d1ce5d5f7a52fc87aad2ac1e4384556e",
+      "upstreamSha256": "997a0dda3c9258e609858e24ddc27058d1ce5d5f7a52fc87aad2ac1e4384556e"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/anim/SinOutEasing.kt",
+      "sha256": "a5fd1d9f2f024cfc3b5b25caf098b266e12180e01c92ef7685c315143362dffb",
+      "upstreamSha256": "a5fd1d9f2f024cfc3b5b25caf098b266e12180e01c92ef7685c315143362dffb"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Badge.kt",
+      "sha256": "bbec6ce76019be6579cd90882c21e5245dbaf3e1958560edb1827e7981ebbc85",
+      "upstreamSha256": "39d27a86e43cbe71990f2f81e15da1617b08c5fb227037dde61349fa48bf6e68"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Button.kt",
+      "sha256": "1bd0eefc46d063344fc1979e9302df6a60058f759dd52ab8fef7c8bab1d3e0ba",
+      "upstreamSha256": "1bd0eefc46d063344fc1979e9302df6a60058f759dd52ab8fef7c8bab1d3e0ba"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Card.kt",
+      "sha256": "7141e66240c5e5cfb0a32de383560b8a7d4c5b2c9348dbbaed2e7ab7e3085a5d",
+      "upstreamSha256": "7141e66240c5e5cfb0a32de383560b8a7d4c5b2c9348dbbaed2e7ab7e3085a5d"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Checkbox.kt",
+      "sha256": "9843a7dafa891e714784c6e651481a05c8c1035664e5ea01567c05505cb3bf85",
+      "upstreamSha256": "9843a7dafa891e714784c6e651481a05c8c1035664e5ea01567c05505cb3bf85"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Component.kt",
+      "sha256": "3f289571bd68631185504afa3c2c5af6131f75cfa308797c4ad25f2741ae8639",
+      "upstreamSha256": "3f289571bd68631185504afa3c2c5af6131f75cfa308797c4ad25f2741ae8639"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Divider.kt",
+      "sha256": "af92432d0f575aae205ae99a12a79528daaa00bd9d878970ab430b7f0799d81b",
+      "upstreamSha256": "79914b3b84966e4c1f8bfcf79b58c2959e99b6dffd340185afb1b6ca4a0f77f6"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Dropdown.kt",
+      "sha256": "358fc4c0b8da516742d8a9165e93ce3ba155fdeb0761f9af5d4c83fa4e945b56",
+      "upstreamSha256": "f72b301767a7e809d3edfbeda27b9b7ed4ed5418b3b3efa91139ec237b3f1a30"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Icon.kt",
+      "sha256": "157aab9f7086e206f57fad6736a651c07963e633a102db7d4f0e5e25bfbe2664",
+      "upstreamSha256": "157aab9f7086e206f57fad6736a651c07963e633a102db7d4f0e5e25bfbe2664"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/IconButton.kt",
+      "sha256": "05d0531deadd203490fde18962a3e324c646226dfcbda41815774c67ab055fe6",
+      "upstreamSha256": "05d0531deadd203490fde18962a3e324c646226dfcbda41815774c67ab055fe6"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/ListPopup.kt",
+      "sha256": "c3771d4b4d2f7d50e4e74a03d4381d523ff6a1925c9420e38f342c03949edd8c",
+      "upstreamSha256": "889e1f75dd96fb85f91616276b99ebb9c01d7bad227318ca09db8d1211f26dbc"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/NavigationBar.kt",
+      "sha256": "67f28fc2261a2f6959dabf363531e25dcd1e8d5f339a5db820f2f6b847e63822",
+      "upstreamSha256": "f08371be377c928e9fa0ffd99821b3f1a8d3e665ef4540f1877f2bc65f0fafbd"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/NumberPicker.kt",
+      "sha256": "725b34264605cb789aa02c6139f87e556b0d3466a97403375afea6b9680c1704",
+      "upstreamSha256": "725b34264605cb789aa02c6139f87e556b0d3466a97403375afea6b9680c1704"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/ProgressIndicator.kt",
+      "sha256": "30d7ef74f80ba68f24eef54eca513367874d92d540ece68c63866b41d9bd9f89",
+      "upstreamSha256": "f7778ccfc87426658484f6a1943395805b07071f713ddb2cd8e1af4d6dca8ed1"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/PullToRefresh.kt",
+      "sha256": "e84418af02581c6ed8cd4d97de96739e78c5fb9f5cc1169b9a794a60ed2e0fa2",
+      "upstreamSha256": "e84418af02581c6ed8cd4d97de96739e78c5fb9f5cc1169b9a794a60ed2e0fa2"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Scaffold.kt",
+      "sha256": "07e0ffaedb78bf0ac4d3272c4580492b2e3096b4c6f8404a152de23aa8b8e7d5",
+      "upstreamSha256": "07e0ffaedb78bf0ac4d3272c4580492b2e3096b4c6f8404a152de23aa8b8e7d5"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Slider.kt",
+      "sha256": "59551f3568afd023c661defd59f773b9ba74ec52eb51d7578f2411ada0510cc3",
+      "upstreamSha256": "b345830cace98c58bd6c93827ac73d635761aaa68e4582e65d83d7e099f821df"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/SmallTitle.kt",
+      "sha256": "434ec6cfc33e05ef6d857310c42d1595c30f7ea1503e755e120b72331d490fd5",
+      "upstreamSha256": "434ec6cfc33e05ef6d857310c42d1595c30f7ea1503e755e120b72331d490fd5"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Snackbar.kt",
+      "sha256": "93b8b8adc63cc1b03f77cde62e9b4611215652b054ae1e4e0ba34268cfad90a9",
+      "upstreamSha256": "93b8b8adc63cc1b03f77cde62e9b4611215652b054ae1e4e0ba34268cfad90a9"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Surface.kt",
+      "sha256": "214ffe24b4d3f7fb4c5b1a02a08013d7283a553a508d88d9882a645b675f641c",
+      "upstreamSha256": "214ffe24b4d3f7fb4c5b1a02a08013d7283a553a508d88d9882a645b675f641c"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Switch.kt",
+      "sha256": "6b7defd2a058d50dda3b10d0d3e6634dc9719a10d7d5551d9d1cd716ec7e5499",
+      "upstreamSha256": "6b7defd2a058d50dda3b10d0d3e6634dc9719a10d7d5551d9d1cd716ec7e5499"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/Text.kt",
+      "sha256": "e06e8a9cfa67e347e65e345ab9072c7bb2181e5b5c8947341582f0bc6ea5e8c7",
+      "upstreamSha256": "e06e8a9cfa67e347e65e345ab9072c7bb2181e5b5c8947341582f0bc6ea5e8c7"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/TextField.kt",
+      "sha256": "980413a69a8fbcb6b09cfd4f85772e4d0dd40bef2d31cc23270fc2155272aea9",
+      "upstreamSha256": "980413a69a8fbcb6b09cfd4f85772e4d0dd40bef2d31cc23270fc2155272aea9"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/basic/TopAppBar.kt",
+      "sha256": "e5a3ff8d0bcf9346c52027dd5685dc94c174e1370155a33e0dd652ec3bf3247f",
+      "upstreamSha256": "262f4b003796e69950a5d4a5ad22f3ca22bebbbb0ab732625c7abaf40c92702b"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/basic/ArrowRight.kt",
+      "sha256": "92e10aec73f6f93de2195c45af457c4f4c9684c7d4f994a1aa82e44d86f012dd",
+      "upstreamSha256": "92e10aec73f6f93de2195c45af457c4f4c9684c7d4f994a1aa82e44d86f012dd"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/basic/ArrowUpDown.kt",
+      "sha256": "39d339717db926f333aa5a4aa5e1cfc88fcb31be7122f3d28baf62c078ab9238",
+      "upstreamSha256": "39d339717db926f333aa5a4aa5e1cfc88fcb31be7122f3d28baf62c078ab9238"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/basic/Check.kt",
+      "sha256": "5821c80ad8ce074ef0dcc8d857cf06c3ac1ef8ef60408b9c874ab42d4050d4c6",
+      "upstreamSha256": "5821c80ad8ce074ef0dcc8d857cf06c3ac1ef8ef60408b9c874ab42d4050d4c6"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/icon/basic/Close.kt",
+      "sha256": "69877c3ba87c7fd3e9563adcb3499f7e1b98eabd4efdca9e832772fb066ce50f",
+      "upstreamSha256": "69877c3ba87c7fd3e9563adcb3499f7e1b98eabd4efdca9e832772fb066ce50f"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/interfaces/HoldDownInteraction.kt",
+      "sha256": "6960b9fbd73947918aa2adaf9afa5ba62e9a79024ef4defa9850941e6d3bb9ff",
+      "upstreamSha256": "9fa77c0c5ca92b7bcfcb7e2506d3e7159ba939c1afb8d58c5c7e6312c3209bd6"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/BottomSheetContentLayout.kt",
+      "sha256": "26baeeac0b15686eb58d52e175dbcaf9d8c0d83cdb6a25d8d1c7351aee638ef4",
+      "upstreamSha256": "2a1cce181bfa720dc32f84dd0f275ed0c69ea3de110d09b9e4eeebbebd3057c6"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/BottomSheetSurfaceScope.kt",
+      "sha256": "95c9be60d9b3f30532f01e797e8420a46ed0a61c141034343e28f09ae87343b4",
+      "upstreamSha256": "95c9be60d9b3f30532f01e797e8420a46ed0a61c141034343e28f09ae87343b4"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/CascadingListPopupLayout.kt",
+      "sha256": "d8034b0fad4fe0622f1733dd6eb4377edbc13a1446388f425052db10e110bcf7",
+      "upstreamSha256": "42f86ca8ebefbf945a1d3be4f00bc64b943af22f4abd170e66d4870427b3fff3"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/DialogContentLayout.kt",
+      "sha256": "a36eb3bdf6ee714e556d6837be4ba36cc3dfd70f4ca32ad67caef8bb3d400ce2",
+      "upstreamSha256": "b5618322e0274d89c8b643ed17d930f1ba422cf9db901853bfeb6f425c9a5723"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/DialogMotion.kt",
+      "sha256": "7e9f05a2d0f1cc44036619646a780e796c21a3640ef7309bd86204af0e761dad",
+      "upstreamSha256": "7e9f05a2d0f1cc44036619646a780e796c21a3640ef7309bd86204af0e761dad"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/DialogSurfaceScope.kt",
+      "sha256": "9dd8ec6303f98d2cf3bffae8cd62ec0da050a3991d7cd3381682a1cdfd6db691",
+      "upstreamSha256": "9dd8ec6303f98d2cf3bffae8cd62ec0da050a3991d7cd3381682a1cdfd6db691"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/ListPopupLayout.kt",
+      "sha256": "449f5d7e1d6ef359e5e965d3c793f505241eb95cf05e548b68b79e0885703b93",
+      "upstreamSha256": "1de6b6d659aad674b21dcb15636a996870aa632a63183862ccd52873cb4af07e"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/layout/SheetMotion.kt",
+      "sha256": "653a797b2cfb8c5cbf40bfc78d53fbf44a4d91299831c01881ff42dc27e4ef67",
+      "upstreamSha256": "653a797b2cfb8c5cbf40bfc78d53fbf44a4d91299831c01881ff42dc27e4ef67"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/overlay/OverlayDialog.kt",
+      "sha256": "7665503cd2e88de92689e7cc9db3aa82b72d9617c68d7e317c2ad69b2054d0a9",
+      "upstreamSha256": "7665503cd2e88de92689e7cc9db3aa82b72d9617c68d7e317c2ad69b2054d0a9"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/overlay/OverlayListPopup.kt",
+      "sha256": "41f38334064fb12271eb47d1a0b3636815229081a38848ebd9cb86a84a84ddbc",
+      "upstreamSha256": "41f38334064fb12271eb47d1a0b3636815229081a38848ebd9cb86a84a84ddbc"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/Colors.kt",
+      "sha256": "c6885c8025dbc7cb81f11a6395032ea6c802c76862dca09c32365d5f7d40e911",
+      "upstreamSha256": "c6885c8025dbc7cb81f11a6395032ea6c802c76862dca09c32365d5f7d40e911"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/ContentColor.kt",
+      "sha256": "0c6a6b10ead27bf124f9d2373f9eecb9b222994f6c795fc72bb52d0d00268aee",
+      "upstreamSha256": "0c6a6b10ead27bf124f9d2373f9eecb9b222994f6c795fc72bb52d0d00268aee"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/DismissState.kt",
+      "sha256": "8bc998b5561fafff2f108967aff38c5c62d84a42e3449f8c13c781ff59c65c47",
+      "upstreamSha256": "e81a9cab2bb7c9ab34200c1582a7e6f3d5ba074c338c17bfe849c96f5b3e9019"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/DynamicColors.kt",
+      "sha256": "ad44f5ff762e48c40093367b989e7d6a8967b83f911ebcdf0b0d5fc94d9c5d0d",
+      "upstreamSha256": "ad44f5ff762e48c40093367b989e7d6a8967b83f911ebcdf0b0d5fc94d9c5d0d"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/MiuixTheme.kt",
+      "sha256": "2efbe43159f2f0e083a6f12c1ce318d5dbd22c686dde1831d6820176bf447b14",
+      "upstreamSha256": "2efbe43159f2f0e083a6f12c1ce318d5dbd22c686dde1831d6820176bf447b14"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/MonetMapping.kt",
+      "sha256": "33637d9e00b30f35b87625319597bfb1063ba4ae742ad6a35192688bb4f94a1b",
+      "upstreamSha256": "33637d9e00b30f35b87625319597bfb1063ba4ae742ad6a35192688bb4f94a1b"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/ProvideDisplayCutoutFix.kt",
+      "sha256": "08ced48fb5dbf11a5fa995962e9d963f0398933766d9d75503fba5293327505a",
+      "upstreamSha256": "08ced48fb5dbf11a5fa995962e9d963f0398933766d9d75503fba5293327505a"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/TextStyles.kt",
+      "sha256": "b11d9c7c545e7cdc9d5b016728538ceaf0840709a05df5c44e1b18c944b092e1",
+      "upstreamSha256": "b11d9c7c545e7cdc9d5b016728538ceaf0840709a05df5c44e1b18c944b092e1"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/theme/ThemeController.kt",
+      "sha256": "91146746795ce332d187c12399d29ffcd40eefd6662433fe8f18fe786e6e5c8b",
+      "upstreamSha256": "91146746795ce332d187c12399d29ffcd40eefd6662433fe8f18fe786e6e5c8b"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/MiuixIndication.kt",
+      "sha256": "63de9357bacda1f84691006a9c2fae410a4321fa8b2bc4d41fb97bff7f6fb7f4",
+      "upstreamSha256": "63de9357bacda1f84691006a9c2fae410a4321fa8b2bc4d41fb97bff7f6fb7f4"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/MiuixPopupUtils.kt",
+      "sha256": "688d7bc85dc63b8361ab3c78c235b9db75455c37df4c0d2bda661915cc01d92a",
+      "upstreamSha256": "688d7bc85dc63b8361ab3c78c235b9db75455c37df4c0d2bda661915cc01d92a"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/Overscroll.kt",
+      "sha256": "3ab576e8b791de801f35b30afb8d2e04633bb499fa764169e45396904ed78303",
+      "upstreamSha256": "3ab576e8b791de801f35b30afb8d2e04633bb499fa764169e45396904ed78303"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/OverscrollFactory.kt",
+      "sha256": "1f780f8cd6a0b79949a99dde166c4cfaf9fc572dcc6e273889d0c58d1b34d72a",
+      "upstreamSha256": "1f780f8cd6a0b79949a99dde166c4cfaf9fc572dcc6e273889d0c58d1b34d72a"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/OverscrollMotionNode.kt",
+      "sha256": "0b4e66b292766d2d5af25f78ab8bea725b9a17a76d76feda856ee9daa21e2a2d",
+      "upstreamSha256": "0b4e66b292766d2d5af25f78ab8bea725b9a17a76d76feda856ee9daa21e2a2d"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/PagerGestureUtils.kt",
+      "sha256": "cc4adc152585ff385342db750cbc43c3d6e21cbbf2482a723d150d7d23ee0bc7",
+      "upstreamSha256": "cc4adc152585ff385342db750cbc43c3d6e21cbbf2482a723d150d7d23ee0bc7"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/PagerNonTouchScroll.kt",
+      "sha256": "b731312b717567c0fdde1d03837687b2bdd32f7ef34c14b2c280f99793493ed9",
+      "upstreamSha256": "b731312b717567c0fdde1d03837687b2bdd32f7ef34c14b2c280f99793493ed9"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/PressFeedback.kt",
+      "sha256": "10cee3b386a0968fd3e18f323fd750084397f96d8517c2584ac4a799b52dba13",
+      "upstreamSha256": "10cee3b386a0968fd3e18f323fd750084397f96d8517c2584ac4a799b52dba13"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/Pressable.kt",
+      "sha256": "c1efea5eadb9306954d07c1daf56b3a52ed4c8a6f6022904d4120533e800e66f",
+      "upstreamSha256": "c1efea5eadb9306954d07c1daf56b3a52ed4c8a6f6022904d4120533e800e66f"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/ScrollEndHaptic.kt",
+      "sha256": "b9fa086529b4ffb3bdbda3bb3707107be561e610df205ebbd0d7daa4691d9fe1",
+      "upstreamSha256": "b9fa086529b4ffb3bdbda3bb3707107be561e610df205ebbd0d7daa4691d9fe1"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/SpringUtils.kt",
+      "sha256": "42547eec9013c5b850800160b88d83ef06ba0533180f0a77be0413ec4eee5ea3",
+      "upstreamSha256": "42547eec9013c5b850800160b88d83ef06ba0533180f0a77be0413ec4eee5ea3"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/utils/WindowNavigationEventScope.kt",
+      "sha256": "c9edaff532bd08cf0ac7e6c866c1cfd526b67427574208ef3618530448ffa487",
+      "upstreamSha256": "c9edaff532bd08cf0ac7e6c866c1cfd526b67427574208ef3618530448ffa487"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/window/WindowBottomSheet.kt",
+      "sha256": "f618fc0f3b05d10a04581b18d1f41df00c23d58a62d1ad4639de34ac886ef565",
+      "upstreamSha256": "f618fc0f3b05d10a04581b18d1f41df00c23d58a62d1ad4639de34ac886ef565"
+    },
+    {
+      "path": "miuix-ui/src/commonMain/kotlin/top/yukonga/miuix/kmp/window/WindowComponentHost.kt",
+      "sha256": "c4863c477c4293fcf5eaf1a0dd5cec966ebeda8a7cd80c4d1043e9e99d569128",
+      "upstreamSha256": "c4863c477c4293fcf5eaf1a0dd5cec966ebeda8a7cd80c4d1043e9e99d569128"
+    }
+  ]
+}

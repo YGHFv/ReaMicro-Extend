@@ -248,14 +248,6 @@
         </activity-alias>
 
         <activity
-            android:name=".notification.OnlineCompletionNotificationActivity"
-            android:enabled="true"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:taskAffinity=""
-            android:theme="@style/NoDisplayTheme" />
-
-        <activity
             android:name=".notification.CloudTaskNotificationActivity"
             android:enabled="true"
             android:excludeFromRecents="true"

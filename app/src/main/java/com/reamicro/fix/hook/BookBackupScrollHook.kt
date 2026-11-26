@@ -34,6 +34,12 @@ class BookBackupScrollHook(
     @Synchronized private fun installWhenResolved() {
         if (closed || installed) return
         val host = requireNotNull(com.reamicro.fix.core.HostBookUiBindings.backup) { "Backup scroll contract unavailable" }
+        if (host.number("nativeScroll") == 1) {
+            installed = true
+            HookInstallReport.record("BookBackupScrollHook", "outerColumn", true)
+            HookRuntime.logAlways("$LOG_PREFIX host already scrolls complete backup column")
+            return
+        }
         val ui = requireNotNull(com.reamicro.fix.core.HostUiBindings.current)
         val pending = ArrayList<XposedInterface.HookHandle>()
         runCatching {
@@ -43,16 +49,14 @@ class BookBackupScrollHook(
             val verticalScroll = host.method("verticalScroll")
             val startGroup = ui.method("startGroup")
             val endGroup = ui.method("endGroup")
-            val rootModifier = requireNotNull(host.field("rootModifier").get(null))
             check(materialize == ui.method("materialize"))
-            // MT: BookBackupContent materializes this FillElement before any card. Deoptimize
-            // that verified caller so ART cannot bypass the materialization interception.
+            // The queried content materializes its outer Column before rendering cards.
             val deoptimized = HookRuntime.deoptimize(content)
             pending += HookRuntime.hookMethod(content, object : HookCallback() {
                 override fun before(param: Call) {
                     val settings = settingsProvider()
                     if (closed || !settings.moduleEnabled || !settings.bookBackupScrollEnabled) return
-                    val composer = param.args?.getOrNull(7) ?: return
+                    val composer = param.args?.getOrNull(host.number("content.composer")) ?: return
                     param.setObjectExtra(FRAME_KEY, scope.enter(composer))
                 }
 
@@ -66,7 +70,7 @@ class BookBackupScrollHook(
                     if (closed) return
                     val composer = param.args?.getOrNull(0) ?: return
                     val modifier = param.args?.getOrNull(1) ?: return
-                    if (modifier !== rootModifier || !scope.claimOuterLayout(composer)) return
+                    if (!scope.claimOuterLayout(composer)) return
                     runCatching {
                         startGroup.invoke(composer, SCROLL_GROUP)
                         try {

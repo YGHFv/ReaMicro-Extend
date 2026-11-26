@@ -138,14 +138,14 @@ object CloudTaskLocalRunner {
                     state, detail = detail,
                 )
             }
-            val blessing = ensureTaoistBlessing(baseUrl, token, request, departure.configuredType, departure)
+            val blessing = ensureTaoistBlessing(baseUrl, token, request, departure.configuredType,
+                setOf(BLESSING_SAFETY, BLESSING_WEALTH), departure)
             if (blessing.failure != null) {
                 return Outcome("failed", "$message${blessingNote(blessing, blessingType)}", state, detail = detail)
             }
             if (departure.contextChanged) {
-                departure.complete()
                 return Outcome(
-                    "failed", "$message（上次祈禳已确认，出发配置已更改，稍后按新配置继续）",
+                    "failed", "$message（上次祈禳尚未确认，保留记录，稍后按新配置继续）",
                     state, detail = detail,
                 )
             }
@@ -282,15 +282,53 @@ object CloudTaskLocalRunner {
         val state = JSONObject(task.toString())
             .put("nextRunAtOverride", now + TASK_RETRY_INTERVAL_MS)
             .put("claimJustCompleted", false)
+        fun dayChangedOutcome(): Outcome? {
+            val current = clock()
+            if (AutoReadTimeLock.recordDate(current) == today) return null
+            return Outcome("paused", "已跨北京时间日期，轶闻与祈禳将按新一天重新检查",
+                JSONObject(state.toString()).put("nextRunAtOverride", current + 60_000L), notify = false)
+        }
+        fun checkpointPrayerPhase() {
+            check(dayChangedOutcome() == null) { "已跨北京时间日期，未提交旧日期的轶闻或祈禳请求" }
+            if (state.optString(KEY_LORE_PRAYER_ATTEMPT_DATE) == today) return
+            val previous = state.opt(KEY_LORE_PRAYER_ATTEMPT_DATE)
+            state.put(KEY_LORE_PRAYER_ATTEMPT_DATE, today)
+            try {
+                checkpoint(state)
+            } catch (error: Throwable) {
+                // Do not treat a failed storage write as a persisted guard for the next request.
+                if (previous == null) state.remove(KEY_LORE_PRAYER_ATTEMPT_DATE)
+                else state.put(KEY_LORE_PRAYER_ATTEMPT_DATE, previous)
+                throw error
+            }
+        }
         val blessingType = request.optString("blessingType").trim().uppercase()
         val blessing = if (task.optString("lastCheckinDate") != today) {
-            ensureTaoistBlessing(baseUrl, token, request, blessingType)
+            ensureTaoistBlessing(
+                baseUrl, token, request, blessingType, setOf(BLESSING_LUCK),
+                prayerAlreadyAttempted = state.optString(KEY_LORE_PRAYER_ATTEMPT_DATE) == today,
+                beforePrayer = {
+                    // Neither prayer nor lore creation has an idempotency key. A lost response
+                    // must not cause a second material-consuming prayer later in the same day.
+                    checkpointPrayerPhase()
+                },
+            )
         } else BlessingCheck(null, JSONObject())
+        dayChangedOutcome()?.let { return it }
         if (blessing.failure != null) return Outcome("failed", blessing.failure, state)
         val body = runCatching {
             postReaMicro(baseUrl, token, request.optJSONObject("body") ?: JSONObject(),
-                request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" })
-        }.getOrElse { return Outcome("failed", "获取每日轶闻失败：${it.message}", state) }
+                request.optString("endpoint").ifBlank { "rest/community/get-daily-lore" }, beforeSend = {
+                    // Lore creation may consume an existing LUCK blessing. If its reply is lost,
+                    // recovering the lore must not pray again simply because that blessing is gone.
+                    checkpointPrayerPhase()
+                })
+        }.getOrElse {
+            com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
+            dayChangedOutcome()?.let { outcome -> return outcome }
+            return Outcome("failed", "获取每日轶闻失败：${it.message}", state)
+        }
+        dayChangedOutcome()?.let { return it }
         operationError(body)?.let { return Outcome("failed", "获取每日轶闻失败：$it", state) }
         val data = body.optJSONObject("data") ?: body
         val loreId = data.optLong("id", data.optLong("loreId", 0L))
@@ -452,6 +490,10 @@ object CloudTaskLocalRunner {
         val durationMinutes = request.optInt("durationMinutes", 30).coerceIn(1, 720)
         val dailyLimit = request.optInt("dailyLimitMinutes", 720).coerceIn(1, 1_440)
         val today = AutoReadTimeLock.recordDate(now)
+        val oncePerDay = request.optBoolean("hostReadOncePerDay")
+        if (oncePerDay && hostReadAlreadyAttempted(task, now)) {
+            return Outcome("success", "今日自动阅读已执行，本次跳过", JSONObject(task.toString()), notify = false)
+        }
         val localDay = java.time.Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
         val usedToday = AutoReadTimeLock.usedMinutes(task, now)
         if (usedToday >= dailyLimit) return Outcome("success", "今日已达到 ${dailyLimit} 分钟上限", JSONObject(task.toString()))
@@ -527,7 +569,15 @@ object CloudTaskLocalRunner {
                     .put("duration", duration * 60)
                     .put("verify", ""),
             ))
-            val result = runCatching { postReaMicro(baseUrl, token, payload, request.optString("timeEndpoint").ifBlank { "rest/reader/update-read-time-by-date" }) }
+            val result = runCatching { postReaMicro(baseUrl, token, payload,
+                request.optString("timeEndpoint").ifBlank { "rest/reader/update-read-time-by-date" },
+                beforeSend = {
+                    // Persist before submission: a lost response must not trigger another batch on restart.
+                    if (oncePerDay && state.optString(HOST_READ_ATTEMPT_DATE) != today) {
+                        state.put(HOST_READ_ATTEMPT_DATE, today)
+                        checkpoint(state)
+                    }
+                }) }
                 .getOrElse { return readingOutcome("上报阅读时长失败：${it.message}") }
             operationError(result)?.let { return readingOutcome("上报阅读时长失败：$it") }
             completedBooks++
@@ -550,17 +600,25 @@ object CloudTaskLocalRunner {
         token: String,
         request: JSONObject,
         blessingType: String,
+        acceptedTypes: Set<String>,
         departure: MerchantDeparture? = null,
+        prayerAlreadyAttempted: Boolean = false,
+        beforePrayer: () -> Unit = {},
     ): BlessingCheck {
         val check = runCatching {
-            checkTaoistBlessing(baseUrl, token, request, blessingType, departure)
+            checkTaoistBlessing(baseUrl, token, request, blessingType, acceptedTypes, departure,
+                prayerAlreadyAttempted, beforePrayer)
         }.getOrElse {
             com.reamicro.fix.reload.TaskCancellation.rethrowIfCancelled(it)
             BlessingCheck("查询或祈禳运签失败：${it.message}", JSONObject())
         }
         // 祈禳是可选步骤；失败后保存跳过状态，直接继续轶闻或行商。
         val reason = check.failure ?: return check
-        departure?.skipPrayer(reason)
+        // An unanswered prayer remains unresolved across option changes. Clearing its checkpoint
+        // would permit another material-consuming prayer when the current blessing is absent.
+        if (departure?.mustConfirmPrayer == true) {
+            if (departure.contextChanged) return check
+        } else departure?.skipPrayer(reason)
         return skippedPrayer(reason)
     }
 
@@ -569,13 +627,16 @@ object CloudTaskLocalRunner {
         token: String,
         request: JSONObject,
         blessingType: String,
+        acceptedTypes: Set<String>,
         departure: MerchantDeparture?,
+        prayerAlreadyAttempted: Boolean,
+        beforePrayer: () -> Unit,
     ): BlessingCheck {
         val type = blessingType.trim().uppercase()
         if (departure?.prayerSkipped == true) return skippedPrayer(departure.prayerSkipReason)
         if (type.isBlank()) return BlessingCheck(null, JSONObject())
-        if (type !in setOf(BLESSING_LUCK, BLESSING_SAFETY, BLESSING_WEALTH)) {
-            return BlessingCheck("不支持的运签配置：$type", JSONObject())
+        if (type !in acceptedTypes) {
+            return BlessingCheck("此任务不支持的运签配置：$type", JSONObject())
         }
         val current = postReaMicro(
             baseUrl,
@@ -584,41 +645,57 @@ object CloudTaskLocalRunner {
             request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" },
         )
         operationError(current)?.let { return BlessingCheck("查询运签失败：$it", JSONObject()) }
-        if (current.has("data") && current.optJSONObject("data") == null) {
-            return BlessingCheck("查询运签响应无效", JSONObject())
-        }
-        val data = current.optJSONObject("data") ?: current
+        val data = blessingResponseData(current)
 
         val blessing = data.opt("blessing") as? JSONObject
-        val activeType = blessing?.optString("blessingType").orEmpty()
-        if ((!data.isNull("blessing") && blessing == null) || (blessing != null && activeType.isBlank())) {
+        val activeType = (blessing?.opt("blessingType") as? String).orEmpty().trim().uppercase()
+        if (!data.has("blessing") || (!data.isNull("blessing") && blessing == null) ||
+            (blessing != null && activeType.isBlank())) {
             return BlessingCheck("查询运签响应无效", JSONObject())
         }
-        if (activeType.equals(type, ignoreCase = true)) {
+        // The host exposes one current blessing. LUCK applies to lore; SAFETY/WEALTH to a merchant trip.
+        // Preserve even another category's blessing, without reporting its effect as active in this task.
+        if (blessing != null) {
+            if (activeType !in acceptedTypes) {
+                val purpose = when (activeType) {
+                    BLESSING_LUCK -> "轶闻"
+                    BLESSING_SAFETY, BLESSING_WEALTH -> "行商"
+                    else -> "对应机缘"
+                }
+                return BlessingCheck("已有${blessingLabel(activeType)}，保留供${purpose}使用，不替换", JSONObject())
+            }
             departure?.prayerReady()
-            return BlessingCheck(null, blessingDetail(blessing!!, "沿用已有"), activeType = activeType)
+            return BlessingCheck(null, blessingDetail(blessing, "沿用已有"), activeType = activeType)
         }
         if (departure?.mustConfirmPrayer == true) {
             return BlessingCheck("上次祈禳结果仍待确认，未重复祈禳；稍后继续查询运签", JSONObject())
+        }
+        if (prayerAlreadyAttempted) {
+            return BlessingCheck("今日已提交过轶闻或祈禳请求，未重复祈禳", JSONObject())
         }
         val pray = postReaMicro(
             baseUrl,
             token,
             JSONObject().put("blessingType", type),
             request.optString("prayEndpoint").ifBlank { "rest/community/pray-taoist-blessing" },
-            beforeSend = { departure?.prayerPending() },
+            beforeSend = {
+                departure?.prayerPending()
+                beforePrayer()
+            },
         )
         operationError(pray)?.let {
-            return BlessingCheck("祈禳${blessingLabel(type)}失败：$it", JSONObject())
+            val reason = "祈禳${blessingLabel(type)}失败：$it"
+            if (MerchantDeparture.explicitRejection(pray) != null) departure?.skipPrayer(reason)
+            return BlessingCheck(reason, JSONObject())
         }
-        val prayData = pray.optJSONObject("data") ?: pray
+        val prayData = blessingResponseData(pray)
         val prayed = prayData.optJSONObject("blessing") ?: run {
             val refreshed = postReaMicro(baseUrl, token, JSONObject(),
                 request.optString("blessingEndpoint").ifBlank { "rest/community/get-taoist-blessing" })
             operationError(refreshed)?.let { return BlessingCheck("确认运签失败：$it", JSONObject()) }
-            (refreshed.optJSONObject("data") ?: refreshed).optJSONObject("blessing")
+            blessingResponseData(refreshed).optJSONObject("blessing")
         }
-        val actualType = prayed?.optString("blessingType").orEmpty().trim().uppercase()
+        val actualType = (prayed?.opt("blessingType") as? String).orEmpty().trim().uppercase()
         if (actualType != type) {
             val reason = if (actualType.isBlank()) "服务端未返回生效运签" else "服务端返回${blessingLabel(actualType)}，与配置不符"
             return BlessingCheck("祈禳${blessingLabel(type)}失败：$reason", JSONObject())
@@ -629,8 +706,22 @@ object CloudTaskLocalRunner {
             blessingDetail(prayed!!, "本次祈禳"),
             prayed = true,
             activeType = actualType,
-            replacedType = activeType,
         )
+    }
+
+    /** Mutations require an unambiguous successful response; optInt/optBoolean coerce malformed values. */
+    private fun blessingResponseData(body: JSONObject): JSONObject {
+        if (body.has("code")) {
+            val code = body.opt("code")
+            check(code is Number && code.toString().toLongOrNull() in setOf(0L, 200L)) {
+                "运签响应状态码无效"
+            }
+        }
+        val data = if (body.has("data")) body.optJSONObject("data") ?: error("运签响应内容无效") else body
+        for (value in listOf(body, data)) {
+            check(!value.has("success") || value.opt("success") == true) { "运签响应成功状态无效" }
+        }
+        return data
     }
 
     private fun skippedPrayer(reason: String) = BlessingCheck(
@@ -654,8 +745,6 @@ object CloudTaskLocalRunner {
 
         val activeType: String = "",
 
-        val replacedType: String = "",
-
         val skippedReason: String = "",
     )
 
@@ -665,9 +754,7 @@ object CloudTaskLocalRunner {
         configuredType.isBlank() -> ""
         check.prayed -> {
             val label = blessingLabel(check.activeType.ifBlank { configuredType })
-            val replaced = check.replacedType.takeIf { it.isNotBlank() }
-                ?.let { "（顶掉原有${blessingLabel(it)}）" }.orEmpty()
-            " · 已祈禳$label$replaced"
+            " · 已祈禳$label"
         }
         check.activeType.isNotBlank() -> " · 沿用已有${blessingLabel(check.activeType)}"
         else -> ""
@@ -799,6 +886,7 @@ object CloudTaskLocalRunner {
     ): JSONObject {
         com.reamicro.fix.reload.TaskCancellation.checkRequestCurrent()
         if (Thread.currentThread().isInterrupted) throw InterruptedException("任务已中断，保留进度等待下次执行")
+        val network = com.reamicro.fix.cloud.root.RootDirectNetwork.forRequest()
         // A rejected request must not leave an unsent merchant action marked as awaiting confirmation.
         beforeSend()
         val url = baseUrl.trimEnd('/') + "/" + endpoint.trimStart('/')
@@ -811,6 +899,7 @@ object CloudTaskLocalRunner {
                 mapOf("Authorization" to "Bearer $token", "platform" to "android", "Accept" to "application/json"),
                 45_000,
                 45_000,
+                network = network,
             )
         } catch (error: Exception) {
             runCatching {
@@ -975,6 +1064,7 @@ object CloudTaskLocalRunner {
     internal const val BLESSING_LUCK = "LUCK"
     internal const val BLESSING_SAFETY = "SAFETY"
     internal const val BLESSING_WEALTH = "WEALTH"
+    internal const val KEY_LORE_PRAYER_ATTEMPT_DATE = "lorePrayerAttemptDate"
 
     internal val PROHIBITED_PAWN_PROP_HINTS = mapOf(
         "11" to "传承消耗物品（清酒）",

@@ -230,12 +230,21 @@ internal object HostReaderFeatures {
             val flows = anchor("ReaderPagerFlows(bookProgress=").className
             val actions = anchor("ReaderPagerActions(onJumpCompleted=").className
             val pagerDeps = anchor("ReaderPagerDeps(findVirtualPageForCfi=").className
-            val swipe = save("swipeEffects", find(MethodMatcher.create().paramCount(9, 11).returnType("void")).filter {
+            val pagerType = anchor("currentPageOffsetFraction ", " is not within the range -0.5 to 0.5").className
+            val candidates = find(MethodMatcher.create().paramCount(9, 11).returnType("void")).filter {
                 val p = it.paramTypeNames
-                p.filter { name -> name in listOf(stateType, flows, actions, pagerDeps, deps) } ==
-                    listOf(stateType, flows, actions, pagerDeps, deps) && p.takeLast(2) == listOf(composer, "int") &&
-                    (p.indexOf(deps) == p.size - 3 || p.size == 9)
-            }.one("swipe effects"))
+                Modifier.isStatic(it.modifiers) &&
+                    p.filter { name -> name in listOf(stateType, flows, actions, pagerDeps, deps) } ==
+                    listOf(stateType, flows, actions, pagerDeps, deps) && p.takeLast(2) == listOf(composer, "int")
+            }
+            val legacy = candidates.filter {
+                it.paramCount == 9 && it.paramTypeNames.indexOf(deps) == 5 &&
+                    generateSequence(it.paramTypes[6]) { type -> type.superClass }.any { type -> type.name == pagerType }
+            }
+            // 带 PagerState 的实现与上层容器共存时，必须绑定真正执行翻页的 effects。
+            val swipe = save("swipeEffects", (legacy.ifEmpty {
+                candidates.filter { it.paramTypeNames.indexOf(deps) == it.paramCount - 3 }
+            }).one("swipe effects"))
             if (swipe.paramTypeNames.indexOf(deps) == swipe.paramCount - 3) return@optional
             val pagerTypes = generateSequence(swipe.paramTypes[swipe.paramCount - 3]) { it.superClass }.map { it.name }.toSet()
             val wrapper = find(MethodMatcher.create().paramCount(5).returnType("java.lang.Object")).filter {

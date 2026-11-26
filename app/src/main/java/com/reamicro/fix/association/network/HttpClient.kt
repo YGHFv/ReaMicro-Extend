@@ -1,10 +1,12 @@
 package com.reamicro.fix.association.network
 
+import android.net.Network
 import com.reamicro.fix.association.provider.YouShuHttpSession
 import com.reamicro.fix.reload.TaskCancellation
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.Proxy
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -45,8 +47,9 @@ internal object HttpClient {
         headers: Map<String, String> = emptyMap(),
         connectTimeoutMs: Int = 8_000,
         readTimeoutMs: Int = 30_000,
+        network: Network? = null,
     ): String = request(url, "POST", body, contentType, headers, connectTimeoutMs, readTimeoutMs, false,
-        accept = "application/json").toString(StandardCharsets.UTF_8)
+        accept = "application/json", network = network).toString(StandardCharsets.UTF_8)
 
     fun delete(
         url: String,
@@ -66,6 +69,7 @@ internal object HttpClient {
         url: String, method: String, body: ByteArray?, contentType: String?,
         headers: Map<String, String>, connectTimeoutMs: Int, readTimeoutMs: Int, followRedirects: Boolean,
         accept: String = "application/json,text/html;q=0.9,*/*;q=0.8",
+        network: Network? = null,
     ): ByteArray {
         var target = HttpRequestPolicy.uri(url).toURL().toString()
         var verb = method
@@ -77,7 +81,7 @@ internal object HttpClient {
         while (true) {
             val hopHeaders = youShuSession?.headers(target, requestHeaders) ?: requestHeaders
             val response = requestOnce(target, verb, payload, mime, hopHeaders, connectTimeoutMs, readTimeoutMs, accept,
-                youShuSession)
+                youShuSession, network)
             if (followRedirects && response.code in REDIRECT_CODES && response.location != null) {
                 if (redirects++ >= MAX_REDIRECTS) throw IOException("HTTP 重定向次数过多")
                 val next = HttpRequestPolicy.uri(URL(URL(target), response.location).toString()).toURL().toString()
@@ -112,9 +116,11 @@ internal object HttpClient {
         url: String, method: String, body: ByteArray?, contentType: String?,
         headers: Map<String, String>, connectTimeoutMs: Int, readTimeoutMs: Int, accept: String,
         youShuSession: YouShuHttpSession.Session?,
+        network: Network?,
     ): Response {
         TaskCancellation.checkCurrent()
-        val connection = URL(url).openConnection() as HttpURLConnection
+        val target = URL(url)
+        val connection = (network?.openConnection(target, Proxy.NO_PROXY) ?: target.openConnection()) as HttpURLConnection
         val cancellation = TaskCancellation.current()?.register(connection::disconnect)
         try {
             connection.requestMethod = method

@@ -55,7 +55,7 @@ class LocalExportHook(
                 override fun after(param: Call) {
                     val context = contexts.get()?.peekLast() ?: return
                     if (param.throwable != null || param.args.firstOrNull() !== context.book || context.rendered) return
-                    val composer = param.args.getOrNull(1)?.takeIf(symbols.type("composer")::isInstance) ?: return
+                    val composer = param.args.getOrNull(symbols.number("header.composer"))?.takeIf(symbols.type("composer")::isInstance) ?: return
                     context.rendered = true
                     com.reamicro.fix.reload.ModuleResources.lease()?.use { renderLocalExportCard(context, composer) }
                 }

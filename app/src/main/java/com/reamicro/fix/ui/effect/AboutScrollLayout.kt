@@ -19,7 +19,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -46,7 +46,7 @@ internal class AboutBrandMotion(
     var spacerHeightPx by mutableIntStateOf(0)
     private var nameHeightPx by mutableIntStateOf(0)
     private var versionHeightPx by mutableIntStateOf(0)
-    val progress by derivedStateOf {
+    val progress by computedStateOf {
         val offset = if (listState.firstVisibleItemIndex > 0) {
             spacerHeightPx.toFloat()
         } else listState.firstVisibleItemScrollOffset.toFloat()
@@ -105,7 +105,7 @@ internal fun AboutScrollLayout(
     val supported = remember { isRuntimeShaderSupported() }
     val backdrop = rememberLayerBackdrop()
     val effectVisible by remember(motion) {
-        derivedStateOf { motion.progress.backgroundFade < 1f }
+        computedStateOf { motion.progress.backgroundFade < 1f }
     }
     BgEffectBackground(
         dynamicBackground = playing && effectVisible,

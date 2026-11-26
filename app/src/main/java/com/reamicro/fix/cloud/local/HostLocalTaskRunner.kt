@@ -77,7 +77,7 @@ internal class HostTaskLaunchGate(private val read: () -> String?, private val w
 internal fun runHostTaskBatch(
     engine: LocalTaskEngine, isCurrent: () -> Boolean, onCompleted: () -> Unit,
 ): List<LocalTaskRecord> {
-    val records = engine.runDue(maxTasks = LocalTaskCredentials.taskTypes.size, force = true)
+    val records = engine.runDue(maxTasks = LocalTaskCredentials.taskTypes.size, force = true, hostBatch = true)
     if (records.isNotEmpty() && !Thread.currentThread().isInterrupted &&
         TaskCancellation.current()?.isCancelled != true && isCurrent()) onCompleted()
     return records

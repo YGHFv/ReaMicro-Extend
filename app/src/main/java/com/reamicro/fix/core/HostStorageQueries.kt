@@ -321,15 +321,25 @@ internal object HostStorageQueries {
                 out.value("label.$role", (labelCall.arguments[2] as HostDexCalls.Literal).value.toInt())
             }
             val detailCtor = out.method("detail", authorized.invokes.filter { it.isConstructor &&
-                it.paramTypeNames == listOf("java.lang.String", "java.lang.String") &&
+                it.paramTypeNames.take(2) == listOf("java.lang.String", "java.lang.String") &&
+                it.paramTypeNames.drop(2).all { type -> type == "byte" } && it.paramCount <= 3 &&
                 it.declaredClass?.methods?.any { m -> m.usingStrings.contains(" / ") } == true }.one("import detail content constructor"))
             val detailOwner = out.type("detail", requireNotNull(detailCtor.declaredClass))
             val detail = out.method("detail", detailOwner.methods.filter { it.isMethod && !Modifier.isStatic(it.modifiers) &&
                 it.paramTypeNames == listOf("java.lang.Object", "java.lang.Object") && it.returnTypeName == "java.lang.Object" &&
                 it.usingStrings.contains(" / ") }.one("import detail content"))
             out.field("detail.first", fieldFromParameter(detailCtor, 0)); out.field("detail.second", fieldFromParameter(detailCtor, 1))
-            val tag = calls.writes(detailCtor.descriptor).single { it.receiver == HostDexCalls.Parameter(0) && it.value is HostDexCalls.Literal }
-            out.field("detail.tag", tag.field); out.value("detail.tag", (tag.value as HostDexCalls.Literal).value.toInt())
+            val tag = calls.writes(detailCtor.descriptor).single { it.receiver == HostDexCalls.Parameter(0) &&
+                bridge.getFieldData(it.field)?.typeName == "byte" }
+            val tagValue = when (val value = tag.value) {
+                is HostDexCalls.Literal -> value.value
+                is HostDexCalls.Parameter -> calls.calls(authorized.descriptor)
+                    .filter { it.descriptor == detailCtor.descriptor }
+                    .map { (it.arguments[value.index] as HostDexCalls.Literal).value }.distinct().single()
+                else -> error("Import detail branch is unproven")
+            }
+            check(tagValue in Byte.MIN_VALUE..Byte.MAX_VALUE)
+            out.field("detail.tag", tag.field); out.value("detail.tag", tagValue.toInt())
             val duration = out.method("duration", anchor("（伴听", "佚名").filter { Modifier.isStatic(it.modifiers) &&
                 it.paramTypeNames == listOf("java.lang.String", "long", "long", composer.name, "int") && it.returnTypeName == "void"
             }.one("book author and reading duration"))
@@ -565,8 +575,8 @@ internal object HostStorageQueries {
             val function0 = out.type("function0", known("kotlin.jvm.functions.Function0"))
             val function1 = out.type("function1", known("kotlin.jvm.functions.Function1"))
             out.type("dir", known(DIR))
-            val logoutTemplate = method(base.getValue("method:${ACCOUNT_SCREENS.getValue("local")}#LogOut"))
-            val logoutDialog = logoutTemplate.invokes.filter { target ->
+            val logoutDialog = ACCOUNT_SCREENS.values.mapNotNull { base["method:$it#LogOut"] }
+                .flatMap { method(it).invokes }.filter { target ->
                 val p = target.paramTypeNames
                 Modifier.isStatic(target.modifiers) && target.returnTypeName == "void" && p.size == 10 &&
                     p[0] == "java.lang.Object" && p[2] == function1.name && p[4] == "java.lang.String" &&
@@ -659,17 +669,14 @@ internal object HostStorageQueries {
         }
         private fun route(out: Output, key: String, route: ClassData, scope: String) {
             val routeValue = HostDexCalls.Type(route.descriptor)
-            val registrations = calls.referencingType(route.descriptor).flatMap { caller -> calls.calls(caller).filter { call ->
-                call.arguments.size == 3 && contains(call.arguments[1], routeValue) && call.arguments[2] is HostDexCalls.Allocation &&
-                    method(call.descriptor).let { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" && it.paramCount == 3 }
-            }.map { caller to it } }.distinct()
-            val (setup, registration) = registrations.single()
+            val (setup, registration) = HostNavigationRegistration.find(bridge, calls, route.descriptor)
             out.method("$key.setup", method(setup)); val register = out.method("$key.register", method(registration.descriptor))
             val tokenCall = registration.arguments[1] as? HostDexCalls.Call ?: error("Route class token is not a conversion")
             val token = out.method("$key.token", method(tokenCall.descriptor))
             check(token.paramTypeNames == listOf("java.lang.Class") && token.returnTypeName == register.paramTypeNames[1])
             if (!Modifier.isStatic(token.modifiers)) out.field("$key.tokenReceiver", (tokenCall.arguments.first() as HostDexCalls.Field).descriptor)
-            val wrapper = registration.arguments[2] as HostDexCalls.Allocation
+            out.value("$key.contentSlot", registration.arguments.lastIndex)
+            val wrapper = registration.arguments.last() as HostDexCalls.Allocation
             val init = calls.calls(setup).single { it.arguments.firstOrNull() == wrapper && it.descriptor.contains("-><init>(IZLjava/lang/Object;)V") }
             val content = init.arguments[3] as? HostDexCalls.Allocation ?: error("Route content allocation unavailable")
             val contentType = out.type("$key.content", requireNotNull(bridge.getClassData(content.type)))

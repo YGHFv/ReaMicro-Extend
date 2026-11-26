@@ -8,6 +8,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -67,6 +70,10 @@ private fun ModulePreferenceSurface(
                 .padding(horizontal = 12.dp)
                 .then(if (position.roundsBottom) Modifier.padding(bottom = 12.dp) else Modifier)
                 .semantics { isTraversalGroup = true }
+                // Extend opaque straight joins outside the row's mask for half-resolution sampling.
+                .then(if (!position.roundsBottom && color.alpha == 1f) Modifier.drawBehind {
+                    drawRect(color, topLeft = Offset(0f, size.height), size = Size(size.width, 2f))
+                } else Modifier)
                 .then(surface),
             propagateMinConstraints = true,
         ) { content() }

@@ -1,7 +1,7 @@
 // Copyright 2026, ReaMicro Extend contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Android dependency subset of beta02; derived icon subsets are identified in NOTICE.
+// Android dependency subset of rc01; derived icon subsets are identified in NOTICE.
 def upstreamModule = rootProject.file("third_party/miuix/upstream/${project.name}")
 def namespaces = [icons: 'icon', 'glass-icons': 'icon.glass']
 def moduleName = project.name.substring('miuix-'.length())
@@ -14,7 +14,7 @@ android {
     namespace "top.yukonga.miuix.kmp.${namespaces.get(moduleName, moduleName)}"
     compileSdk {
         version = release(37) {
-            minorApiLevel = 1
+            minorApiLevel = 2
         }
     }
     defaultConfig { minSdk = moduleName in ['blur', 'glass'] ? 33 : 24 }
@@ -38,7 +38,6 @@ android {
 // Applied scripts do not inherit plugin type imports. Configure the AGP Kotlin tasks directly.
 tasks.configureEach {
     if (name.startsWith('compile') && name.endsWith('Kotlin') && !name.contains('Test')) {
-        incremental = false
         source(commonSources, androidSources, adapterSources)
         compilerOptions.freeCompilerArgs.addAll('-Xmulti-platform', '-Xexpect-actual-classes')
         compilerOptions.freeCompilerArgs.add(provider {
@@ -47,11 +46,21 @@ tasks.configureEach {
     }
 }
 
+// AGP applies its incremental default after task registration. These Android-only adapters
+// compile common and actual sources together, so every common declaration must be present.
+afterEvaluate {
+    tasks.configureEach {
+        if (name.startsWith('compile') && name.endsWith('Kotlin') && !name.contains('Test')) {
+            incremental = false
+        }
+    }
+}
+
 dependencies {
     if (moduleName in ['ui', 'preference']) {
-        api "org.jetbrains.compose.foundation:foundation-android:${libs.versions.compose.get()}"
+        api libs.compose.foundation
     } else {
-        implementation "org.jetbrains.compose.foundation:foundation-android:${libs.versions.compose.get()}"
+        implementation libs.compose.foundation
     }
 
     switch (moduleName) {
@@ -62,8 +71,8 @@ dependencies {
         case 'ui':
             api project(':miuix-core')
             api project(':miuix-squircle')
-            implementation 'androidx.navigationevent:navigationevent-compose:1.2.0'
-            implementation 'com.materialkolor:material-color-utilities-android:6.0.0'
+            implementation libs.androidx.navigationevent
+            implementation libs.materialkolor.utilities
             break
         case 'preference':
             api project(':miuix-ui')
@@ -76,17 +85,17 @@ dependencies {
             api project(':miuix-blur')
             api project(':miuix-material')
             api project(':miuix-ui')
-            implementation 'androidx.navigationevent:navigationevent-compose:1.2.0'
+            implementation libs.androidx.navigationevent
             break
         case 'nav':
             implementation project(':miuix-squircle')
-            implementation 'androidx.navigationevent:navigationevent-compose:1.2.0'
-            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-runtime-android:2.11.0'
-            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose-android:2.11.0'
-            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-android:2.11.0'
-            implementation 'org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose-android:2.11.0'
-            implementation 'org.jetbrains.kotlinx:kotlinx-collections-immutable:0.5.2'
-            implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0'
+            implementation libs.androidx.navigationevent
+            implementation libs.lifecycle.runtime
+            implementation libs.lifecycle.runtime.compose
+            implementation libs.lifecycle.viewmodel
+            implementation libs.lifecycle.viewmodel.compose
+            implementation libs.kotlinx.collections.immutable
+            implementation libs.kotlinx.serialization.json
             break
     }
 }

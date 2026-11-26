@@ -9,7 +9,7 @@ internal object DiscoverSurfaceStyle {
     )
 }
 
-internal fun discoverDialogPalette(context: Context): ModuleDialogTheme.Palette {
+internal fun discoverCoverPalette(context: Context): ModuleDialogTheme.Palette {
     val palette = ModuleDialogTheme.palette(context)
     val shelf = EmbeddedHostUi.snapshot(context)?.contentArgb ?: palette.pageBackground
     return DiscoverSurfaceStyle.onShelf(palette, shelf)

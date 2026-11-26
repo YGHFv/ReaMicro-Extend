@@ -39,9 +39,9 @@ internal object HostGeneration : Application.ActivityLifecycleCallbacks {
         }
         val app = application ?: return false
         val loader = classLoader ?: return false
-        val version = com.reamicro.fix.core.HostSupportedVersions.inspect(app, app.applicationInfo.sourceDir)
-        if (!version.accepted) {
-            HookRuntime.logAlways("ReaMicro API102 rejected: ${version.reason}")
+        val archive = com.reamicro.fix.core.HostPackages.inspect(app, app.applicationInfo.sourceDir)
+        if (!archive.accepted) {
+            HookRuntime.logAlways("ReaMicro API102 rejected: ${archive.reason}")
             return false
         }
         if (com.reamicro.fix.core.HookInstallReport.failures().isNotEmpty()) {

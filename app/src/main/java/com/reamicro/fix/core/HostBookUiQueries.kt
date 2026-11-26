@@ -4,6 +4,7 @@ import java.lang.reflect.Modifier
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.FindMethod
 import org.luckypray.dexkit.query.matchers.MethodMatcher
+import org.luckypray.dexkit.result.ClassData
 import org.luckypray.dexkit.result.MethodData
 
 internal object HostBookUiQueries {
@@ -16,6 +17,32 @@ internal object HostBookUiQueries {
         private fun known(owner: String, name: String) = requireNotNull(bridge.getMethodData(base.getValue("method:$owner#$name")))
         private fun anchor(value: String) = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create().usingEqStrings(value)))
         private val flow by lazy { HostDexCalls(apk) }
+        private fun valueFields(value: HostDexCalls.Value): List<String> = when (value) {
+            is HostDexCalls.Field -> listOf(value.descriptor)
+            is HostDexCalls.Call -> value.arguments.flatMap(::valueFields)
+            else -> emptyList()
+        }
+        private fun valueCalls(value: HostDexCalls.Value): List<HostDexCalls.Call> =
+            if (value is HostDexCalls.Call) listOf(value) + value.arguments.flatMap(::valueCalls) else emptyList()
+        private fun implements(type: ClassData, contract: ClassData): Boolean = type.name == contract.name ||
+            type.superClass?.let { implements(it, contract) } == true || type.interfaces.any { implements(it, contract) }
+        private fun backupState(state: ClassData): Map<String, String> = buildMap {
+            val properties = HostRecordQueries.query(apk, mapOf("class:state" to state.descriptor))
+                .filterKeys { it.startsWith("field:state#") }.mapKeys { it.key.substringAfter('#') }
+            check(properties.keys.containsAll(setOf("book", "backup", "deleting")))
+            check(properties.values.toSet() == state.fields.filter { !Modifier.isStatic(it.modifiers) }.map { it.descriptor }.toSet())
+            val constructor = state.methods.filter { it.isConstructor && it.paramCount == properties.size }.one("backup state constructor")
+            val writes = flow.writes(constructor.descriptor)
+            properties.forEach { (name, descriptor) ->
+                val write = writes.single { it.field == descriptor && it.receiver == HostDexCalls.Parameter(0) }
+                val slot = (write.value as HostDexCalls.Parameter).index - 1
+                check(constructor.paramTypeNames[slot] == requireNotNull(bridge.getFieldData(descriptor)).typeName)
+                put("field:state.$name", descriptor); put("value:state.$name", slot.toString())
+            }
+            check(properties.keys.map { getValue("value:state.$it").toInt() }.toSet() == (0 until properties.size).toSet())
+            put("value:state.properties", properties.keys.sorted().joinToString(","))
+            put("constructor:state", constructor.descriptor)
+        }
         fun query(group: String): Map<String, String> = when (group) {
             "export" -> export()
             "imageSheet" -> imageSheet()
@@ -233,7 +260,7 @@ internal object HostBookUiQueries {
             val stateFactory = state.methods.filter { it.isConstructor }.flatMap { it.callers }.filter { it.isMethod && !Modifier.isStatic(it.modifiers) && it.paramCount == 0 &&
                 it.declaredClass?.superClass?.name == receiver.name }.one("backup state factory")
             val vm = requireNotNull(stateFactory.declaredClass)
-            val vmCtor = vm.methods.filter { it.isConstructor && it.paramCount == 3 &&
+            val vmCtor = vm.methods.filter { it.isConstructor &&
                 it.paramTypeNames.count { t -> t == "long" } == 1 && it.paramTypeNames.count { t -> t == storage.name } == 1 }.one("backup view model constructor")
             val vmWrites = flow.writes(vmCtor.descriptor)
             for ((role, name) in listOf("bookId" to "long", "storage" to storage.name)) {
@@ -242,31 +269,20 @@ internal object HostBookUiQueries {
                 check(bridge.getFieldData(field)?.let { it.declaredClassName == vm.name && it.typeName == name } == true)
                 put("field:vm.$role", field); put("value:vm.$role", slot.toString())
             }
-            val records = HostRecordQueries.query(apk, mapOf("class:state" to state.descriptor))
-            val properties = records.filterKeys { it.startsWith("field:state#") }.mapKeys { it.key.substringAfter('#') }
-            check(properties.keys == setOf("book", "backup", "deleting"))
-            check(properties.values.toSet() == state.fields.filter { !Modifier.isStatic(it.modifiers) }.map { it.descriptor }.toSet())
-            val stateCtor = state.methods.filter { it.isConstructor && it.paramCount == properties.size }.one("backup state constructor")
-            val writes = flow.writes(stateCtor.descriptor)
-            properties.forEach { (name, descriptor) ->
-                val write = writes.single { it.field == descriptor && it.receiver == HostDexCalls.Parameter(0) }
-                val slot = (write.value as HostDexCalls.Parameter).index - 1
-                check(stateCtor.paramTypeNames[slot] == requireNotNull(bridge.getFieldData(descriptor)).typeName)
-                put("field:state.$name", descriptor); put("value:state.$name", slot.toString())
-            }
-            check(properties.keys.map { getValue("value:state.$it").toInt() }.toSet() == (0..2).toSet())
+            putAll(backupState(state))
             val auth = known(P + "ui.backup.components.AuthCardKt", "AuthCard")
-            val content = auth.callers.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" && it.paramCount == 9 &&
+            val content = auth.callers.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
                 it.paramTypeNames.take(3) == listOf(book.name, cloud.name, "boolean") &&
-                it.paramTypeNames.subList(3, 7) == List(4) { function.name } &&
                 it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") }.one("backup content")
             val modifier = type("androidx.compose.ui.Modifier")
             val materialize = content.invokes.filter { Modifier.isStatic(it.modifiers) &&
                 it.paramTypeNames == listOf(composer.name, modifier.name) && it.returnTypeName == modifier.name
             }.one("backup root materialization")
-            val root = flow.calls(content.descriptor).filter { it.descriptor == materialize.descriptor }
-                .map { (it.arguments[1] as HostDexCalls.Field).descriptor }.distinct().single()
-            check(bridge.getFieldData(root)?.let { Modifier.isStatic(it.modifiers) } == true)
+            val rootValue = flow.calls(content.descriptor).filter { it.descriptor == materialize.descriptor }
+                .map { it.arguments[1] }.distinct().single()
+            val root = valueFields(rootValue).filter { descriptor ->
+                bridge.getFieldData(descriptor)?.let { Modifier.isStatic(it.modifiers) && implements(it.type, modifier) } == true
+            }.distinct().single()
             val scroll = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
                 .paramCount(3).returnType(modifier.name))).filter { Modifier.isStatic(it.modifiers) &&
                 it.paramTypeNames[0] == modifier.name && it.paramTypeNames[2] == "int" &&
@@ -283,12 +299,21 @@ internal object HostBookUiQueries {
             check(!enabled(0))
             val mask = scroll.usingNumbers.map { it.longValue() }.filter { it > 0 && it <= Int.MAX_VALUE && (it and (it - 1)) == 0L }
                 .distinct().filter(::enabled).single()
+            val nativeScroll = valueCalls(rootValue).any { call ->
+                when (call.descriptor) {
+                    scroll.descriptor -> (call.arguments.getOrNull(2) as? HostDexCalls.Literal)?.let { enabled(it.value) } == true
+                    scrollImpl.descriptor -> call.arguments.drop(2) == List(2) { HostDexCalls.Literal(1) }
+                    else -> false
+                }
+            }
             val remember = bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
                 .paramTypes(composer.name).returnType(stateType.name))).filter { Modifier.isStatic(it.modifiers) }.one("remember native scroll state")
             put("class:modifier", modifier.descriptor); put("class:scrollState", stateType.descriptor)
             put("field:rootModifier", root); put("method:materialize", materialize.descriptor)
             put("method:rememberScroll", remember.descriptor); put("method:verticalScroll", scroll.descriptor)
             put("value:scrollMask", mask.toString())
+            put("value:nativeScroll", if (nativeScroll) "1" else "0")
+            put("value:content.composer", (content.paramCount - 2).toString())
             val screen = content.callers.filter { !Modifier.isStatic(it.modifiers) && it.paramTypeNames == List(3) { "java.lang.Object" } &&
                 it.returnTypeName == "java.lang.Object" && flow.casts(it.descriptor).any { cast -> cast.type == vm.descriptor } }.one("backup screen callback")
             val loading = screen.invokes.filter {
@@ -320,7 +345,7 @@ internal object HostBookUiQueries {
             for ((role, cls) in listOf("book" to book, "cloud" to cloud, "composer" to composer, "function" to function,
                 "storage" to storage, "receiver" to receiver, "state" to state, "vm" to vm,
                 "screen" to requireNotNull(screen.declaredClass), "vector" to card.paramTypes[1])) put("class:$role", cls.descriptor)
-            put("constructor:vm", vmCtor.descriptor); put("constructor:state", stateCtor.descriptor)
+            put("constructor:vm", vmCtor.descriptor)
             for ((role, m) in listOf("stateFactory" to stateFactory, "content" to content, "screen" to screen,
                 "loading" to loading, "card" to card, "yun115" to yun115, "update" to update)) put("method:$role", m.descriptor)
             for (role in listOf("id", "backupType", "backupId")) put("field:book.$role", base.getValue("field:${P}data.db.entity.Book#$role"))
@@ -602,13 +627,14 @@ internal object HostBookUiQueries {
             val function = type("kotlin.jvm.functions.Function0")
             val auth = known(P + "ui.backup.components.AuthCardKt", "AuthCard")
             val drive = known(P + "ui.backup.components.AuthCardKt", "DriveAuthCard")
-            val content = auth.callers.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" && it.paramCount == 9 &&
-                it.paramTypeNames.first() == book.name && it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") &&
-                it.paramTypeNames.count { p -> p == "kotlin.jvm.functions.Function1" } == 4 }.one("backup content")
+            val content = auth.callers.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
+                it.paramTypeNames.first() == book.name && it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") }.one("backup content")
             // Current releases no longer call the old LocalStorageCard. The book header is
             // present for both backed-up and unbacked books, inside the same native Column.
             val header = content.invokes.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
-                it.paramTypeNames == listOf(book.name, composer.name, "int") }.one("backup header")
+                it.paramTypeNames.firstOrNull() == book.name && it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") &&
+                it.paramTypeNames.drop(1).dropLast(2).all { parameter -> parameter == "java.lang.Long" } }.one("backup header")
+            put("value:header.composer", (header.paramCount - 2).toString())
             val icon = anchor("Colored.AndroidOs").filter { Modifier.isStatic(it.modifiers) && it.paramCount == 0 &&
                 it.returnTypeName == drive.paramTypeNames.first() }.one("local storage icon")
             val activity = requireNotNull(bridge.getClassData(P + "MainActivity"))

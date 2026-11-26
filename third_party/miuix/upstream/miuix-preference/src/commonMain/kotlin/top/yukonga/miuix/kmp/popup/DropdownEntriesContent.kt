@@ -4,9 +4,9 @@
 package top.yukonga.miuix.kmp.popup
 
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import top.yukonga.miuix.kmp.basic.DropdownColors
@@ -30,6 +30,9 @@ internal fun DropdownEntriesPopupContent(
         val lastItemIdx = entry.items.lastIndex
         val isFirstEntry = entryIdx == 0
         val isLastEntry = entryIdx == lastEntryIdx
+        val onEntryClick = remember(entryIdx, onItemClick) {
+            { idx: Int -> onItemClick(entryIdx, idx) }
+        }
         entry.items.forEachIndexed { itemIdx, option ->
             key(entryIdx, itemIdx) {
                 DropdownImpl(
@@ -41,7 +44,7 @@ internal fun DropdownEntriesPopupContent(
                     enabled = entry.enabled && option.enabled,
                     isFirst = isFirstEntry && itemIdx == 0,
                     isLast = isLastEntry && itemIdx == lastItemIdx,
-                    onSelectedIndexChange = { idx -> onItemClick(entryIdx, idx) },
+                    onSelectedIndexChange = onEntryClick,
                 )
             }
         }
@@ -51,43 +54,6 @@ internal fun DropdownEntriesPopupContent(
                     .padding(horizontal = 20.dp, vertical = 4.dp),
                 thickness = 1.5.dp,
             )
-        }
-    }
-}
-
-/**
- * Adds [DropdownEntry] groups to a [LazyListScope] for use inside a dialog. Dialog mode uses
- * uniform vertical padding regardless of position, so popup-global first/last is intentionally
- * not propagated.
- */
-internal fun LazyListScope.dropdownEntriesDialogItems(
-    entries: List<DropdownEntry>,
-    dropdownColors: DropdownColors,
-    onItemClick: (entryIdx: Int, itemIdx: Int) -> Unit,
-) {
-    val lastEntryIdx = entries.lastIndex
-    entries.forEachIndexed { entryIdx, entry ->
-        items(entry.items.size, key = { itemIdx -> "$entryIdx-$itemIdx" }) { itemIdx ->
-            val item = entry.items[itemIdx]
-            DropdownImpl(
-                item = item,
-                optionSize = entry.items.size,
-                isSelected = item.selected,
-                index = itemIdx,
-                dropdownColors = dropdownColors,
-                enabled = entry.enabled && item.enabled,
-                dialogMode = true,
-                onSelectedIndexChange = { idx -> onItemClick(entryIdx, idx) },
-            )
-        }
-        if (entryIdx != lastEntryIdx) {
-            item(key = "divider-$entryIdx") {
-                HorizontalDivider(
-                    modifier = Modifier
-                        .padding(horizontal = 20.dp, vertical = 4.dp),
-                    thickness = 1.5.dp,
-                )
-            }
         }
     }
 }

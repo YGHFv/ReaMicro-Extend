@@ -285,13 +285,8 @@ internal object HostNativeUiQueries {
         field("aboutRoute", about.arguments[2])
         val aboutType = (about.arguments[2] as HostDexCalls.Field).descriptor.substringAfter(':')
         out["class:aboutRoute"] = aboutType
-        fun containsType(value: HostDexCalls.Value): Boolean = value == HostDexCalls.Type(aboutType) ||
-            (value is HostDexCalls.Call && value.arguments.any(::containsType))
-        val registrations = flow.referencingType(aboutType).flatMap { flow.calls(it) }.filter { call ->
-            call.arguments.size == 3 && containsType(call.arguments[1]) && call.arguments[2] is HostDexCalls.Field
-        }.distinct()
-        val slot = registrations.singleOrNull() ?: error("About destination registration: $registrations")
-        field("aboutContent", slot.arguments[2])
+        val (_, slot) = HostNavigationRegistration.find(bridge, flow, aboutType)
+        field("aboutContent", slot.arguments.last())
         val lambdaType = requireNotNull(bridge.getClassData(lambdaFactory.returnTypeName))
         val aboutInvoke = save("aboutInvoke", lambdaType.methods.filter { it.paramTypeNames == List(4) { "java.lang.Object" } && it.returnTypeName == "java.lang.Object" }.one("destination invocation"))
         val wrapper = save("aboutWrapper", aboutInvoke.invokes.filter {

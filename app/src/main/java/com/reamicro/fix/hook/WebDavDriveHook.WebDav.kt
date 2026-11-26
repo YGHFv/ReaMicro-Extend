@@ -375,7 +375,7 @@ internal fun WebDavDriveHook.updateWebDavBackupViewModels(
                 val visibleBook = host.field("state.book").get(before)
                 if (visibleBook != null && (visibleBook.callLong("getUid") != storageIdentity.accountId ||
                         visibleBook.callString("getUuid") != uuid)) return@function before
-                host.backupState(book, backup, false)
+                host.backupState(before, book, backup, false)
             })
         }.onFailure { HookRuntime.log("$LOG_PREFIX failed to update WebDAV backup ui state: ${it.stackTraceToString()}") }
     }

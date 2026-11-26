@@ -164,6 +164,7 @@ internal object HostRuntimeBindings {
         fun method(key: String) = bound.getValue("method:$key") as Method
         fun constructor(key: String) = bound.getValue("constructor:$key") as Constructor<*>
         fun field(key: String) = bound.getValue("field:$key") as Field
+        fun value(key: String) = (bound.getValue("value:$key") as String).toInt()
     }
 
     fun restoreNavigation(values: Map<String, String>, loader: ClassLoader): Navigation {

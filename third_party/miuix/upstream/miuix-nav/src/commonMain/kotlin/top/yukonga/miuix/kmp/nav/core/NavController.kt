@@ -3,8 +3,7 @@
 
 package top.yukonga.miuix.kmp.nav.core
 
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.snapshots.SnapshotStateList
 
 /**
@@ -16,6 +15,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
  * The result channel (navigateForResult/setResult/observeResult) is deferred past v1 core
  * (design spec §12) and intentionally absent from this signature.
  */
+@Stable
 public class NavController(public val backStack: SnapshotStateList<NavKey>) {
     /** Pushes [key] onto the top of the stack. */
     public fun push(key: NavKey) {
@@ -51,23 +51,8 @@ public class NavController(public val backStack: SnapshotStateList<NavKey>) {
             backStack.removeAt(backStack.lastIndex)
         }
     }
-}
 
-/**
- * Remembers a [NavController] wrapping a [rememberNavBackStack] seeded with [elements].
- *
- * The key type [T] is captured reflection-free for cross-platform persistence; when seeding with a
- * single concrete key pass the route supertype, e.g. `rememberNavController<Route>(Route.Home)`.
- *
- * ```kotlin
- * val nav = rememberNavController<Route>(Route.Home)
- * ```
- *
- * The result channel (navigateForResult/setResult/observeResult) is deferred past v1 core
- * (design spec §12) and is not part of this factory.
- */
-@Composable
-public inline fun <reified T : NavKey> rememberNavController(vararg elements: T): NavController {
-    val backStack = rememberNavBackStack(*elements)
-    return remember(backStack) { NavController(backStack) }
+    override fun equals(other: Any?): Boolean = this === other || (other is NavController && backStack === other.backStack)
+
+    override fun hashCode(): Int = backStack.hashCode()
 }

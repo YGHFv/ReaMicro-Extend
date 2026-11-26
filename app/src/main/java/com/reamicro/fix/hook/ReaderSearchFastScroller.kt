@@ -29,9 +29,9 @@ import kotlin.math.roundToInt
 @Composable internal fun BoxScope.ReaderSearchFastScroller(
     state: LazyListState, palette: HostEmbeddedStyle.Palette, scale: Float,
 ) {
-    val count by remember(state) { derivedStateOf { state.layoutInfo.totalItemsCount } }
+    val count by remember(state) { computedStateOf { state.layoutInfo.totalItemsCount } }
     if (count <= 20) return
-    val fraction by remember(state) { derivedStateOf {
+    val fraction by remember(state) { computedStateOf {
         SearchListScrollPosition.fraction(state.firstVisibleItemIndex, state.layoutInfo.totalItemsCount,
             !state.canScrollForward)
     } }

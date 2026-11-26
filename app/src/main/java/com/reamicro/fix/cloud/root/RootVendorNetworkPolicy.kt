@@ -6,14 +6,21 @@ internal enum class RootVendorNetworkPolicy(val id: String) {
     XIAOMI("miui_sleep"),
     OPLUS("oplus_deep_sleep");
 
-    fun shouldWake(state: RootNetworkState): Boolean = when (this) {
+    fun shouldWake(state: RootNetworkState, dns: RootDnsProbeResult? = null): Boolean = when (this) {
         NONE -> false
+        // Provider 状态缺失或滞后时也检查实际 DNS；接收器仅在睡眠期间注册，自行恢复原配置。
         XIAOMI -> state.probeError.isEmpty() && state.screen == false &&
-            state.airplaneMode == false && (state.xiaomiSleep == true || state.offline)
+            state.airplaneMode == false && (state.xiaomiSleep == true || state.offline || dns?.ready == false)
+        // type=0 也可能仍在深睡或 UID 禁网；恢复组件自行核对内部状态。
         OPLUS -> state.probeError.isEmpty() && state.screen == false && state.airplaneMode == false &&
-            (state.oplusNetworkRestricted || (state.oplusNetworkType == null &&
-                (state.oplusDeepSleep == true || state.oplusNetworkDisabled == true)))
+            (state.oplusDeepSleep == true || state.oplusNetworkDisabled == true ||
+                state.oplusUidDisconnected == true || state.oplusDisNetType in 1..4 ||
+                state.offline || dns?.ready == false)
     }
+
+    fun shouldRestoreUidNetwork(state: RootNetworkState, dns: RootDnsProbeResult?): Boolean =
+        this == OPLUS && state.ready && state.defaultNetwork.toIntOrNull()?.let { it > 0 } == true &&
+            state.screen == false && state.airplaneMode == false && dns?.ready == false
 
     fun wakeCommand(): List<String>? = when (this) {
         NONE -> null
@@ -39,6 +46,8 @@ internal enum class RootVendorNetworkPolicy(val id: String) {
                 printf 'oplusDeepSleep='; /system/bin/settings --user 0 get system oplus_deep_sleep_status
                 printf 'oplusNetworkDisabled='; /system/bin/settings --user 0 get system deepsleep_network_disable_state
                 printf 'oplusNetworkType='; /system/bin/settings --user 0 get system oplus_deepsleep_network_type
+                printf 'oplusDisNetType='; /system/bin/settings --user 0 get system deep_sleep_dis_net_type
+                printf 'oplusUidDisconnected='; /system/bin/settings --user 0 get system oplus_deepsleep_uid_disconnet_network_status
             """.trimIndent()
             // 地震预警分支可保留无线电并改网络白名单；睡眠状态来自厂商私有 provider，
             // 不是 Android settings 键。只输出 userConfigureStatus，不记录完整 Bundle。

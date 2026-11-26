@@ -107,8 +107,25 @@ internal object HostSettingsFeatures {
             !Modifier.isStatic(it.modifiers) && it.paramTypeNames ==
                 listOf("java.lang.Object", "java.lang.Object", "kotlin.jvm.functions.Function3") && it.returnTypeName == "void"
         }.one("settings lazy item")
+        fun constants(construction: HostDexCalls.Call): Map<String, Long> = flow.writes(construction.descriptor).mapNotNull { write ->
+            val value = when (val source = write.value) {
+                is HostDexCalls.Literal -> source
+                is HostDexCalls.Parameter -> construction.arguments.getOrNull(source.index) as? HostDexCalls.Literal
+                else -> null
+            } ?: return@mapNotNull null
+            val field = requireNotNull(bridge.getFieldData(write.field))
+            if (write.receiver != HostDexCalls.Parameter(0) || !Modifier.isFinal(field.modifiers) ||
+                field.typeName !in setOf("int", "byte", "short", "boolean", "long", "char")) return@mapNotNull null
+            write.field to value.value
+        }.toMap()
+        val builderConstruction = flow.calls(body.descriptor).filter { call ->
+            call.arguments.firstOrNull() is HostDexCalls.Allocation && bridge.getMethodData(call.descriptor)?.let {
+                it.isConstructor && it.declaredClass?.descriptor == builderClass.descriptor
+            } == true
+        }.distinct().single()
+        val builderConstants = constants(builderConstruction)
         val captures = listOf("viewModel" to vm, "navigation" to root.paramTypes[0]).associate { (role, type) ->
-            val field = flow.casts(builder.descriptor).filter { it.type == type.descriptor }
+            val field = flow.castsWithFields(builder.descriptor, builderConstants).filter { it.type == type.descriptor }
                 .mapNotNull { it.value as? HostDexCalls.Field }.distinct().single()
             val data = requireNotNull(bridge.getFieldData(field.descriptor))
             check(!Modifier.isStatic(data.modifiers) && data.declaredClassName == builderClass.name && data.typeName == "java.lang.Object")
@@ -125,7 +142,7 @@ internal object HostSettingsFeatures {
         // constrained only by final fields written from their constructor arguments.
         data class Entry(val construction: HostDexCalls.Call, val callback: org.luckypray.dexkit.result.ClassData,
             val callbackConstruction: HostDexCalls.Call)
-        val calls = flow.calls(builder.descriptor)
+        val calls = flow.callsWithFields(builder.descriptor, builderConstants)
         val entries = calls.filter { it.descriptor == itemDefault.descriptor }.mapNotNull { registration ->
             val wrapper = registration.arguments.getOrNull(2) as? HostDexCalls.Allocation ?: return@mapNotNull null
             val construction = calls.singleOrNull { call -> call.arguments.firstOrNull() == wrapper &&
@@ -135,15 +152,7 @@ internal object HostSettingsFeatures {
             val callback = construction.arguments.getOrNull(3) as? HostDexCalls.Allocation ?: return@mapNotNull null
             val callbackConstruction = calls.singleOrNull { call -> call.arguments.firstOrNull() == callback &&
                 bridge.getMethodData(call.descriptor)?.isConstructor == true } ?: return@mapNotNull null
-            val constants = flow.writes(callbackConstruction.descriptor).mapNotNull { write ->
-                val parameter = write.value as? HostDexCalls.Parameter ?: return@mapNotNull null
-                val value = callbackConstruction.arguments.getOrNull(parameter.index) as? HostDexCalls.Literal
-                    ?: return@mapNotNull null
-                val field = requireNotNull(bridge.getFieldData(write.field))
-                if (write.receiver != HostDexCalls.Parameter(0) || !Modifier.isFinal(field.modifiers) ||
-                    field.typeName !in listOf("int", "byte", "short", "boolean")) return@mapNotNull null
-                write.field to value.value
-            }.toMap()
+            val constants = constants(callbackConstruction)
             val body = contentBodies.singleOrNull { method -> method.declaredClass?.descriptor == callback.type &&
                 flow.callsWithFields(method.descriptor, constants).any { it.descriptor == defaultHome.descriptor } }
                 ?: return@mapNotNull null

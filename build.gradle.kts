@@ -4,15 +4,15 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.21")
+        classpath(libs.kotlin.gradle.plugin)
     }
 }
 
 plugins {
     id("dev.detekt") version "2.0.0-alpha.6" apply false
-    id("com.android.application") version "9.5.1" apply false
-    id("org.jetbrains.kotlin.plugin.compose") version "2.4.21" apply false
-    id("org.jetbrains.kotlin.plugin.serialization") version "2.4.21" apply false
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.compose.compiler) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
 }
 
 val miuixVersion = libs.versions.miuix.get()

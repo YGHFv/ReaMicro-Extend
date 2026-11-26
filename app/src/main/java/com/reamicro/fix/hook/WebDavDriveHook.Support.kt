@@ -3,7 +3,6 @@ package com.reamicro.fix.hook
 import com.reamicro.fix.core.hostMethod
 
 import android.app.Activity
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -11,7 +10,6 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Build
 import android.os.Looper
 import android.util.Base64
 import android.util.Xml
@@ -118,6 +116,7 @@ internal fun WebDavDriveHook.ensureOnlineCompletionCancelReceiver(context: Conte
     if (!onlineCompletionCancelReceiverRegistered.compareAndSet(false, true)) return
     runCatching {
         val appContext = context.applicationContext ?: context
+        com.reamicro.fix.online.download.clearLegacyOnlineCompletionHostNotifications(appContext)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(receiverContext: Context, intent: Intent) {
                 when (intent.action) {
@@ -324,7 +323,6 @@ private fun WebDavDriveHook.releaseStorageUiReferences() {
     onlineCompletionSearchRowViews.clear()
     onlineCompletionSearchBooks.clear()
     cloudStorageScreenRefreshAt.clear()
-    onlineCompletionModuleActivityPromptAt.clear()
     listOf(
         syncAuthCardRender, importUnauthRender, importLocalLibraryRow, webDavIconDepth,
         syncAvailableProvider, webDavCloudTitleDepth, webDavAccountScreenDepth, webDavAccountNavGraphScope,
@@ -1126,21 +1124,6 @@ internal fun currentOnlineCompletionBooksDir(bookshelf: Any): Any {
     val uid = (host.field("storage.uid").get(storage) as? Number)?.toLong()?.takeIf { it > 0L }
         ?: error("阅微书库目录不可用：当前用户 UID 未找到")
     return requireNotNull(host.method("books").invoke(storage, uid)) { "阅微书库目录不可用" }
-}
-
-internal fun onlineCompletionCancelPendingIntent(
-    context: Context, id: Int, key: String, pause: Boolean = false,
-): PendingIntent {
-    val intent = Intent(if (pause) com.reamicro.fix.notification.OnlineCompletionNotificationActions.PAUSE
-        else ONLINE_COMPLETION_CANCEL_ACTION).apply {
-        setPackage(context.packageName)
-        addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
-        putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID, id)
-        putExtra(ONLINE_COMPLETION_NOTIFICATION_EXTRA_KEY, key)
-    }
-    val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-    return PendingIntent.getBroadcast(context, id, intent, flags)
 }
 
 internal fun sendOnlineCompletionCancelBroadcastToModule(context: Context, id: Int, key: String): Boolean =

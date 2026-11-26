@@ -53,6 +53,22 @@ internal object HostFeatureTypes {
             ?.singleOrNull()?.let { type("kotlin.coroutines.CoroutineContext", it.returnTypeName) }
         type("app.zhendong.reamicro.data.db.AppDatabase", "app.zhendong.reamicro.data.db.AppDatabase")
         anchor("SettingsUIState(currentUser=")?.let { type("app.zhendong.reamicro.ui.setting.SettingsUIState", it.className) }
+        val workState = existing("app.zhendong.reamicro.arch.WorkState")
+        if (workState != null) {
+            // Follow injected dependencies and the locked state-update contract.
+            // Import services can add constructor parameters without moving this role.
+            val tracker = existing("app.zhendong.reamicro.arch.WorkerManager")?.methods.orEmpty()
+                .filter { it.isConstructor }.flatMap { it.paramTypes }.filter { dependency ->
+                    dependency.methods.any { method ->
+                        method.isMethod && !Modifier.isStatic(method.modifiers) &&
+                            method.paramTypeNames == listOf("java.lang.String", workState.name) &&
+                            method.returnTypeName == "void" && method.invokes.any {
+                                it.descriptor == "Ljava/util/concurrent/locks/ReentrantLock;->lock()V"
+                            }
+                    }
+                }.distinctBy { it.name }.singleOrNull()
+            type("app.zhendong.reamicro.arch.WorkTracker", tracker?.name)
+        }
 
         val scope = anchor("androidx.lifecycle.viewmodel.internal.ViewModelCoroutineScope.JOB_KEY")
             ?.takeIf { Modifier.isStatic(it.modifiers) && it.paramCount == 1 }
@@ -118,6 +134,17 @@ internal object HostFeatureTypes {
             }
         }
         if (group == "library") {
+            val function0 = existing("kotlin.jvm.functions.Function0")?.name
+            val composer = existing("androidx.compose.runtime.Composer")?.name
+            if (function0 != null && composer != null) {
+                val bookshelf = existing("app.zhendong.reamicro.ui.home.BookshelfScreenKt")?.name
+                val empty = bridge.findMethod(FindMethod.create().matcher(
+                    MethodMatcher.create().usingEqStrings("Outlined.DataEmpty").paramCount(0)))
+                    .flatMap { it.callers }.filter { Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" &&
+                        it.paramTypeNames == listOf(function0, composer, "int") &&
+                        (bookshelf == null || it.declaredClassName == bookshelf) }.distinctBy { it.descriptor }.singleOrNull()
+                save("app.zhendong.reamicro.ui.home.BookshelfScreenKt", "DataEmptyBox", empty)
+            }
             val owner = "app.zhendong.reamicro.arch.MVIViewModel"
             existing(owner)?.let { mvi ->
                 val flow = existing("kotlinx.coroutines.flow.StateFlowImpl")?.name

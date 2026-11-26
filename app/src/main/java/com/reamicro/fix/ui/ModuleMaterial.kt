@@ -17,7 +17,6 @@ import com.reamicro.fix.ui.liquid.rememberCombinedBackdrop
 
 internal val LocalModuleThemeConfig = compositionLocalOf { ModuleThemeConfig() }
 internal val LocalModuleSceneBackdrop = staticCompositionLocalOf<Backdrop?> { null }
-internal val LocalModuleWindowScaffold = staticCompositionLocalOf { false }
 internal val LocalModuleWindowClosing = staticCompositionLocalOf { false }
 
 @Composable
@@ -44,7 +43,6 @@ internal fun ModuleWindowPopupHost(content: @Composable () -> Unit) {
         else rememberCombinedBackdrop(parentBackdrop, bodyBackdrop)
     WindowPopupScope {
         CompositionLocalProvider(
-            LocalModuleWindowScaffold provides true,
             LocalModuleSceneBackdrop provides windowBackdrop,
         ) {
             Scaffold(

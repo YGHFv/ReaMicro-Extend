@@ -1,6 +1,6 @@
 package com.reamicro.fix.ui
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.CapturedAnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -71,7 +71,7 @@ internal fun TaskTimePicker(
         },
         onClick = { expanded = !expanded },
     )
-    AnimatedVisibility(
+    CapturedAnimatedVisibility(
         visible = expanded,
         enter = expandVertically(tween(220), expandFrom = Alignment.Top) + fadeIn(tween(160)),
         exit = shrinkVertically(tween(180), shrinkTowards = Alignment.Top) + fadeOut(tween(120)),
