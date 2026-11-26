@@ -2,7 +2,7 @@
 # The dependency versions follow the supplied rc01 source catalog.
 [versions]
 miuix = "0.9.5-rc01"
-agp = "9.5.2"
+agp = "9.5.3"
 kotlin = "2.4.21"
 compose = "1.13.0-rc01"
 activity = "1.13.0"
