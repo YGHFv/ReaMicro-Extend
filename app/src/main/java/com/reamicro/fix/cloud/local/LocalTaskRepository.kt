@@ -33,6 +33,7 @@ internal fun localTaskFromJson(taskType: String, obj: JSONObject): LocalTask {
         durationMinutes = obj.optInt("durationMinutes", 30).coerceIn(1, 720),
         dailyDrawLimit = obj.optInt("dailyLimit", 3).coerceIn(0, 20),
         drawAtCustomTime = obj.optBoolean("drawAtCustomTime", false),
+        hostReadOncePerDay = obj.optBoolean("hostReadOncePerDay", true),
         books = books,
         merchantAutoComplete = obj.optBoolean("merchantAutoComplete", false),
         merchantCityCode = obj.optString("merchantCityCode"),

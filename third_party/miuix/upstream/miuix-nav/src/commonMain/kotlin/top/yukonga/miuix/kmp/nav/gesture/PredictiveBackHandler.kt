@@ -45,51 +45,24 @@ class NavBackEvent(
     val swipeEdge: NavSwipeEdge,
     val touchY: Float,
     val frameTimeMillis: Long = 0,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is NavBackEvent) return false
+        return progress == other.progress &&
+            swipeEdge == other.swipeEdge &&
+            touchY == other.touchY &&
+            frameTimeMillis == other.frameTimeMillis
+    }
 
-/**
- * Back-navigation bridge registered on the [androidx.navigationevent] dispatcher.
- *
- * One common implementation serves every platform: the dispatcher is provided by the host
- * ([LocalNavigationEventDispatcherOwner]) and fed by platform inputs — the system predictive-back
- * stream on Android, the host window's ESC key on Desktop, the screen-edge gesture on iOS. Going
- * through the shared dispatcher (instead of platform-specific wiring) also yields correct
- * precedence for free: handlers are arbitrated last-composed-enabled-first, so an open overlay
- * (dialog / bottom sheet / popup — they register the same way) consumes back before this
- * navigation handler does.
- *
- * Lifecycle of a single gesture:
- * 1. A back gesture starts and [onProgress] is invoked with a cold per-gesture [Flow]; the host
- *    collects it and snaps `animatedTop` for each [NavBackEvent].
- * 2. If the gesture is committed, the [Flow] completes, and [onCommit] is invoked after the
- *    collector returns (pop the top entry and let the convergence spring settle to
- *    `topIndex - 1`).
- * 3. If the gesture is cancelled, the in-flight collection is cancelled and [onCancel] is
- *    invoked (spring `animatedTop` back to `topIndex`).
- *
- * A discrete trigger with no gesture stream (Desktop ESC, a programmatic back) skips [onProgress]
- * and invokes [onCommit] directly; the commit settle animates the pop through the shared spring.
- * Exactly one of [onCommit] / [onCancel] fires per resolved gesture.
- *
- * @param enabled Whether the handler is active. When `false`, the back action falls through to
- *   the next handler (e.g. exits the app on Android, no-ops elsewhere).
- * @param onProgress Suspend block receiving the cold per-gesture [Flow] of [NavBackEvent].
- *   Collect it to track finger progress; the block returns when the stream ends.
- * @param onCommit Invoked once per committed back action, after [onProgress] (if any) returns.
- * @param onCancel Invoked once when a gesture is cancelled before commit.
- */
-@Composable
-fun PredictiveBackHandler(
-    enabled: Boolean,
-    onProgress: suspend (Flow<NavBackEvent>) -> Unit,
-    onCommit: () -> Unit,
-    onCancel: () -> Unit,
-) = PredictiveBackHandlerWithSessions(
-    enabled = enabled,
-    onProgress = { _, events -> onProgress(events) },
-    onCommit = { onCommit() },
-    onCancel = { onCancel() },
-)
+    override fun hashCode(): Int {
+        var result = progress.hashCode()
+        result = 31 * result + swipeEdge.hashCode()
+        result = 31 * result + touchY.hashCode()
+        result = 31 * result + frameTimeMillis.hashCode()
+        return result
+    }
+}
 
 /** Session-aware wiring used internally when terminal work must be tied to its originating gesture. */
 @Composable

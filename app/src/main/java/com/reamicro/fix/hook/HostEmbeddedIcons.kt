@@ -31,7 +31,7 @@ internal object HostEmbeddedIcons {
     val Close = icon("Close",
         "M13.41,12 l4.3,-4.29 a1,1 0 1,0 -1.42,-1.42 L12,10.59 L7.71,6.29 A1,1 0 0,0 6.29,7.71 L10.59,12 l-4.3,4.29 a1,1 0 0,0 0,1.42 a1,1 0 0,0 1.42,0 L12,13.41 l4.29,4.3 a1,1 0 0,0 1.42,0 a1,1 0 0,0 0,-1.42 Z")
 
-    // Native image sheets in 2.3.3, 2.3.4 beta and 2.3.4 RC use this outlined circle.
+    // Native image sheets use this outlined circle; the host loader supplies its runtime type.
     val Cancel = icon("Outlined.Cancel",
         "M12,2 C6.47,2 2,6.47 2,12 s4.47,10 10,10 s10,-4.47 10,-10 S17.53,2 12,2 Z " +
         "M12,20 c-4.41,0 -8,-3.59 -8,-8 s3.59,-8 8,-8 s8,3.59 8,8 s-3.59,8 -8,8 Z " +

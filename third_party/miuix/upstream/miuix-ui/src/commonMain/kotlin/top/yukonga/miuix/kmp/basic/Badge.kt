@@ -3,22 +3,14 @@
 
 package top.yukonga.miuix.kmp.basic
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.AlignmentLine
 import androidx.compose.ui.layout.FirstBaseline
 import androidx.compose.ui.layout.HorizontalRuler
 import androidx.compose.ui.layout.LastBaseline
@@ -26,14 +18,9 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.VerticalRuler
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.layoutId
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.fastFirst
-import top.yukonga.miuix.kmp.theme.LocalContentColor
-import top.yukonga.miuix.kmp.theme.LocalTextStyles
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
@@ -82,12 +69,19 @@ fun BadgedBox(
         val totalWidth = anchorPlaceable.width
         val totalHeight = anchorPlaceable.height
 
+        val alignmentLines: Map<AlignmentLine, Int> =
+            if (firstBaseline == AlignmentLine.Unspecified && lastBaseline == AlignmentLine.Unspecified) {
+                emptyMap()
+            } else {
+                mapOf(FirstBaseline to firstBaseline, LastBaseline to lastBaseline)
+            }
+
         layout(
             width = totalWidth,
             height = totalHeight,
             // Provide custom baselines based only on the anchor content to avoid default baseline
             // calculations from including by any badge content.
-            alignmentLines = mapOf(FirstBaseline to firstBaseline, LastBaseline to lastBaseline),
+            alignmentLines = alignmentLines,
         ) {
             // Use the width of the badge to infer whether it has any content (based on radius used
             // in [Badge]) and determine its horizontal offset.
@@ -117,66 +111,6 @@ fun BadgedBox(
     }
 }
 
-/**
- * A badge represents dynamic information such as a number of pending requests in a navigation bar.
- *
- * Badges can be icon only or contain short text.
- *
- * See [BadgedBox] for a top level layout that will properly place the badge relative to content
- * such as text or an icon.
- *
- * @param modifier the [Modifier] to be applied to this badge
- * @param containerColor the color used for the background of this badge
- * @param contentColor the preferred color for content inside this badge
- * @param content optional content to be rendered inside this badge
- */
-@Composable
-fun Badge(
-    modifier: Modifier = Modifier,
-    containerColor: Color = BadgeDefaults.containerColor,
-    contentColor: Color = BadgeDefaults.contentColor,
-    content: @Composable (RowScope.() -> Unit)? = null,
-) {
-    val size = if (content != null) BadgeDefaults.LargeSize else BadgeDefaults.Size
-    val shape = CircleShape
-
-    // Draw badge container.
-    Row(
-        modifier =
-        modifier
-            .defaultMinSize(minWidth = size, minHeight = size)
-            .background(color = containerColor, shape = shape)
-            .then(
-                if (content != null) {
-                    Modifier.padding(horizontal = BadgeWithContentHorizontalPadding)
-                } else {
-                    Modifier
-                },
-            ),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        if (content != null) {
-            // Not using Surface composable because it blocks touch propagation behind it.
-            // Center the single-line label within an explicit line height so the digits are
-            // vertically centered consistently across platforms (footnote2 alone carries no
-            // line-height style, leaving placement to platform-dependent font metrics).
-            val style = MiuixTheme.textStyles.footnote2.copy(
-                lineHeight = 16.sp,
-                lineHeightStyle = LineHeightStyle(
-                    alignment = LineHeightStyle.Alignment.Center,
-                    trim = LineHeightStyle.Trim.None,
-                ),
-            )
-            ProvideContentColorTextStyle(
-                contentColor = contentColor,
-                textStyle = style,
-                content = { content() },
-            )
-        }
-    }
-}
-
 /** Default values used for [Badge] implementations. */
 object BadgeDefaults {
     /** Default size of an icon-only badge (no content). */
@@ -197,32 +131,6 @@ object BadgeDefaults {
         @ReadOnlyComposable
         get() = MiuixTheme.colorScheme.onError
 }
-
-/**
- * Provides [contentColor] as [LocalContentColor] and merges [textStyle] into the ambient text style
- * for [content], so a bare [Text] inside the badge picks up the badge label styling automatically.
- */
-@Composable
-private fun ProvideContentColorTextStyle(
-    contentColor: Color,
-    textStyle: TextStyle,
-    content: @Composable () -> Unit,
-) {
-    val textStyles = LocalTextStyles.current
-    val badgeTextStyles = remember(textStyles, textStyle) {
-        textStyles.copy(main = textStyles.main.merge(textStyle))
-    }
-    CompositionLocalProvider(
-        LocalContentColor provides contentColor,
-        LocalTextStyles provides badgeTextStyles,
-        content = content,
-    )
-}
-
-/*@VisibleForTesting*/
-// Leading and trailing text padding when a badge is displaying text that is too long to fit in
-// a circular badge, e.g. if badge number is greater than 9.
-internal val BadgeWithContentHorizontalPadding = 4.dp
 
 /*@VisibleForTesting*/
 // Offsets for badge when there is short or long content

@@ -89,7 +89,7 @@ internal object HostSyncBindings {
         val long = java.lang.Long.TYPE
         val config = m.type("config")
         check(m.method("onlinePack").parameterTypes.toList() == listOf(m.type("file"), m.type("file"), Set::class.java) &&
-            Modifier.isStatic(m.method("onlinePack").modifiers))
+            m.method("onlinePack").returnType == java.lang.Void.TYPE && Modifier.isStatic(m.method("onlinePack").modifiers))
         check(m.method("onlineUnpack").parameterTypes.take(2) == listOf(m.type("file"), m.type("file")) &&
             m.method("onlineUnpack").parameterTypes[2].isInterface && Modifier.isStatic(m.method("onlineUnpack").modifiers))
         check(m.field("onlineSyncBook.metadata").type == m.type("onlineMetadata") &&
@@ -144,8 +144,8 @@ internal object HostSyncBindings {
         check(m.constructor("transport").declaringClass == transport && m.constructor("transport").parameterTypes.count { it == config } == 1)
         instanceField("transportConfig", transport, config, assignable = true)
         val operations = OPERATIONS.map(m::method)
-        val contracts = api.declaredMethods.filterNot { Modifier.isStatic(it.modifiers) }
-        check(contracts.size == 8 && operations.distinct().size == 8)
+        val contracts = api.declaredMethods.filter { Modifier.isAbstract(it.modifiers) }
+        check(contracts.size == OPERATIONS.size && operations.distinct().size == OPERATIONS.size)
         for (method in operations) {
             check(method.declaringClass == transport && !Modifier.isStatic(method.modifiers) && method.returnType == any &&
                 method.parameterTypes.first() == string && continuation.isAssignableFrom(method.parameterTypes.last()))

@@ -34,9 +34,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.sin
 
 /**
  * A [LinearProgressIndicator] with Miuix style.
@@ -287,66 +284,6 @@ fun CircularProgressIndicator(
             size = size,
         )
     }
-}
-
-/**
- * A [InfiniteProgressIndicator] with Miuix style.
- * The indicator is a circular indicator with an orbiting dot.
- *
- * @param modifier The modifier to be applied to the indicator.
- * @param color The color of the indicator.
- * @param size The size (diameter) of the circular indicator.
- * @param strokeWidth The width of the circular stroke.
- * @param orbitingDotSize The size of the orbiting dot.
- */
-@Composable
-fun InfiniteProgressIndicator(
-    modifier: Modifier = Modifier,
-    color: Color = Color.Gray,
-    size: Dp = ProgressIndicatorDefaults.DefaultInfiniteProgressIndicatorSize,
-    strokeWidth: Dp = ProgressIndicatorDefaults.DefaultInfiniteProgressIndicatorStrokeWidth,
-    orbitingDotSize: Dp = ProgressIndicatorDefaults.DefaultInfiniteProgressIndicatorOrbitingDotSize,
-) {
-    val transition = rememberInfiniteTransition()
-    val rotation = transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-    )
-
-    Spacer(
-        modifier = modifier
-            .size(size)
-            .drawWithCache {
-                val strokeWidthPx = strokeWidth.toPx()
-                val orbitingDotSizePx = orbitingDotSize.toPx()
-                val bgStroke = Stroke(strokeWidthPx, cap = StrokeCap.Round)
-                val center = Offset(this.size.width / 2f, this.size.height / 2f)
-                val radius = (this.size.minDimension - strokeWidthPx) / 2f
-                val orbitRadius = radius - 2f * orbitingDotSizePx
-                onDrawBehind {
-                    drawCircle(
-                        color = color,
-                        radius = radius,
-                        center = center,
-                        style = bgStroke,
-                    )
-                    val angle = rotation.value * (PI / 180.0).toFloat()
-                    val dotCenter = center + Offset(
-                        x = orbitRadius * cos(angle),
-                        y = orbitRadius * sin(angle),
-                    )
-                    drawCircle(
-                        color = color,
-                        radius = orbitingDotSizePx,
-                        center = dotCenter,
-                    )
-                }
-            },
-    )
 }
 
 /**

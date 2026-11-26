@@ -22,8 +22,10 @@ internal fun RootEnhancementDialog(
     show: Boolean, title: String, onClose: () -> Unit,
     primaryLabel: String? = null, onPrimary: (() -> Unit)? = null,
     primaryEnabled: Boolean = true, dangerous: Boolean = false,
+    onDismissFinished: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
-) = AppWindowDialog(show, title, onClose, primaryLabel, onPrimary, primaryEnabled, dangerous, content = content)
+) = AppWindowDialog(show, title, onClose, primaryLabel, onPrimary, primaryEnabled, dangerous,
+    onDismissFinished = onDismissFinished, content = content)
 
 @Composable
 internal fun RootEnhancementPreference(

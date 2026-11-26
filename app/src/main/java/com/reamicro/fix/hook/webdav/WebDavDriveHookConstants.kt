@@ -67,8 +67,6 @@ internal const val MODULE_PACKAGE_NAME = "com.reamicro.fix"
 internal const val ONLINE_COMPLETION_NOTIFICATION_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_NOTIFICATION"
 internal const val ONLINE_COMPLETION_CANCEL_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_CANCEL"
 internal const val ONLINE_COMPLETION_HEARTBEAT_ACTION = "com.reamicro.fix.ONLINE_COMPLETION_HEARTBEAT"
-internal const val ONLINE_COMPLETION_NOTIFICATION_ACTIVITY_CLASS =
-    "com.reamicro.fix.notification.OnlineCompletionNotificationActivity"
 internal const val ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS =
     "com.reamicro.fix.notification.OnlineCompletionNotificationReceiver"
 internal const val ONLINE_COMPLETION_NOTIFICATION_EXTRA_ID = "id"
@@ -137,7 +135,6 @@ internal const val ONLINE_COMPLETION_REPOSITORY_WAIT_STEP_MS = 400L
 internal const val ONLINE_COMPLETION_RETRY_DELAY_MS = 6_000L
 internal const val ONLINE_COMPLETION_RETRY_DELAY_MAX_MS = 60_000L
 internal const val ONLINE_COMPLETION_NOTIFICATION_MIN_INTERVAL_MS = 1_000L
-internal const val ONLINE_COMPLETION_MODULE_ACTIVITY_RETRY_MS = 15_000L
 internal const val ONLINE_COMPLETION_METADATA_REPAIR_INTERVAL_MS = 5 * 60_000L
 internal const val ONLINE_COMPLETION_PINNED_TIMESTAMP_FLOOR = 1_000_000_000_000L
 internal const val CLOUD_STORAGE_SCREEN_REFRESH_DEBOUNCE_MS = 1_000L

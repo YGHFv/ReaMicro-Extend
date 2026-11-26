@@ -29,7 +29,11 @@ import java.util.ArrayDeque
 
 /** Android forms occupy the native sentence editor's content slot; the host owns its window. */
 internal object HostSettingsDialogs {
-    data class Action(val title: String, val onClick: () -> Unit)
+    data class Action(
+        val title: String,
+        val nativeButton: Boolean = false,
+        val onClick: () -> Unit,
+    )
 
     private object TitleTag
     private object TitleRowTag
@@ -133,17 +137,30 @@ internal object HostSettingsDialogs {
                             try {
                                 for (index in first until end) {
                                     val action = owner.actions[index]
-                                    HostAndroidViews(loader).render(
-                                        ui.function(ui.type("function1")) {
-                                            TextView(owner.owner).apply {
-                                                text = action.title
-                                                gravity = android.view.Gravity.CENTER
-                                                com.reamicro.fix.ui.applyDialogActionStyle(this)
-                                                isClickable = true
-                                                setOnClickListener { if (owner.acceptsUpdates) action.onClick() }
-                                            }
-                                        }, modifier, composer,
-                                    )
+                                    if (action.nativeButton) {
+                                        val original = requireNotNull(param.args[native.number("sentenceButtonContent")])
+                                        val content = HostSentenceActionContent.labeled(
+                                            0x524D4100 + index, original, action.title,
+                                        )
+                                        val onClick = ui.callback(ui.type("function0")) {
+                                            if (owner.acceptsUpdates) action.onClick()
+                                        }
+                                        // Preserve the host's component, layout, theme, semantics and ripple.
+                                        native.method("sentenceButton").invoke(null,
+                                            *native.sentenceActionArguments(param.args, onClick, content))
+                                    } else {
+                                        HostAndroidViews(loader).render(
+                                            ui.function(ui.type("function1")) {
+                                                TextView(owner.owner).apply {
+                                                    text = action.title
+                                                    gravity = android.view.Gravity.CENTER
+                                                    com.reamicro.fix.ui.applyDialogActionStyle(this)
+                                                    isClickable = true
+                                                    setOnClickListener { if (owner.acceptsUpdates) action.onClick() }
+                                                }
+                                            }, modifier, composer,
+                                        )
+                                    }
                                 }
                             } finally {
                                 owner.renderingActions = false
@@ -338,7 +355,8 @@ internal object HostSettingsDialogs {
     /** Keep the native surface clear of system bars while long forms scroll within it. */
     private class LimitedBody(private val activity: Activity, content: View) : FrameLayout(activity) {
         init {
-            val scroll = if (content is ScrollView) content else ScrollView(activity).apply {
+            val scrolls = content is ScrollView || content is HostPinnedForm
+            val scroll = if (scrolls) content else ScrollView(activity).apply {
                 isFillViewport = false
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
                 addView(content)
@@ -348,7 +366,8 @@ internal object HostSettingsDialogs {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             val decor = activity.window.decorView
             val fullHeight = decor.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
-            val insets = decor.rootWindowInsets
+            // The keyboard belongs to the dialog window, which can differ from the activity's.
+            val insets = rootWindowInsets ?: decor.rootWindowInsets
             val (top, bottom) = if (android.os.Build.VERSION.SDK_INT >= 30 && insets != null) {
                 val system = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.ime())
                 system.top to system.bottom
@@ -358,13 +377,20 @@ internal object HostSettingsDialogs {
             }
             val available = (fullHeight - top - bottom).coerceAtLeast(1)
             val scale = EmbeddedHostUi.scale(activity).takeIf { it.isFinite() && it > 0f } ?: 1f
-            val reserved = (96f * scale * resources.displayMetrics.density).toInt()
+            val fontScale = resources.configuration.fontScale.coerceAtLeast(1f)
+            // Include native title/actions and surface padding, including in landscape.
+            val reserved = (128f * scale * fontScale * resources.displayMetrics.density).toInt()
             val maximum = (available * .78f).toInt().minus(reserved).coerceAtLeast(
-                minOf(available, (48f * resources.displayMetrics.density).toInt()),
+                minOf(available / 3, (80f * resources.displayMetrics.density).toInt()),
             )
             val allowed = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED) maximum
                 else minOf(maximum, MeasureSpec.getSize(heightMeasureSpec))
             super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(allowed, MeasureSpec.AT_MOST))
+        }
+
+        override fun onApplyWindowInsets(insets: android.view.WindowInsets): android.view.WindowInsets {
+            requestLayout()
+            return super.onApplyWindowInsets(insets)
         }
     }
 

@@ -53,6 +53,8 @@ jobs:
             printf 'CI 构建版本 %s（版本代码 %s），来自%s。包含匹配的 APK 和配套模块 ZIP。\n' \
               "$VERSION_NAME" "$VERSION_CODE" "${GITHUB_SHA:0:7}" > "$RUNNER_TEMP/reamicro-release-notes.md"
           fi
+          RELEASE_TITLE="$(git log -1 --format=%s "$GITHUB_SHA")"
+          echo "RELEASE_TITLE=${RELEASE_TITLE:-阅微补全计划 $VERSION_NAME}" >> "$GITHUB_ENV"
 
       - name: Set up JDK 25
         uses: actions/setup-java@v6
@@ -84,8 +86,8 @@ jobs:
           set +o pipefail
           yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses > /dev/null
           set -o pipefail
-          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37.1" "build-tools;37.0.0"
-          test -f "$ANDROID_HOME/platforms/android-37.1/android.jar"
+          sdkmanager --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-37.2" "build-tools;37.0.0"
+          test -f "$ANDROID_HOME/platforms/android-37.2/android.jar"
 
       - name: Make Gradle executable
         run: chmod +x ./gradlew
@@ -228,9 +230,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="ci-${VERSION_NAME}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-          TITLE="阅微补全计划 ${VERSION_NAME} · CI #${GITHUB_RUN_NUMBER}"
           gh release create "$TAG" artifacts/*-release*.apk artifacts/*-release*.apk.sha256 artifacts/ReaMicro-Automation-Root-*.zip \
-            --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$RUNNER_TEMP/reamicro-release-notes.md" --prerelease
+            --target "$GITHUB_SHA" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/reamicro-release-notes.md" --prerelease
 
       - name: Publish to LSPosed module repo
         if: github.repository == 'YGHFv/ReaMicro-Extend' && github.ref == 'refs/heads/main'
@@ -257,7 +258,7 @@ jobs:
           fi
           gh release create "$TAG" "artifacts/ReaMicro-Extend-${VERSION_NAME}-release.apk" \
             --repo "$MODULE_REPO" \
-            --title "$VERSION_NAME" \
+            --title "$RELEASE_TITLE" \
             --notes-file "$RUNNER_TEMP/reamicro-release-notes.md"
           echo "已同步到模块仓库：$TAG"
       - name: Remove CI signing material

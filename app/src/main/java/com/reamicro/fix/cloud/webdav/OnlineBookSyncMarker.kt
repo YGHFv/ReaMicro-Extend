@@ -13,6 +13,9 @@ import javax.xml.transform.TransformerFactory
 import javax.xml.transform.dom.DOMSource
 import javax.xml.transform.stream.StreamResult
 import java.io.ByteArrayOutputStream
+import java.io.StringReader
+import org.xml.sax.InputSource
+import org.xml.sax.SAXException
 
 /** 保留原 EPUB 身份、目录和章节路径，正文仅使用待从书源获取的占位页。 */
 internal object OnlineBookSyncMarker {
@@ -96,13 +99,20 @@ internal object OnlineBookSyncMarker {
     }
     /** 最小有效 EPUB 沿用原标识和书源元数据，不携带发送端章节列表。 */
     private fun progressEntries(root: File, metadata: OnlineOnDemandMetadata, marker: JSONObject, uuid: String): Map<String, ByteArray> {
-        val factory = DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = true
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        }
         val opf = File(root, "OEBPS/content.opf")
         require(opf.canonicalFile.toPath().startsWith(root.canonicalFile.toPath()))
-        val doc = opf.inputStream().use { factory.newDocumentBuilder().parse(it) }
+        val xml = opf.readText(Charsets.UTF_8)
+        require(!xml.contains("<!DOCTYPE", ignoreCase = true) && !xml.contains("<!ENTITY", ignoreCase = true)) {
+            "在线图书 OPF 不支持外部实体声明"
+        }
+        val builder = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            isValidating = false
+            isExpandEntityReferences = false
+        }.newDocumentBuilder().apply {
+            setEntityResolver { _, _ -> throw SAXException("Online book external entity is not supported") }
+        }
+        val doc = builder.parse(InputSource(StringReader(xml)))
         val pkg = doc.documentElement
         val namespace = pkg.namespaceURI ?: "http://www.idpf.org/2007/opf"
         // 元数据和原 unique-identifier 保留；章节、封面及导航清单均由接收端书源重建。

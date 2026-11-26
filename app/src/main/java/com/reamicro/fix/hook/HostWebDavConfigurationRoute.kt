@@ -97,7 +97,7 @@ internal class HostWebDavConfigurationRoute(
             registerHook(register, object : HookCallback() {
                 override fun before(param: Call) {
                     if (param.args.getOrNull(1) != routeToken) return
-                    val holder = param.args.getOrNull(2) ?: return
+                    val holder = param.args.getOrNull(bindings.value("contentSlot")) ?: return
                     val content = wrapper.get(holder) ?: return
                     check(isConfigurationContent(content)) { "Unverified native S3 route content" }
                     registered[content] = true

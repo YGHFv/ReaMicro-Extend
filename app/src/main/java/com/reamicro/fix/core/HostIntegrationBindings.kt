@@ -56,7 +56,7 @@ internal object HostIntegrationBindings {
             "activity" -> setOf("class:activity", "method:create", "method:resume")
             "androidView" -> setOf("method:render", "class:modifier", "class:composer", "field:release")
             "webDavRoute" -> setOf("class:route", "class:scope", "class:content", "class:lambda", "constructor:route",
-                "field:preset", "field:scope", "field:callback", "value:branchCount", "method:setup", "method:register", "method:token", "method:render", "method:decode")
+                "field:preset", "field:scope", "field:callback", "value:branchCount", "value:contentSlot", "method:setup", "method:register", "method:token", "method:render", "method:decode")
             else -> error("Unknown integration group: $group")
         }
         check(values.keys.containsAll(required)) { "$group missing ${required - values.keys}" }
@@ -106,8 +106,7 @@ internal object HostIntegrationBindings {
                 val receiver = m.field("tokenReceiver")
                 check(Modifier.isStatic(receiver.modifiers) && token.declaringClass.isAssignableFrom(receiver.type))
             }
-            check(Modifier.isStatic(register.modifiers) && register.returnType == Void.TYPE && register.parameterCount == 3 &&
-                register.parameterTypes[1].isAssignableFrom(token.returnType) && register.parameterTypes[2].isAssignableFrom(m.type("lambda")))
+            HostNavigationRegistration.validate(register, token, m.type("lambda"), m.value("contentSlot"))
             check(Modifier.isStatic(decode.modifiers) && decode.returnType == Any::class.java && decode.parameterCount == 2 &&
                 decode.parameterTypes[1].isAssignableFrom(token.returnType) && !decode.parameterTypes[0].isPrimitive)
             check(m.method("setup").returnType == Any::class.java)

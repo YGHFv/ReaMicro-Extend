@@ -62,15 +62,7 @@ internal object HostIntegrationQueries {
         out["field:preset"] = route.fields.single { !Modifier.isStatic(it.modifiers) && it.typeName == "java.lang.String" }.descriptor
         val flow = HostDexCalls(apk)
         val routeValue = HostDexCalls.Type(route.descriptor)
-        val candidates = flow.referencingType(route.descriptor).flatMap { caller ->
-            flow.calls(caller).filter { call ->
-                call.arguments.size == 3 && contains(call.arguments[1], routeValue) &&
-                    call.arguments[2] is HostDexCalls.Allocation && bridge.getMethodData(call.descriptor)?.let {
-                        Modifier.isStatic(it.modifiers) && it.returnTypeName == "void" && it.paramCount == 3
-                    } == true
-            }.map { caller to it }
-        }.distinct()
-        val (setup, registration) = candidates.singleOrNull() ?: error("S3 registration is ambiguous: $candidates")
+        val (setup, registration) = HostNavigationRegistration.find(bridge, flow, route.descriptor)
         method("setup", setup)
         val register = method("register", registration.descriptor)
         val tokenCall = registration.arguments[1] as? HostDexCalls.Call ?: error("S3 token is not a class conversion")
@@ -80,7 +72,8 @@ internal object HostIntegrationQueries {
             out["field:tokenReceiver"] = (tokenCall.arguments.firstOrNull() as? HostDexCalls.Field)?.descriptor
                 ?: error("S3 token receiver is not a static singleton")
         }
-        val wrapper = registration.arguments[2] as HostDexCalls.Allocation
+        out["value:contentSlot"] = registration.arguments.lastIndex.toString()
+        val wrapper = registration.arguments.last() as HostDexCalls.Allocation
         val wrapperInit = flow.calls(setup).single {
             it.arguments.firstOrNull() == wrapper && it.descriptor.contains("-><init>(IZLjava/lang/Object;)V")
         }

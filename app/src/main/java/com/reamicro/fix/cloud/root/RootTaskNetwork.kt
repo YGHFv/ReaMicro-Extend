@@ -13,19 +13,22 @@ internal object RootTaskNetwork {
         return RootNetworkPreparation(
             probe = { remaining -> probe(remaining, vendor) },
             exitIdle = { remaining ->
-                remaining >= 1_000L && RootCommandRunner.execute(
+                remaining >= 1_000L && RootCommandRunner.executeTransient(
                     ProcessBuilder("/system/bin/cmd", "deviceidle", "motion"),
                     timeoutSeconds = commandTimeout(remaining),
                 ).exitCode == 0
             },
             wakeVendor = wakeCommand?.let { command ->
                 { remaining ->
-                    remaining >= 1_000L && RootCommandRunner.execute(
+                    remaining >= 1_000L && RootCommandRunner.executeTransient(
                         ProcessBuilder(command), timeoutSeconds = commandTimeout(remaining),
                     ).let { it.exitCode == 0 && !it.truncated }
                 }
             },
             shouldWakeVendor = vendor::shouldWake,
+            restoreUidNetwork = if (vendor == RootVendorNetworkPolicy.OPLUS) RootOplusUidNetwork::restore else null,
+            shouldRestoreUidNetwork = vendor::shouldRestoreUidNetwork,
+            exitDeviceIdle = RootDeviceIdle::exit,
             verifyDns = RootDnsProbe::check,
             clock = SystemClock::elapsedRealtime,
             sleep = Thread::sleep,
@@ -39,7 +42,7 @@ internal object RootTaskNetwork {
         vendor: RootVendorNetworkPolicy = RootVendorNetworkPolicy.forDevice(Build.MANUFACTURER, Build.BRAND),
     ): RootNetworkState {
         if (remainingMs < 1_000L) return RootNetworkState(probeError = "PreparationBudgetExhausted")
-        val result = RootCommandRunner.execute(
+        val result = RootCommandRunner.executeTransient(
             ProcessBuilder("/system/bin/sh", "-c", PROBE_SCRIPT + "\n" + vendor.probeScript),
             timeoutSeconds = commandTimeout(remainingMs),
         )

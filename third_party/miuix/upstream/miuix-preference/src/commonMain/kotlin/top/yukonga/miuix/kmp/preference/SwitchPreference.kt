@@ -8,8 +8,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.NonRestartableComposable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,7 +50,7 @@ fun SwitchPreference(
     summary: String? = null,
     summaryColor: BasicComponentColors = BasicComponentDefaults.summaryColor(),
     startAction: @Composable (() -> Unit)? = null,
-    endActions: @Composable RowScope.() -> Unit = {},
+    endActions: @Composable RowScope.() -> Unit = EmptyEndActions,
     bottomAction: (@Composable () -> Unit)? = null,
     switchColors: SwitchColors = SwitchDefaults.switchColors(),
     insideMargin: PaddingValues = BasicComponentDefaults.InsideMargin,
@@ -58,6 +58,11 @@ fun SwitchPreference(
     enabled: Boolean = true,
 ) {
     val currentOnCheckedChange by rememberUpdatedState(onCheckedChange)
+    val currentChecked by rememberUpdatedState(checked)
+    val currentEnabled by rememberUpdatedState(enabled)
+    val onRowClick = remember {
+        { currentOnCheckedChange.takeIf { currentEnabled }?.invoke(!currentChecked) ?: Unit }
+    }
     BasicComponent(
         modifier = modifier,
         insideMargin = insideMargin,
@@ -67,13 +72,15 @@ fun SwitchPreference(
         summaryColor = summaryColor,
         startAction = startAction,
         endActions = {
-            Row(
-                modifier = Modifier
-                    .padding(end = 8.dp)
-                    .align(Alignment.CenterVertically)
-                    .weight(1f, fill = false),
-            ) {
-                endActions()
+            if (endActions !== EmptyEndActions) {
+                Row(
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .align(Alignment.CenterVertically)
+                        .weight(1f, fill = false),
+                ) {
+                    endActions()
+                }
             }
             SwitchPreferenceEndActions(
                 checked = checked,
@@ -83,9 +90,7 @@ fun SwitchPreference(
             )
         },
         bottomAction = bottomAction,
-        onClick = {
-            currentOnCheckedChange.takeIf { enabled }?.invoke(!checked)
-        },
+        onClick = onRowClick,
         role = Role.Switch,
         holdDownState = holdDownState,
         enabled = enabled,
@@ -106,3 +111,5 @@ private fun SwitchPreferenceEndActions(
         colors = switchColors,
     )
 }
+
+private val EmptyEndActions: @Composable RowScope.() -> Unit = {}

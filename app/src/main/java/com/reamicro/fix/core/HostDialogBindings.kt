@@ -115,7 +115,9 @@ internal object HostDialogBindings {
                 it[2] = true
                 it[slot] = content
                 val changed = number("sentenceButtonComposer") + 1
-                it[changed] = (it[changed] as Int) and (14 or (14 shl 6) or (14 shl (slot * 3))).inv()
+                // R8 may remove parameters without renumbering Compose change bits.
+                // Let the host recompute changes for the replacement callbacks.
+                it[changed] = 0
                 it[changed + 1] = (it[changed + 1] as Int) and (1 shl 2).inv()
             }
         }

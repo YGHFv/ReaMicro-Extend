@@ -5,116 +5,100 @@ import android.view.RoundedCorner
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import com.reamicro.fix.R
 import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.rememberNavigationEventState
+import com.reamicro.fix.R
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.glass.GlassCard
+import top.yukonga.miuix.kmp.glass.GlassDialog
 import top.yukonga.miuix.kmp.glass.GlassDialogButton
 import top.yukonga.miuix.kmp.glass.GlassDialogButtonRole
-import top.yukonga.miuix.kmp.glass.GlassDialogDefaults
-import top.yukonga.miuix.kmp.glass.glassDialogSurface
-import top.yukonga.miuix.kmp.integration.WindowSurfaceDialog
+import top.yukonga.miuix.kmp.integration.WindowDialogHost
+import top.yukonga.miuix.kmp.layout.DialogDefaults
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
 
 @Composable
 internal fun ModuleWindowDialog(
     show: Boolean,
     title: String?,
     onClose: () -> Unit,
-    insideMargin: DpSize = top.yukonga.miuix.kmp.layout.DialogDefaults.insideMargin,
+    insideMargin: DpSize = DialogDefaults.insideMargin,
     dismissEnabled: Boolean = true,
+    onDismissFinished: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val mode = LocalModuleWindowGestures.current.predictiveMode
     if (mode == ModulePredictiveBackMode.Aosp &&
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        ModuleAospWindowDialog(show, title, onClose, dismissEnabled, insideMargin, content)
-    } else if (useModuleGlass()) {
-        ModuleGlassWindowDialog(show, title, onClose, dismissEnabled, insideMargin, content)
+        ModuleAospWindowDialog(show, title, onClose, dismissEnabled, insideMargin, onDismissFinished, content)
     } else {
-        WindowSurfaceDialog(
-            show = show,
-            title = title,
-            onDismissRequest = { if (dismissEnabled) onClose() },
-            insideMargin = insideMargin,
-            windowHost = {
-                ModulePredictiveBackScope(animated = mode.enabled) {
-                    ModuleWindowPopupHost(it)
-                }
-            },
-        ) {
-            ModuleWindowBackGuard(dismissEnabled = dismissEnabled)
-            content()
-        }
+        ModuleMiuixWindowDialog(show, title, onClose, dismissEnabled, insideMargin, onDismissFinished, content)
     }
 }
 
 @Composable
-private fun ModuleGlassWindowDialog(
+private fun ModuleMiuixWindowDialog(
     show: Boolean,
     title: String?,
     onClose: () -> Unit,
     dismissEnabled: Boolean,
     insideMargin: DpSize,
+    onDismissFinished: (() -> Unit)?,
     content: @Composable () -> Unit,
 ) {
-    var closing by remember { mutableStateOf(false) }
+    var mounted by remember { mutableStateOf(show) }
+    LaunchedEffect(show) { if (show) mounted = true }
+    if (!mounted) return
+
+    val glass = useModuleGlass()
+    val backdrop = LocalModuleSceneBackdrop.current
     val currentClose by rememberUpdatedState(onClose)
     val currentEnabled by rememberUpdatedState(dismissEnabled)
-    LaunchedEffect(show) { if (show) closing = false }
-    val requestClose = { if (currentEnabled) closing = true }
-    WindowSurfaceDialog(
-        show = show && !closing,
-        title = title,
-        onDismissRequest = requestClose,
-        modifier = Modifier.moduleClosingInput(closing),
-        onDismissFinished = {
-            if (closing) {
-                if (currentEnabled) currentClose() else closing = false
-            }
-        },
-        insideMargin = insideMargin,
-        containerColor = GlassDialogDefaults.containerColor(),
-        dimColor = GlassDialogDefaults.ScrimColor,
-        surface = glassDialogSurface(LocalModuleSceneBackdrop.current),
-        windowHost = {
-            ModulePredictiveBackScope(animated = LocalModuleWindowGestures.current.predictiveMode.enabled) {
-                ModuleWindowPopupHost(it)
-            }
-        },
-    ) {
+    val closing = !show
+    val requestClose = { if (currentEnabled && !closing) currentClose() }
+    val finishDismiss: () -> Unit = {
+        mounted = false
+        onDismissFinished?.invoke()
+    }
+    val dialogContent: @Composable () -> Unit = {
         val keyboard = LocalSoftwareKeyboardController.current
         val focus = LocalFocusManager.current
         LaunchedEffect(closing) {
@@ -123,13 +107,48 @@ private fun ModuleGlassWindowDialog(
                 keyboard?.hide()
             }
         }
-        // Register before child menu content: a menu composed later owns the first back event.
+        // Child menus register later and receive Back before the dialog or keyboard guard.
         ModuleWindowBackGuard(dismissEnabled = dismissEnabled && !closing)
         CompositionLocalProvider(
             LocalModuleWindowCloseRequest provides requestClose,
             LocalModuleWindowClosing provides closing,
-        ) {
-            content()
+        ) { content() }
+    }
+    WindowDialogHost(onDismissRequest = requestClose) {
+        ModulePredictiveBackScope(animated = LocalModuleWindowGestures.current.predictiveMode.enabled) {
+            ModuleWindowPopupHost {
+                // Record the inner dialog + scrim; menus use the outer window Scaffold and
+                // stay outside this recording. Every surface samples only the layer below it.
+                Scaffold(
+                    containerColor = Color.Transparent,
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                ) {
+                    if (glass) {
+                        GlassDialog(
+                            show = show,
+                            title = title,
+                            onDismissRequest = requestClose,
+                            onDismissFinished = finishDismiss,
+                            modifier = Modifier.moduleClosingInput(closing),
+                            backdrop = backdrop,
+                            insideMargin = insideMargin,
+                            renderInRootScaffold = false,
+                            content = dialogContent,
+                        )
+                    } else {
+                        OverlayDialog(
+                            show = show,
+                            title = title,
+                            onDismissRequest = requestClose,
+                            onDismissFinished = finishDismiss,
+                            modifier = Modifier.moduleClosingInput(closing),
+                            insideMargin = insideMargin,
+                            renderInRootScaffold = false,
+                            content = dialogContent,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -161,20 +180,47 @@ private fun Modifier.moduleClosingInput(closing: Boolean): Modifier = if (!closi
         }
 }
 
+/** Keep a dismissed editor's draft in composition until its actual window exit completes. */
+@Composable
+internal fun <T : Any> RetainedWindowContent(
+    value: T?,
+    content: @Composable (value: T, show: Boolean, onDismissFinished: () -> Unit) -> Unit,
+) {
+    var retained by remember { mutableStateOf<T?>(null) }
+    val currentValue by rememberUpdatedState(value)
+    if (value != null) SideEffect { retained = value }
+    val displayed = value ?: retained ?: return
+    content(displayed, value != null) {
+        // A cancelled older exit must not discard a newly opened editor.
+        if (currentValue == null) retained = null
+    }
+}
+
 @Composable
 internal fun AppWindowDialog(
     show: Boolean, title: String, onClose: () -> Unit,
     primaryLabel: String? = null, onPrimary: (() -> Unit)? = null,
     primaryEnabled: Boolean = true, dangerous: Boolean = false,
     dismissEnabled: Boolean = true,
+    onDismissFinished: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     ModuleWindowDialog(
         show = show, title = title, onClose = onClose,
         dismissEnabled = dismissEnabled,
+        onDismissFinished = onDismissFinished,
         insideMargin = DpSize(DIALOG_INSIDE_DP.dp, DIALOG_INSIDE_DP.dp),
     ) {
         AppDialogBody(onClose, primaryLabel, onPrimary, primaryEnabled, dangerous, content)
+    }
+}
+
+@Composable
+internal fun ModuleDialogCard(content: @Composable ColumnScope.() -> Unit) {
+    if (useModuleGlass()) {
+        GlassCard(insideMargin = PaddingValues(0.dp), content = content)
+    } else {
+        Card(insideMargin = PaddingValues(0.dp), content = content)
     }
 }
 
@@ -184,9 +230,13 @@ private fun AppDialogBody(
     primaryEnabled: Boolean, dangerous: Boolean, content: @Composable ColumnScope.() -> Unit,
 ) {
     val requestClose = LocalModuleWindowCloseRequest.current ?: onClose
+    // Keep short forms at their natural height; reserve space for title/footer while
+    // allowing long forms to use the available portrait or landscape viewport.
+    val contentMaxHeight = (LocalConfiguration.current.screenHeightDp * .78f - 128f)
+        .coerceAtLeast(80f).dp
     Column(Modifier.fillMaxWidth()) {
         Column(
-            Modifier.weight(1f, fill = false).heightIn(max = 420.dp)
+            Modifier.weight(1f, fill = false).heightIn(max = contentMaxHeight)
                 .verticalScroll(rememberScrollState()),
             content = content,
         )

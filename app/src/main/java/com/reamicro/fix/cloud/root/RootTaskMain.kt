@@ -80,11 +80,12 @@ object RootTaskMain {
         val key = if (accountId.isNotBlank() && taskType.isNotBlank()) LocalTaskKey(accountId, taskType) else null
         val network = RootTaskNetwork.preparation { !repository.executionEnabled() }
         RootNightDiagnostics.begin()
+        RootDirectNetwork.begin()
         val completed = try {
             LocalTaskEngine(repository,
                 beforeExecute = { id, task ->
                     notifyProgress(repository, id, task.taskType, "waking")
-                    network.ensureReady()
+                    RootDirectNetwork.use(network.ensureReady())
                 },
                 onExecuting = { id, task -> notifyProgress(repository, id, task.taskType, "running") },
                 onFinished = { id, task -> notifyProgress(repository, id, task.taskType, "finished") },
@@ -94,13 +95,15 @@ object RootTaskMain {
         } catch (error: Throwable) {
             RootNightDiagnostics.abort(error)
             throw error
+        } finally {
+            RootDirectNetwork.clear()
         }
         RootNightDiagnostics.finish(completed)
         if (Thread.currentThread().isInterrupted) return false
         val pending = repository.pendingNotifications() ?: return false
         if (pending.length() == 0) return true
-        notifyModule(pending)
-        return false
+        notifyModule(repository, pending)
+        return repository.pendingNotifications()?.length() == 0
     }
 
     private fun readInput(): JSONObject {
@@ -119,10 +122,12 @@ object RootTaskMain {
         return JSONObject(text.ifBlank { "{}" })
     }
 
-    private fun notifyModule(pending: JSONArray) {
+    private fun notifyModule(repository: RootTaskRepository, pending: JSONArray) {
+        val delivery = RootTaskNotificationDelivery(30_000L, 10L, cancelled = { !repository.executionEnabled() })
         // 任务跑完立刻直投：广播走快速通道，广播没被接收器确认时改用免界面 Activity 兜底。
         // 两者 notificationId 相同，接收端按投递回执幂等去重，重复投递不会出两条通知。
         for (index in 0 until pending.length()) {
+            if (!delivery.hasBudget) break
             val item = pending.optJSONObject(index) ?: continue
             val id = item.optString("id")
             if (id.isBlank()) continue
@@ -140,45 +145,40 @@ object RootTaskMain {
                 taskType = taskType,
                 accountGeneration = item.optString("accountGeneration"),
             )
-            val delivery = deliverNotification(message)
-            // 直投失败时保留待发队列，交给后续 Root 同步兜底，并在状态目录留痕便于排查。
-            delivery.exceptionOrNull()?.let { failure ->
-                logFailure("notify_failed $id ${failure.message?.take(200) ?: failure.javaClass.simpleName}")
+            try {
+                if (delivery.deliver(message)) repository.acknowledge(setOf(id))
+            } catch (error: InterruptedException) {
+                throw error
+            } catch (failure: Exception) {
+                logFailure("notify_failed $id ${failure.javaClass.simpleName}")
             }
         }
-        // 直投已把通知落地；这里的同步稍后负责把 Root 待发队列确认掉。
-        runCatching {
-            RootCommandRunner.execute(ProcessBuilder("/system/bin/am", "broadcast", "--user", "0", "--include-stopped-packages",
+        if (Thread.currentThread().isInterrupted || !repository.executionEnabled()) return
+        // 同步执行记录，并重试未确认的 Activity 投递；已确认项不再依赖模块重新申请 SU。
+        try {
+            RootCommandRunner.executeTransient(ProcessBuilder("/system/bin/am", "broadcast", "--user", "0", "--include-stopped-packages",
                 "-f", "0x01000000",
                 "-a", RootTaskRepository.SYNC_ACTION, "-n", RootTaskRepository.SYNC_COMPONENT), timeoutSeconds = 10)
-        }.onFailure { logFailure("sync_broadcast ${it.message?.take(200) ?: it.javaClass.simpleName}") }
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (failure: Exception) {
+            logFailure("sync_broadcast ${failure.javaClass.simpleName}")
+        }
     }
 
     private fun notifyProgress(repository: RootTaskRepository, accountId: String, type: String, phase: String) {
-        runCatching {
-            deliverNotification(RootTaskNotificationBroadcast(
+        try {
+            RootTaskNotificationDelivery(6_000L, 3L, cancelled = { !repository.executionEnabled() })
+                .deliver(RootTaskNotificationBroadcast(
                 id = "progress:$accountId:$type", title = "", text = "", result = "", items = "",
                 accountId = accountId, accountLabel = repository.accountLabel(accountId), taskType = type,
                 phase = phase, eventAt = System.currentTimeMillis(),
                 accountGeneration = repository.accountGeneration(accountId),
-            )).getOrThrow()
-        }.onFailure { logFailure("progress_failed account=$accountId type=$type phase=$phase") }
-    }
-
-    private fun deliverNotification(message: RootTaskNotificationBroadcast) = runCatching {
-        val broadcast = runCatching {
-            RootCommandRunner.execute(
-                ProcessBuilder(rootTaskNotificationBroadcastArgs(message)), timeoutSeconds = if (message.phase.isBlank()) 10 else 3,
-            )
-        }.getOrNull()
-        // 广播被系统冻结时 am 依旧返回 0，只有接收器回执 result=-1 才算真的落地。
-        if (broadcast != null && broadcast.exitCode == 0 && rootTaskBroadcastConfirmed(broadcast.output)) return@runCatching
-        val activity = RootCommandRunner.execute(
-            ProcessBuilder(rootTaskNotificationActivityArgs(message)), timeoutSeconds = if (message.phase.isBlank()) 10 else 3,
-        )
-        check(activity.exitCode == 0) {
-            "broadcast=${broadcast?.exitCode ?: -1} activity=${activity.exitCode} " +
-                ((broadcast?.diagnosticOutput.orEmpty() + activity.diagnosticOutput).take(200))
+            ))
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (_: Exception) {
+            logFailure("progress_failed account=$accountId type=$type phase=$phase")
         }
     }
 

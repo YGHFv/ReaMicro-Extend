@@ -197,6 +197,10 @@
     <string name="pawn_loading">正在读取期物清单…</string>
     <string name="toast_notification_granted">通知权限已授予</string>
     <string name="permission_notification_denied">未允许通知，任务结果不会显示系统通知；可在应用内查看记录</string>
+    <string name="notification_permission_reminder">请打开%1$s，开启通知权限或对应通知类别</string>
+    <string name="notification_permission_title">开启通知</string>
+    <string name="notification_permission_explanation">下载进度、书架更新和任务结果需要通知权限。请允许本应用发送通知，并开启对应的通知类别。</string>
+    <string name="notification_permission_enable">去开启</string>
     <string name="error_open_settings">无法打开系统设置，请手动到系统设置里授权</string>
     <string name="status_unknown">未知</string>
     <string name="error_open_link">没有可以打开这个链接的应用</string>

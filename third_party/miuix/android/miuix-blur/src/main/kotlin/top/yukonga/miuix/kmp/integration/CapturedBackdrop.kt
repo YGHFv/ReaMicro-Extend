@@ -5,6 +5,7 @@ package top.yukonga.miuix.kmp.integration
 
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.node.DrawModifierNode
@@ -13,7 +14,6 @@ import androidx.compose.ui.node.ModifierNodeElement
 import androidx.compose.ui.node.invalidateDraw
 import androidx.compose.ui.platform.InspectorInfo
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
-import top.yukonga.miuix.kmp.blur.internal.recordLayer
 
 /**
  * Records the displayed content once and reuses that recording for display and backdrop consumers.
@@ -58,6 +58,9 @@ private class CapturedBackdropNode(
     var enabled: () -> Boolean,
 ) : Modifier.Node(), DrawModifierNode, GlobalPositionAwareModifierNode {
     private var coordinates: LayoutCoordinates? = null
+    private val recordBlock: DrawScope.() -> Unit = {
+        (this as? ContentDrawScope)?.let(backdrop.onDraw)
+    }
 
     override fun ContentDrawScope.draw() {
         if (!enabled()) {
@@ -66,7 +69,11 @@ private class CapturedBackdropNode(
             return
         }
         backdrop.layerCoordinates = coordinates?.takeIf { it.isAttached }
-        recordLayer(backdrop.graphicsLayer) { backdrop.onDraw(this@draw) }
+        // Use DrawScope.record, as upstream layerBackdrop does: it redirects drawContent()
+        // to the layer canvas. The raw GraphicsLayer.record overload leaves it on the screen.
+        with(backdrop.graphicsLayer) {
+            record(block = recordBlock)
+        }
         drawLayer(backdrop.graphicsLayer)
     }
 

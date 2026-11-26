@@ -4,13 +4,9 @@
 package top.yukonga.miuix.kmp.interfaces
 
 import androidx.compose.foundation.interaction.Interaction
-import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.withContext
@@ -41,25 +37,6 @@ interface HoldDownInteraction : Interaction {
     class Release(
         val holdDown: HoldDown,
     ) : HoldDownInteraction
-}
-
-/**
- * Returns whether this source has any unreleased [HoldDown] interactions.
- */
-@Composable
-fun InteractionSource.collectIsHeldDownAsState(): State<Boolean> {
-    val isHeldDown = remember(this) { mutableStateOf(false) }
-    LaunchedEffect(this) {
-        val holdInteraction = mutableListOf<HoldDown>()
-        interactions.collect { interaction ->
-            when (interaction) {
-                is HoldDown -> holdInteraction.add(interaction)
-                is Release -> holdInteraction.remove(interaction.holdDown)
-            }
-            isHeldDown.value = holdInteraction.isNotEmpty()
-        }
-    }
-    return isHeldDown
 }
 
 /**

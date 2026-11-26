@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -57,6 +58,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.util.fastRoundToInt
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.material.EdgeStroke
 import top.yukonga.miuix.kmp.material.GlassDefaults
@@ -66,7 +68,6 @@ import top.yukonga.miuix.kmp.material.GlassShape
 import top.yukonga.miuix.kmp.material.GlassStyle
 import top.yukonga.miuix.kmp.material.drawEdgeStroke
 import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
-import kotlin.math.roundToInt
 
 /**
  * Size limits and window margin for a glass popup.
@@ -125,20 +126,29 @@ class GlassPopupPlacement internal constructor(
  * A top-edge anchor may use the margin space, but never cross the safe-area boundary.
  * All bounds, sizes and margins use window coordinates and pixel units.
  */
+internal fun alignPopupLeft(
+    anchorLeft: Float,
+    anchorRight: Float,
+    width: Float,
+    direction: LayoutDirection,
+    horizontalAlignment: Alignment.Horizontal,
+): Float = when (horizontalAlignment) {
+    Alignment.Start -> if (direction == LayoutDirection.Ltr) anchorLeft else anchorRight - width
+    Alignment.CenterHorizontally -> (anchorLeft + anchorRight - width) * 0.5f
+    else -> if (direction == LayoutDirection.Ltr) anchorRight - width else anchorLeft
+}
+
 internal fun placeGlassPopup(
     anchor: Rect,
     size: Size,
     margin: Float,
     window: Rect,
     direction: LayoutDirection,
+    horizontalAlignment: Alignment.Horizontal = Alignment.End,
 ): GlassPopupPlacement {
-    val endAlignedLeft = if (direction == LayoutDirection.Ltr) {
-        anchor.right - size.width
-    } else {
-        anchor.left
-    }
+    val alignedLeft = alignPopupLeft(anchor.left, anchor.right, size.width, direction, horizontalAlignment)
     val minLeft = window.left + margin
-    val left = endAlignedLeft
+    val left = alignedLeft
         .coerceIn(minLeft, (window.right - size.width - margin).coerceAtLeast(minLeft))
     val minTop = minOf(window.top + margin, anchor.top).coerceAtLeast(window.top)
     val below = window.bottom - margin - anchor.top
@@ -207,6 +217,7 @@ internal fun GlassPopupSurface(
     contentLayer: GraphicsLayerScope.(end: Size, rect: Rect) -> Unit,
     modifier: Modifier = Modifier,
     reveal: Modifier = Modifier,
+    shadowAlpha: () -> Float = { visuals.alpha },
     surface: (@Composable BoxScope.(GlassShape) -> Unit)? = null,
     onMeasured: ((Size) -> Unit)? = null,
     interactive: Boolean = true,
@@ -214,10 +225,15 @@ internal fun GlassPopupSurface(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val currentOnDismissRequest by rememberUpdatedState(onDismissRequest)
-    val windowRect = rememberGlassWindowBounds().run {
-        Rect(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
+    val windowBounds = rememberGlassWindowBounds()
+    val windowRect = remember(windowBounds) {
+        Rect(
+            windowBounds.left.toFloat(),
+            windowBounds.top.toFloat(),
+            windowBounds.right.toFloat(),
+            windowBounds.bottom.toFloat(),
+        )
     }
-    // Window-coordinate placement must be shifted into this host's space, like ListPopupLayout.
     val hostOrigin = remember { mutableStateOf(Offset.Zero) }
     Box(
         modifier = Modifier
@@ -263,8 +279,8 @@ internal fun GlassPopupSurface(
                 val placeable = measurable.measure(constraints)
                 layout(constraints.maxWidth, constraints.maxHeight) {
                     placeable.place(
-                        (measured.rect.left - hostOrigin.value.x).roundToInt(),
-                        (measured.rect.top - hostOrigin.value.y).roundToInt(),
+                        (measured.rect.left - hostOrigin.value.x).fastRoundToInt(),
+                        (measured.rect.top - hostOrigin.value.y).fastRoundToInt(),
                     )
                 }
             }
@@ -274,7 +290,7 @@ internal fun GlassPopupSurface(
                 outsets = shadowOutsets
             }
             .then(reveal)
-            .glassShadow(shape, visuals.shadow, visuals.alpha)
+            .glassShadow(shape, visuals.shadow, shadowAlpha)
             .clip(shape)
             .drawWithContent {
                 drawContent()
@@ -343,8 +359,8 @@ internal fun GlassPopupSurface(
         val current = frame(measured.end, placementBounds)
         measured.rect = current.rect
         measured.cornerRadius = current.cornerRadius
-        val panelWidth = current.rect.width.roundToInt().coerceAtLeast(0)
-        val panelHeight = current.rect.height.roundToInt().coerceAtLeast(0)
+        val panelWidth = current.rect.width.fastRoundToInt().coerceAtLeast(0)
+        val panelHeight = current.rect.height.fastRoundToInt().coerceAtLeast(0)
         val localLeft = current.rect.left - origin.x
         val localTop = current.rect.top - origin.y
         // Material and rim follow the animated silhouette; rows retain their settled size.
@@ -355,8 +371,8 @@ internal fun GlassPopupSurface(
                 transformOrigin = TransformOrigin(0f, 0f)
                 contentLayer(measured.end, measured.rect)
                 // Use this frame's bounds, including the scroll viewport, without rounding its motion.
-                translationX = localLeft - localLeft.roundToInt()
-                translationY = localTop - localTop.roundToInt()
+                translationX = localLeft - localLeft.fastRoundToInt()
+                translationY = localTop - localTop.fastRoundToInt()
             }
         }
     }

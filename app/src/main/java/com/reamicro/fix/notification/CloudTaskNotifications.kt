@@ -72,7 +72,7 @@ object CloudTaskNotifications {
 
     @Synchronized
     fun post(context: Context, intent: Intent, source: String): Boolean {
-        if (intent.action != ACTION_POST) return false
+        if (context.packageName != MODULE_PACKAGE_NAME || intent.action != ACTION_POST) return false
         val accountId = intent.getStringExtra(EXTRA_ACCOUNT_ID).orEmpty()
         val messageId = intent.getStringExtra(EXTRA_ID).orEmpty()
         if (accountId.isNotBlank() && (messageId.startsWith("ksu_") || messageId.startsWith("local_") ||
@@ -93,18 +93,9 @@ object CloudTaskNotifications {
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { "任务状态已更新" }
         val result = intent.getStringExtra(EXTRA_RESULT).orEmpty()
         val displayText = cloudTaskNotificationText(text, intent.getStringExtra(EXTRA_ITEMS).orEmpty())
-        if (!hasPermission(context)) {
-            ModuleAndroidLog.legacy(LOG_TAG, "cloud task notification permission denied source=$source")
-            record(context, messageId, title, displayText, result, source, delivered = false, detail = "未授予通知权限")
-            return false
-        }
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         if (manager == null) {
             record(context, messageId, title, displayText, result, source, delivered = false, detail = "通知服务不可用")
-            return false
-        }
-        if (!manager.areNotificationsEnabled()) {
-            record(context, messageId, title, displayText, result, source, delivered = false, detail = "应用通知已关闭")
             return false
         }
         return runCatching {
@@ -113,10 +104,8 @@ object CloudTaskNotifications {
                     NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT),
                 )
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                manager.getNotificationChannel(CHANNEL_ID)?.importance == NotificationManager.IMPORTANCE_NONE
-            ) {
-                record(context, messageId, title, displayText, result, source, delivered = false, detail = "任务通知渠道已关闭")
+            if (!ModuleNotificationPermission.canPost(context, CHANNEL_ID)) {
+                record(context, messageId, title, displayText, result, source, delivered = false, detail = "通知权限或通知类别未开启")
                 return false
             }
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -184,9 +173,8 @@ object CloudTaskNotifications {
         return runCatching {
             if (phase == "finished") manager.cancel(tag, BASE_NOTIFICATION_ID)
             else {
-                if (!hasPermission(context) || !manager.areNotificationsEnabled()) return true
                 manager.createNotificationChannel(NotificationChannel(PROGRESS_CHANNEL, "任务运行状态", NotificationManager.IMPORTANCE_LOW))
-                if (manager.getNotificationChannel(PROGRESS_CHANNEL)?.importance == NotificationManager.IMPORTANCE_NONE) return true
+                if (!ModuleNotificationPermission.canPost(context, PROGRESS_CHANNEL)) return false
                 val label = intent.getStringExtra(EXTRA_ACCOUNT_LABEL).orEmpty().ifBlank { accountId }
                 val title = com.reamicro.fix.cloud.local.LocalTaskRunner.localTaskTitle(taskType)
                 val text = if (phase == "waking") "已唤醒，正在准备网络" else "正在执行"

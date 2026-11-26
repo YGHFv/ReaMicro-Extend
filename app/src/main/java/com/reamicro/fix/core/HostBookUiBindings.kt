@@ -64,11 +64,15 @@ internal object HostBookUiBindings {
                 args.indices.forEach { check(field("argument.$it").get(copy) == args[it]) }
             }
         }
-        fun backupState(book: Any, backup: Any, deleting: Boolean): Any {
-            val args = arrayOfNulls<Any>(3)
+        private fun backupProperties(): List<String> = values.getValue("value:state.properties").split(',')
+        fun backupState(original: Any, book: Any?, backup: Any?, deleting: Boolean): Any {
+            check(type("state").isInstance(original))
+            val properties = backupProperties()
+            val args = arrayOfNulls<Any>(constructor("state").parameterCount)
+            properties.forEach { role -> args[number("state.$role")] = field("state.$role").get(original) }
             mapOf("book" to book, "backup" to backup, "deleting" to deleting).forEach { (role, value) -> args[number("state.$role")] = value }
             return constructor("state").newInstance(*args).also { state ->
-                listOf("book", "backup", "deleting").forEach { check(field("state.$it").get(state) == args[number("state.$it")]) }
+                properties.forEach { check(field("state.$it").get(state) == args[number("state.$it")]) }
             }
         }
     }
@@ -182,28 +186,39 @@ internal object HostBookUiBindings {
                 signature("verticalScroll", listOf(s.type("modifier"), s.type("scrollState"), int), s.type("modifier"))
                 check(s.field("rootModifier").let { Modifier.isStatic(it.modifiers) && s.type("modifier").isAssignableFrom(it.type) })
                 check(s.number("scrollMask").let { it > 0 && (it and (it - 1)) == 0 })
+                check(s.number("nativeScroll") in 0..1)
                 check(s.type("vm").superclass == s.type("receiver"))
                 val ctor = s.constructor("vm")
-                check(ctor.declaringClass == s.type("vm") && ctor.parameterCount == 3)
+                check(ctor.declaringClass == s.type("vm") &&
+                    ctor.parameterTypes.count { it == java.lang.Long.TYPE } == 1 &&
+                    ctor.parameterTypes.count { it == s.type("storage") } == 1)
                 for ((role, type) in listOf("bookId" to java.lang.Long.TYPE, "storage" to s.type("storage"))) {
                     val f = s.field("vm.$role")
                     check(!Modifier.isStatic(f.modifiers) && f.declaringClass == s.type("vm") && f.type == type &&
                         ctor.parameterTypes[s.number("vm.$role")] == type)
                 }
                 val props = mapOf("book" to s.type("book"), "backup" to s.type("cloud"), "deleting" to java.lang.Boolean.TYPE)
+                val properties = values.getValue("value:state.properties").split(',')
+                check(properties.size == properties.toSet().size && properties.containsAll(props.keys))
                 val stateCtor = s.constructor("state")
-                check(stateCtor.declaringClass == s.type("state") && stateCtor.parameterCount == props.size &&
-                    props.keys.map { s.number("state.$it") }.toSet() == (0..2).toSet())
-                for ((role, type) in props) {
+                check(stateCtor.declaringClass == s.type("state") && stateCtor.parameterCount == properties.size &&
+                    properties.map { s.number("state.$it") }.toSet() == properties.indices.toSet())
+                for (role in properties) {
                     val f = s.field("state.$role")
-                    check(f.declaringClass == s.type("state") && !Modifier.isStatic(f.modifiers) && f.type == type &&
-                        stateCtor.parameterTypes[s.number("state.$role")] == type)
+                    check(f.declaringClass == s.type("state") && !Modifier.isStatic(f.modifiers) &&
+                        stateCtor.parameterTypes[s.number("state.$role")] == f.type)
+                    props[role]?.let { check(f.type == it) }
                 }
-                check(s.type("state").declaredFields.filterNot { Modifier.isStatic(it.modifiers) }.toSet() == props.keys.map { s.field("state.$it") }.toSet())
+                check(s.type("state").declaredFields.filterNot { Modifier.isStatic(it.modifiers) }.toSet() == properties.map { s.field("state.$it") }.toSet())
                 check(s.method("stateFactory").let { it.declaringClass == s.type("vm") && !Modifier.isStatic(it.modifiers) &&
                     it.parameterCount == 0 && it.returnType.isAssignableFrom(s.type("state")) })
-                signature("content", listOf(s.type("book"), s.type("cloud"), java.lang.Boolean.TYPE) +
-                    List(4) { s.type("function") } + listOf(s.type("composer"), int), void)
+                check(s.method("content").let { content ->
+                    Modifier.isStatic(content.modifiers) && content.returnType == void &&
+                        content.parameterTypes.take(3) == listOf(s.type("book"), s.type("cloud"), java.lang.Boolean.TYPE) &&
+                        content.parameterTypes.takeLast(2) == listOf(s.type("composer"), int) &&
+                        content.parameterTypes.indices.filter { content.parameterTypes[it] == s.type("composer") } ==
+                            listOf(s.number("content.composer"))
+                })
                 signature("screen", List(3) { any }, any, false)
                 signature("loading", listOf(int, s.type("composer")), void)
                 check(s.method("screen").declaringClass == s.type("screen"))
@@ -365,7 +380,14 @@ internal object HostBookUiBindings {
                     listOf("content", "header", "drive", "icon", "activityResult", "invoke").map { "method:$it" } +
                     listOf("uid", "uuid", "title").map { "field:book.$it" }
                 check(values.keys.containsAll(required))
-                signature("header", listOf(s.type("book"), s.type("composer"), int), void)
+                check(s.method("header").let { header ->
+                    Modifier.isStatic(header.modifiers) && header.returnType == void &&
+                        header.parameterTypes.firstOrNull() == s.type("book") &&
+                        header.parameterTypes.takeLast(2) == listOf(s.type("composer"), int) &&
+                        header.parameterTypes.drop(1).dropLast(2).all { it == java.lang.Long::class.java } &&
+                        header.parameterTypes.indices.filter { header.parameterTypes[it] == s.type("composer") } ==
+                            listOf(s.number("header.composer"))
+                })
                 signature("drive", listOf(s.type("vector"), String::class.java, String::class.java, java.lang.Boolean.TYPE,
                     s.type("function"), s.type("function"), s.type("composer"), int), void)
                 signature("icon", emptyList(), s.type("vector"))
@@ -374,9 +396,8 @@ internal object HostBookUiBindings {
                 signature("invoke", emptyList(), any, false)
                 check(s.type("function").isInterface && s.method("invoke").declaringClass == s.type("function"))
                 val content = s.method("content")
-                check(Modifier.isStatic(content.modifiers) && content.returnType == void && content.parameterCount == 9 &&
-                    content.parameterTypes.first() == s.type("book") && content.parameterTypes.takeLast(2) == listOf(s.type("composer"), int) &&
-                    content.parameterTypes.count { it.name == "kotlin.jvm.functions.Function1" } == 4)
+                check(Modifier.isStatic(content.modifiers) && content.returnType == void &&
+                    content.parameterTypes.first() == s.type("book") && content.parameterTypes.takeLast(2) == listOf(s.type("composer"), int))
                 for ((name, type) in listOf("uid" to java.lang.Long.TYPE, "uuid" to String::class.java, "title" to String::class.java)) {
                     val f = s.field("book.$name"); check(f.declaringClass == s.type("book") && !Modifier.isStatic(f.modifiers) && f.type == type)
                 }

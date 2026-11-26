@@ -44,11 +44,15 @@ internal object HostReaderPagerQueries {
                 it.paramTypeNames.takeLast(2) == listOf(composer.name, "int") }
         for ((role, suffix) in listOf("swipe" to emptyList(), "overlay" to listOf("int", "boolean", function1.name, function1.name, function2.name),
             "static" to listOf("int", function1.name, function1.name, function0.name))) {
-            val effect = method(role, effects.filter {
+            val candidates = effects.filter {
                 val tail = it.paramTypeNames.drop(it.paramTypeNames.indexOf(swipeDeps.name) + 1).dropLast(2)
                 if (role == "swipe") tail.isEmpty() || (tail.size == 1 && it.paramTypes[it.paramCount - 3].isA(pager))
                 else tail == suffix || (role == "overlay" && tail == listOf("int", "boolean", function1.name, function2.name))
-            }.one("$role effects"))
+            }
+            val legacy = if (role == "swipe") candidates.filter {
+                it.paramCount == 9 && it.paramTypes[it.paramCount - 3].isA(pager)
+            } else emptyList()
+            val effect = method(role, legacy.ifEmpty { candidates }.one("$role effects"))
             index("$role.owner", effect.paramTypeNames.indices.single { effect.paramTypeNames[it] == receiver.name })
             index("$role.model", effect.paramTypeNames.indices.single { effect.paramTypeNames[it] == model.name })
             val modern = role == "swipe" && effect.paramTypeNames.indexOf(swipeDeps.name) == effect.paramCount - 3

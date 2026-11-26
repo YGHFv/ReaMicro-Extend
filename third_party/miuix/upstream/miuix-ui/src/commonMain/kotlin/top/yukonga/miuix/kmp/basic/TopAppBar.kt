@@ -47,7 +47,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlurEffect
@@ -57,7 +56,6 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
@@ -164,86 +162,6 @@ fun TopAppBar(
 }
 
 /**
- * A [SmallTopAppBar] with Miuix style.
- *
- * The [SmallTopAppBar] can be configured with a title, a navigation icon, and action icons.
- *
- * @param title The title of the [SmallTopAppBar].
- * @param modifier The modifier to be applied to the  [SmallTopAppBar].
- * @param color The background color of the [SmallTopAppBar].
- * @param titleColor The color of the title text.
- * @param subtitle The subtitle displayed below the title bar area.
- * @param subtitleColor The color of the subtitle text.
- * @param navigationIcon The [Composable] content that represents the navigation icon.
- * @param actions The [Composable] content that represents the action icons.
- * @param scrollBehavior The [ScrollBehavior] that controls the behavior of the [SmallTopAppBar].
- * @param defaultWindowInsetsPadding Whether to apply default window insets padding to the [SmallTopAppBar].
- * @param titlePadding The horizontal padding of the [SmallTopAppBar]'s title.
- * @param navigationIconPadding The start padding of the navigation icon.
- * @param actionIconPadding The end padding of the action icons.
- * @param bottomContent The [Composable] content displayed below the title bar area.
- */
-@Composable
-fun SmallTopAppBar(
-    title: String,
-    modifier: Modifier = Modifier,
-    color: Color = MiuixTheme.colorScheme.surface,
-    titleColor: Color = MiuixTheme.colorScheme.onSurface,
-    subtitle: String = "",
-    subtitleColor: Color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-    navigationIcon: @Composable () -> Unit = {},
-    actions: @Composable RowScope.() -> Unit = {},
-    scrollBehavior: ScrollBehavior? = null,
-    defaultWindowInsetsPadding: Boolean = true,
-    titlePadding: Dp = TopAppBarDefaults.TitlePadding,
-    navigationIconPadding: Dp = TopAppBarDefaults.NavigationIconPadding,
-    actionIconPadding: Dp = TopAppBarDefaults.ActionIconPadding,
-    centerObstructionStart: Dp = Dp.Unspecified,
-    bottomContent: @Composable () -> Unit = {},
-) {
-    SideEffect {
-        // Pin the bar: clamp both the range and any offset left by a collapsible bar so nested
-        // content still scrolls when they share a ScrollBehavior. Guard against redundant writes.
-        scrollBehavior?.state?.let { state ->
-            if (!state.pinnedBySmallTopAppBar) state.pinnedBySmallTopAppBar = true
-            if (state.heightOffsetLimit != 0f) state.heightOffsetLimit = 0f
-            if (state.heightOffset != 0f) state.heightOffset = 0f
-        }
-    }
-
-    // Wrap the given actions in a Row.
-    val actionsRow =
-        @Composable {
-            Row(
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-                content = actions,
-            )
-        }
-
-    // Compose a Surface with a SmallTopAppBarLayout content.
-    // The surface's background color is animated as specified above.
-    // The height of the app bar is determined by subtracting the bar's height offset from the
-    // app bar's defined constant height value (i.e. the ContainerHeight token).
-    SmallTopAppBarLayout(
-        title = title,
-        color = color,
-        titleColor = titleColor,
-        subtitle = subtitle,
-        subtitleColor = subtitleColor,
-        navigationIcon = navigationIcon,
-        actions = actionsRow,
-        titlePadding = titlePadding,
-        navigationIconPadding = navigationIconPadding,
-        actionIconPadding = actionIconPadding,
-        modifier = modifier,
-        defaultWindowInsetsPadding = defaultWindowInsetsPadding,
-        centerObstructionStart = centerObstructionStart,
-        bottomContent = bottomContent,
-    )
-}
-
-/**
  * Returns a [ScrollBehavior] that adjusts its properties to affect the colors and
  * height of the top app bar.
  *
@@ -323,7 +241,11 @@ class TopAppBarState(
      *
      * Use this limit to coerce the [heightOffset] value when it's updated.
      */
-    var heightOffsetLimit = initialHeightOffsetLimit
+    var heightOffsetLimit: Float
+        get() = _heightOffsetLimit.floatValue
+        set(newLimit) {
+            _heightOffsetLimit.floatValue = newLimit
+        }
 
     /**
      * The top app bar's current height offset in pixels. This height offset is applied to the fixed
@@ -422,6 +344,7 @@ class TopAppBarState(
             )
     }
 
+    private var _heightOffsetLimit = mutableFloatStateOf(initialHeightOffsetLimit)
     private var _heightOffset = mutableFloatStateOf(initialHeightOffset)
 }
 
@@ -1136,226 +1059,6 @@ private fun Modifier.clipTopAppBarTitle(
         bottom = clip.contentHeight - position.y.toFloat(),
     ) {
         this@drawWithContent.drawContent()
-    }
-}
-
-/**
- * The base [Layout] for [SmallTopAppBar]. This function lays out a [SmallTopAppBar] navigation icon
- * (leading icon), a title (header), and action icons (trailing icons). Note that the navigation and
- * the actions are optional.
- *
- * @param title the [SmallTopAppBar] title (header).
- * @param color the background color of the [SmallTopAppBar].
- * @param titleColor the color of the title text.
- * @param subtitle the subtitle text displayed below the title bar area.
- * @param subtitleColor the color of the subtitle text.
- * @param navigationIcon a navigation icon [Composable].
- * @param actions actions [Composable].
- * @param titlePadding the horizontal padding of the [SmallTopAppBar]'s title.
- * @param navigationIconPadding the start padding of the navigation icon.
- * @param actionIconPadding the end padding of the action icons.
- * @param modifier the [Modifier] to be applied to this layout.
- * @param defaultWindowInsetsPadding whether to apply default window insets padding to the [SmallTopAppBar].
- * @param bottomContent the composable content displayed below the title bar area.
- */
-@Composable
-private fun SmallTopAppBarLayout(
-    title: String,
-    color: Color,
-    titleColor: Color,
-    subtitle: String,
-    subtitleColor: Color,
-    navigationIcon: @Composable () -> Unit,
-    actions: @Composable () -> Unit,
-    titlePadding: Dp,
-    navigationIconPadding: Dp,
-    actionIconPadding: Dp,
-    modifier: Modifier = Modifier,
-    defaultWindowInsetsPadding: Boolean = true,
-    bottomContent: @Composable () -> Unit = {},
-    centerObstructionStart: Dp = Dp.Unspecified,
-) {
-    val animatedTitleColor by animateColorAsState(
-        targetValue = titleColor,
-        animationSpec = tween(durationMillis = 50),
-    )
-    val animatedSubtitleColor by animateColorAsState(
-        targetValue = subtitleColor,
-        animationSpec = tween(durationMillis = 50),
-    )
-    val alignmentState = rememberTitleAlignmentState()
-
-    Layout(
-        {
-            Box(
-                Modifier
-                    .layoutId("navigationIcon")
-                    .padding(start = navigationIconPadding),
-            ) {
-                navigationIcon()
-            }
-            Box(Modifier.layoutId("title")) {
-                Text(
-                    text = title,
-                    color = animatedTitleColor,
-                    maxLines = 1,
-                    fontSize = MiuixTheme.textStyles.title3.fontSize,
-                    fontWeight = FontWeight.Medium,
-                    overflow = TextOverflow.Ellipsis,
-                    softWrap = false,
-                )
-            }
-            Box(
-                Modifier
-                    .layoutId("actionIcons")
-                    .padding(end = actionIconPadding),
-            ) {
-                actions()
-            }
-            if (subtitle.isNotEmpty()) {
-                Box(Modifier.layoutId("subtitle")) {
-                    Text(
-                        text = subtitle,
-                        color = animatedSubtitleColor,
-                        style = MiuixTheme.textStyles.body2,
-                    )
-                }
-            }
-            Box(Modifier.layoutId("bottomContent")) {
-                bottomContent()
-            }
-        },
-        modifier = modifier
-            .background(color)
-            .then(
-                if (defaultWindowInsetsPadding) {
-                    Modifier
-                        .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
-                        .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal))
-                } else {
-                    Modifier
-                },
-            )
-            .clipToBounds()
-            .windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Top))
-            .pointerInput(Unit) {
-                detectTapGestures { /* Consume click */ }
-            },
-    ) { measurables, constraints ->
-        val navigationIconPlaceable =
-            measurables
-                .fastFirst { it.layoutId == "navigationIcon" }
-                .measure(constraints.copy(minWidth = 0, minHeight = 0))
-
-        val actionIconsPlaceable =
-            measurables
-                .fastFirst { it.layoutId == "actionIcons" }
-                .measure(constraints.copy(minWidth = 0, minHeight = 0))
-
-        val titlePaddingPx = titlePadding.roundToPx()
-        val controlTitleSpacingPx = minOf(titlePaddingPx, TopAppBarDefaults.TitleControlSpacing.roundToPx())
-        val startInset = if (navigationIconPlaceable.width > 0) controlTitleSpacingPx else titlePaddingPx
-        val endInset = if (actionIconsPlaceable.width > 0) controlTitleSpacingPx else titlePaddingPx
-        val hasCenterObstruction = centerObstructionStart != Dp.Unspecified && constraints.maxWidth != Constraints.Infinity
-        val normalTitleMaxWidth =
-            if (constraints.maxWidth == Constraints.Infinity) {
-                constraints.maxWidth
-            } else {
-                (constraints.maxWidth - navigationIconPlaceable.width - actionIconsPlaceable.width - startInset - endInset)
-                    .coerceAtLeast(0)
-            }
-        val titleMaxWidth =
-            if (hasCenterObstruction) {
-                val obstructionLimit = centerObstructionStart.roundToPx() - controlTitleSpacingPx
-                val startEdge = navigationIconPlaceable.width + startInset
-                val available = (obstructionLimit - startEdge).coerceAtLeast(0)
-                if (available < MinTitleWidth.roundToPx()) 0 else minOf(normalTitleMaxWidth, available)
-            } else {
-                normalTitleMaxWidth
-            }
-        val titlePlaceable =
-            measurables
-                .fastFirst { it.layoutId == "title" }
-                .measure(constraints.copy(minWidth = 0, maxWidth = titleMaxWidth, minHeight = 0))
-
-        val subtitlePlaceable =
-            measurables
-                .firstOrNull { it.layoutId == "subtitle" }
-                ?.measure(constraints.copy(minWidth = 0, maxWidth = titleMaxWidth, minHeight = 0))
-        val bottomContentPlaceable =
-            measurables
-                .fastFirst { it.layoutId == "bottomContent" }
-                .measure(constraints.copy(minWidth = 0, minHeight = 0))
-
-        val subtitleHeight = subtitlePlaceable?.height ?: 0
-        val collapsedHeight = TopAppBarDefaults.CollapsedHeight.roundToPx()
-        val verticalCenter = TopAppBarDefaults.SmallTopAppBarCenterHeight.roundToPx() / 2
-        val titleGroupHeight = titlePlaceable.height + subtitleHeight
-        val titleGroupTop = verticalCenter - if (subtitlePlaceable != null) titleGroupHeight / 2 else titlePlaceable.height / 2
-        val subtitleY = titleGroupTop + titlePlaceable.height
-        val subtitleBottomPadding = if (subtitlePlaceable != null) TopAppBarDefaults.SubtitleBottomPadding.roundToPx() else 0
-        val contentTop = maxOf(collapsedHeight, subtitleY + subtitleHeight + subtitleBottomPadding)
-        val layoutHeight = contentTop + bottomContentPlaceable.height
-
-        layout(constraints.maxWidth, layoutHeight) {
-            // Navigation icon
-            navigationIconPlaceable.placeRelative(
-                x = 0,
-                y = verticalCenter - navigationIconPlaceable.height / 2,
-            )
-
-            // Center title/subtitle between side controls, or start-align if it overflows.
-            val titleGroupWidth = maxOf(titlePlaceable.width, subtitlePlaceable?.width ?: 0)
-            val leadingControlBounds = if (layoutDirection == LayoutDirection.Ltr) {
-                navigationIconPlaceable.width + startInset
-            } else {
-                actionIconsPlaceable.width + endInset
-            }
-            val trailingControlBounds = if (layoutDirection == LayoutDirection.Ltr) {
-                actionIconsPlaceable.width + endInset
-            } else {
-                navigationIconPlaceable.width + startInset
-            }
-            val centeredGroupX = (constraints.maxWidth - titleGroupWidth) / 2
-            val canCenter = !hasCenterObstruction &&
-                centeredGroupX >= leadingControlBounds &&
-                centeredGroupX + titleGroupWidth <= constraints.maxWidth - trailingControlBounds
-            val alignmentFraction = alignmentState.resolveFraction(canCenter)
-            val centeredTitleX = centeredGroupX + (titleGroupWidth - titlePlaceable.width) / 2
-            val centeredSubtitleX = centeredGroupX + (titleGroupWidth - (subtitlePlaceable?.width ?: 0)) / 2
-            val startTitleX = if (layoutDirection == LayoutDirection.Ltr) {
-                leadingControlBounds
-            } else {
-                constraints.maxWidth - trailingControlBounds - titlePlaceable.width
-            }
-            val startSubtitleX = if (layoutDirection == LayoutDirection.Ltr) {
-                leadingControlBounds
-            } else {
-                constraints.maxWidth - trailingControlBounds - (subtitlePlaceable?.width ?: 0)
-            }
-            val titleX = lerp(startTitleX, centeredTitleX, alignmentFraction)
-            val subtitleX = lerp(startSubtitleX, centeredSubtitleX, alignmentFraction)
-            if (!hasCenterObstruction || titleMaxWidth > 0) {
-                titlePlaceable.place(
-                    x = titleX,
-                    y = titleGroupTop,
-                )
-
-                subtitlePlaceable?.place(
-                    x = subtitleX,
-                    y = subtitleY,
-                )
-            }
-
-            // Action icons
-            actionIconsPlaceable.placeRelative(
-                x = constraints.maxWidth - actionIconsPlaceable.width,
-                y = verticalCenter - actionIconsPlaceable.height / 2,
-            )
-
-            // Bottom content (below subtitle)
-            bottomContentPlaceable.placeRelative(x = 0, y = contentTop)
-        }
     }
 }
 

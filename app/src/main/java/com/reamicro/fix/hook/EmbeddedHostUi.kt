@@ -148,7 +148,7 @@ internal object EmbeddedHostUi {
             "TitleLarge" -> 22f
             "TitleSmall" -> textMetrics.titleSmall
             "LabelLarge" -> textMetrics.labelLarge
-            "BodySmall" -> textMetrics.bodySmall
+            "BodySmall", "LabelMedium" -> textMetrics.bodySmall
             "BodyMedium" -> 14f
             else -> textMetrics.bodyLarge
         }

@@ -33,7 +33,11 @@ internal class MerchantDeparture(
         // A known refusal has not spent materials. Changed departure options may try again.
         // An unanswered request remains unresolved even if the user edits those options.
         if (record.length() == 0 || (!sameContext() && !unresolved)) {
-            record = JSONObject().put("schema", 1).put("context", context)
+            record = if (record.optString("prayer") == PRAYER_READY) {
+                // A confirmed/reused blessing may already have been consumed elsewhere.
+                // Editing the trip must not reopen prayer for the same departure.
+                record.put("context", context)
+            } else JSONObject().put("schema", 1).put("context", context)
         }
     }
 
@@ -49,7 +53,12 @@ internal class MerchantDeparture(
     private val unresolved: Boolean get() = record.optString("prayer") == PRAYER_PENDING || startUnconfirmed
 
     fun prayerPending() = update("prayer", PRAYER_PENDING)
-    fun prayerReady() = update("prayer", PRAYER_READY)
+    fun prayerReady() {
+        // Read-only confirmation allows changed trip options to proceed while keeping
+        // the prayer guard. Do not clear it between confirmation and the next run.
+        record.put("context", context)
+        update("prayer", PRAYER_READY)
+    }
     fun skipPrayer(reason: String) {
         record.put("prayerSkipReason", reason)
         update("prayer", PRAYER_SKIPPED)

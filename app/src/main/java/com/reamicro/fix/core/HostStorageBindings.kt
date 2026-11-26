@@ -153,7 +153,7 @@ internal object HostStorageBindings {
                     keys("class", "$key.content $key.lambda")
                     keys("method", "$key.setup $key.register $key.token $key.render $key.decode $key.invoke $key.body")
                     keys("field", "$key.scope $key.callback")
-                    keys("value", "$key.branches")
+                    keys("value", "$key.branches $key.contentSlot")
                     val branches = values.getValue("value:$key.branches").toInt()
                     check(branches in 0..16)
                     for (index in 0 until branches) {
@@ -275,10 +275,14 @@ internal object HostStorageBindings {
                 constructor("label", m.type("label"), listOf(string, byte))
                 check(m.type("function2").isAssignableFrom(m.type("label")))
                 for (role in listOf("authorized", "unauthorized")) check(m.value("label.$role") in Byte.MIN_VALUE..Byte.MAX_VALUE)
-                constructor("detail", m.type("detail"), listOf(string, string))
+                check(m.constructor("detail").let { ctor ->
+                    ctor.declaringClass == m.type("detail") && ctor.parameterTypes.take(2) == listOf(string, string) &&
+                        ctor.parameterTypes.drop(2).all { it == byte } && ctor.parameterCount <= 3
+                })
                 method("detail", m.type("detail"), listOf(any, any), any)
                 for (role in listOf("first", "second")) field("detail.$role", m.type("detail"), string)
                 field("detail.tag", m.type("detail"), byte)
+                check(m.value("detail.tag") in Byte.MIN_VALUE..Byte.MAX_VALUE)
                 check(m.type("detail").declaredFields.filterNot { Modifier.isStatic(it.modifiers) }.toSet() ==
                     listOf("first", "second", "tag").map { m.field("detail.$it") }.toSet())
                 method("duration", args = listOf(string, java.lang.Long.TYPE, java.lang.Long.TYPE, composer, int), returns = void, static = true)
@@ -453,8 +457,7 @@ internal object HostStorageBindings {
                         val receiver = m.field("$key.tokenReceiver"); check(Modifier.isStatic(receiver.modifiers) && token.declaringClass.isAssignableFrom(receiver.type))
                     }
                     val register = m.method("$key.register"); val decode = m.method("$key.decode")
-                    check(Modifier.isStatic(register.modifiers) && register.returnType == void && register.parameterCount == 3 &&
-                        register.parameterTypes[1] == token.returnType && register.parameterTypes[2].isAssignableFrom(m.type("$key.lambda")))
+                    HostNavigationRegistration.validate(register, token, m.type("$key.lambda"), m.value("$key.contentSlot"))
                     check(Modifier.isStatic(decode.modifiers) && decode.returnType == any && decode.parameterCount == 2 && decode.parameterTypes[1] == token.returnType)
                     check(!Modifier.isStatic(m.method("$key.setup").modifiers))
                 }

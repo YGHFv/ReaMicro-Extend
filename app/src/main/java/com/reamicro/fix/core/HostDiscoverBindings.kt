@@ -34,7 +34,7 @@ internal object HostDiscoverBindings {
         fun field(key: String) = members.field(key)
         fun constructor(key: String) = members.constructor(key)
         fun index(key: String) = values.getValue("value:$key").toInt()
-        fun isCommunityClick(value: Any): Boolean = type("callback").isInstance(value) &&
+        fun isEntryClick(value: Any): Boolean = type("callback").isInstance(value) &&
             (field("callbackTag").get(value) as Number).toInt() == index("callbackTag")
         fun call(key: String, vararg args: Any?): Any? = method(key).invoke(null, *args)
     }
@@ -43,10 +43,11 @@ internal object HostDiscoverBindings {
         val required = linkedSetOf<String>()
         fun keys(kind: String, names: String) { names.split(' ').forEach { required += "$kind:$it" } }
         keys("class", "composer modifier vector function0 callback fontWeight verticalAlignment lazyState")
-        keys("method", "community callback text weight clickable icon image spacer paddingAll size divider aspectRatio lazyState")
+        keys("method", "community callback text weight clickable icon image rowImage spacer paddingAll size divider aspectRatio lazyState")
         keys("constructor", "fontWeight verticalAlignment")
         keys("field", "route callbackTag")
         keys("value", "callbackTag community.composer icon.composer icon.modifier image.composer image.modifier spacer.composer spacer.modifier divider.composer divider.modifier text.composer text.modifier image.mask text.mask icon.tint divider.color clickable.callback clickable.modifier")
+        keys("value", "rowImage.composer rowImage.modifier rowImage.mask")
         check(values.keys == required) { "Incomplete Discover contract: missing=${required - values.keys}; extra=${values.keys - required}" }
         val s = Contract(values.toMap(), loader)
         val modifier = s.type("modifier"); val composer = s.type("composer"); val vector = s.type("vector")
@@ -57,6 +58,15 @@ internal object HostDiscoverBindings {
         }
         shape("icon", listOf(vector, string, modifier, long, composer, int, int), Void.TYPE)
         shape("image", listOf(vector, string, modifier, composer, int, int), Void.TYPE)
+        val rowImage = s.method("rowImage")
+        if (rowImage != s.method("image")) {
+            val parameters = rowImage.parameterTypes.toList()
+            check(Modifier.isStatic(rowImage.modifiers) && rowImage.returnType == Void.TYPE && parameters.size == 10 &&
+                parameters.slice(1..2) == listOf(string, modifier) && parameters[5] == float &&
+                parameters.takeLast(3) == listOf(composer, int, int) &&
+                listOf(0, 3, 4, 6).all { !parameters[it].isPrimitive })
+        }
+        check(s.index("rowImage.mask") == rowImage.parameterCount - 1)
         shape("paddingAll", listOf(modifier, float), modifier); shape("size", listOf(modifier, float), modifier)
         shape("aspectRatio", listOf(modifier, float), modifier)
         shape("lazyState", listOf(int, composer, int, int), s.type("lazyState"))
@@ -86,7 +96,7 @@ internal object HostDiscoverBindings {
         check(tag.declaringClass == s.type("callback") && !Modifier.isStatic(tag.modifiers) && tag.type in setOf(java.lang.Byte.TYPE, int))
         if (tag.type == java.lang.Byte.TYPE) check(s.index("callbackTag") in Byte.MIN_VALUE..Byte.MAX_VALUE)
         check(Modifier.isStatic(s.field("route").modifiers))
-        for (key in listOf("community", "icon", "image", "spacer", "divider", "text")) {
+        for (key in listOf("community", "icon", "image", "rowImage", "spacer", "divider", "text")) {
             val parameters = s.method(key).parameterTypes
             check(parameters.indices.single { parameters[it] == composer } == s.index("$key.composer"))
             if (key != "community") check(parameters.indices.single { parameters[it] == modifier } == s.index("$key.modifier"))

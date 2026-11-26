@@ -2,13 +2,9 @@ package com.reamicro.fix.hook
 
 import com.reamicro.fix.hook.WebDavDriveHook.OnlineChapterBatchSession
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.os.Looper
-import android.os.Build
 import com.reamicro.fix.online.FanqieParagraphCommentApi
 import com.reamicro.fix.online.OnlineConcurrentRateLimiter
 import com.reamicro.fix.online.OnlineParagraphCommentCache
@@ -22,10 +18,6 @@ import com.reamicro.fix.online.OnlineSourceEntry
 import com.reamicro.fix.online.OnlineSourceScriptCompat
 import com.reamicro.fix.online.OnlineSourceStore
 import com.reamicro.fix.online.OnlineSourceTrxsCompat
-import com.reamicro.fix.notification.cancelOnlineCompletionNotificationIfDone
-import com.reamicro.fix.notification.onlineCompletionDownloadBigText
-import com.reamicro.fix.notification.onlineCompletionDownloadText
-import com.reamicro.fix.notification.onlineCompletionDownloadTitle
 import com.reamicro.fix.logging.ModuleLogState
 import com.reamicro.fix.cloud.webdav.CacheDeleteStat
 import com.reamicro.fix.online.search.evaluateOnlineChapterUrlRule
@@ -2340,6 +2332,7 @@ internal fun WebDavDriveHook.obtainOnlineCompletionOpf(bookDir: Any): Any {
 }
 
 internal fun WebDavDriveHook.updateOnlineCompletionNotification(
+    delivery: com.reamicro.fix.notification.OnlineNotificationDelivery,
     context: Context,
     id: Int,
     key: String,
@@ -2349,72 +2342,13 @@ internal fun WebDavDriveHook.updateOnlineCompletionNotification(
     progress: Int,
     done: Boolean,
 ): Boolean {
-    com.reamicro.fix.notification.OnlineNotificationEventOrder.accept(id, android.os.SystemClock.elapsedRealtimeNanos(), key)
-    val moduleRelaySent = sendOnlineCompletionNotificationViaModule(
-        context,
-        id,
-        key,
-        cancellable,
-        title,
-        text,
-        progress,
-        done,
+    val issuedAt = android.os.SystemClock.elapsedRealtimeNanos()
+    return delivery.publish(
+        module = { confirmed ->
+            sendOnlineCompletionNotificationViaModule(context, id, key, cancellable,
+                title, text, progress, done, issuedAt, confirmed)
+        },
     )
-    return runCatching {
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
-        if (!manager.areNotificationsEnabled()) {
-            if (onlineCompletionNotificationBlockedLogged.compareAndSet(false, true)) {
-                logWebDav(
-                    "online completion host notification blocked by system for ${context.packageName}, " +
-                        "moduleRelaySent=$moduleRelaySent",
-                )
-            }
-            return moduleRelaySent
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    ONLINE_COMPLETION_NOTIFICATION_CHANNEL,
-                    ONLINE_COMPLETION_TITLE,
-                    NotificationManager.IMPORTANCE_LOW,
-                ),
-            )
-        }
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(context, ONLINE_COMPLETION_NOTIFICATION_CHANNEL)
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(context)
-        }
-        setOnlineCompletionSmallIcon(builder)
-        builder
-            .setContentTitle(onlineCompletionDownloadTitle(progress, text))
-            .setContentText(onlineCompletionDownloadText(title, text))
-            .setStyle(Notification.BigTextStyle().bigText(onlineCompletionDownloadBigText(title, text, progress)))
-            .setOnlyAlertOnce(true)
-            .setOngoing(!done)
-            .setAutoCancel(done)
-            .setProgress(100, progress.coerceIn(0, 100), false)
-        if (!done && cancellable) {
-            builder.addAction(
-                android.R.drawable.ic_media_pause,
-                "暂停",
-                onlineCompletionCancelPendingIntent(context, id, key, pause = true),
-            )
-            builder.addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "\u53d6\u6d88",
-                onlineCompletionCancelPendingIntent(context, id, key),
-            )
-        }
-        manager.notify(id, builder.build())
-        cancelOnlineCompletionNotificationIfDone(manager, id, done, text)
-        logWebDav("online completion host notification posted id=$id moduleRelaySent=$moduleRelaySent")
-        true
-    }.getOrElse {
-        logWebDav("online completion notification failed: ${it.message ?: it.javaClass.name}")
-        moduleRelaySent
-    }
 }
 
 internal fun WebDavDriveHook.sendOnlineCompletionNotificationViaModule(
@@ -2426,88 +2360,35 @@ internal fun WebDavDriveHook.sendOnlineCompletionNotificationViaModule(
     text: String,
     progress: Int,
     done: Boolean,
-): Boolean {
-    val issuedAt = android.os.SystemClock.elapsedRealtimeNanos()
-    val broadcastSent = sendOnlineCompletionNotificationBroadcast(context, id, key, cancellable, title, text, progress, done, issuedAt)
-    val shouldStartActivity = shouldStartOnlineCompletionNotificationActivity(id, done, broadcastSent)
-    val activitySent = if (shouldStartActivity) {
-        startOnlineCompletionNotificationActivity(context, id, key, cancellable, title, text, progress, done, issuedAt)
-    } else {
-        false
-    }
-    if (done) onlineCompletionModuleActivityPromptAt.remove(id)
-    if (broadcastSent) {
-        return true
-    }
-    if (activitySent) {
-        return true
-    }
-    return false
-}
-
-internal fun WebDavDriveHook.shouldStartOnlineCompletionNotificationActivity(
-    id: Int,
-    done: Boolean,
-    broadcastSent: Boolean,
-): Boolean {
-    // 广播已提交时由接收器和通知服务处理，透明 Activity 会打断宿主搜索页面的生命周期。
-    if (broadcastSent) return false
-    if (done) return true
-    val now = System.currentTimeMillis()
-    val last = onlineCompletionModuleActivityPromptAt[id] ?: 0L
-    if (last > 0L && now - last < ONLINE_COMPLETION_MODULE_ACTIVITY_RETRY_MS) return false
-    onlineCompletionModuleActivityPromptAt[id] = now
-    return true
-}
-
-internal fun WebDavDriveHook.startOnlineCompletionNotificationActivity(
-    context: Context,
-    id: Int,
-    key: String,
-    cancellable: Boolean,
-    title: String,
-    text: String,
-    progress: Int,
-    done: Boolean,
     issuedAt: Long,
-): Boolean =
-    runCatching {
-        val intent = onlineCompletionNotificationIntent(id, key, cancellable, title, text, progress, done, issuedAt).apply {
-            setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_ACTIVITY_CLASS)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
-            addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY)
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        context.startActivity(intent)
-        logWebDav(
-            "online completion module notification activity start sent " +
-                "id=$id progress=$progress done=$done",
-        )
-        true
-    }.getOrElse {
-        logWebDav("online completion module notification activity failed: ${it.message ?: it.javaClass.name}")
-        false
-    }
-
-internal fun WebDavDriveHook.sendOnlineCompletionNotificationBroadcast(
-    context: Context,
-    id: Int,
-    key: String,
-    cancellable: Boolean,
-    title: String,
-    text: String,
-    progress: Int,
-    done: Boolean,
-    issuedAt: Long,
+    confirmed: ((Boolean) -> Unit)?,
 ): Boolean =
     runCatching {
         val intent = onlineCompletionNotificationIntent(id, key, cancellable, title, text, progress, done, issuedAt).apply {
             setClassName(MODULE_PACKAGE_NAME, ONLINE_COMPLETION_NOTIFICATION_RECEIVER_CLASS)
         }
-        context.sendBroadcast(intent)
+        if (confirmed == null) {
+            context.sendBroadcast(intent)
+        } else {
+            // Android retains the result callback until delivery, including across hot reload.
+            val lease = com.reamicro.fix.reload.ModuleResources.lease("online-notification-delivery") ?: return false
+            val receiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(receiverContext: Context, resultIntent: Intent?) {
+                    try {
+                        val posted = resultCode == android.app.Activity.RESULT_OK
+                        logWebDav("online completion module notification confirmed id=$id posted=$posted")
+                        confirmed(posted)
+                    } finally { lease.close() }
+                }
+            }
+            try {
+                context.sendOrderedBroadcast(intent, null, receiver, storageHandler,
+                    android.app.Activity.RESULT_CANCELED, null, null)
+            } catch (error: Throwable) {
+                lease.close()
+                throw error
+            }
+        }
         logWebDav(
             "online completion module notification broadcast sent " +
                 "id=$id progress=$progress done=$done",

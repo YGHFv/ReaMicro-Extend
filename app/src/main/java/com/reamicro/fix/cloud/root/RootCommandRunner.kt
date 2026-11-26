@@ -76,13 +76,28 @@ $command"""
         return result.copy(output = lines.drop(receipt + 1).joinToString("\n").trim())
     }
 
-    fun execute(builder: ProcessBuilder, input: String? = null, timeoutSeconds: Long = 20): RootCommandResult {
+    fun execute(builder: ProcessBuilder, input: String? = null, timeoutSeconds: Long = 20): RootCommandResult =
+        executeManaged(builder, input, timeoutSeconds, transient = false)
+
+    /** 临时探测/投递允许清理整个子会话；安装器和常驻服务仍使用 execute。 */
+    fun executeTransient(builder: ProcessBuilder, timeoutSeconds: Long = 20): RootCommandResult {
+        check(android.os.Process.myUid() == 0) { "临时 Root 命令需要 UID 0" }
         require(timeoutSeconds > 0)
-        val lease = ModuleResources.lease() ?: throw RejectedExecutionException("Module generation is retiring")
-        return lease.use { executeAdmitted(builder, input, timeoutSeconds) }
+        builder.command(listOf("/system/bin/sh", "-c", TRANSIENT_SCRIPT, "reamicro-command", timeoutSeconds.toString()) +
+            builder.command())
+        return executeManaged(builder, null, timeoutSeconds, transient = true).also {
+            if (it.exitCode == 124) throw RootCommandTimeout(it)
+        }
     }
 
-    private fun executeAdmitted(builder: ProcessBuilder, input: String?, timeoutSeconds: Long): RootCommandResult {
+    private fun executeManaged(builder: ProcessBuilder, input: String?, timeoutSeconds: Long, transient: Boolean): RootCommandResult {
+        require(timeoutSeconds > 0)
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("Root 命令已取消")
+        val lease = ModuleResources.lease() ?: throw RejectedExecutionException("Module generation is retiring")
+        return lease.use { executeAdmitted(builder, input, timeoutSeconds, transient) }
+    }
+
+    private fun executeAdmitted(builder: ProcessBuilder, input: String?, timeoutSeconds: Long, transient: Boolean): RootCommandResult {
         val process = builder.redirectErrorStream(false).start()
         val stdout = Capture(MAX_OUTPUT_BYTES)
         val stderr = Capture(256 * 1024)
@@ -114,6 +129,12 @@ $command"""
             interrupted = true
             throw error
         } finally {
+            if (transient && process.isAlive) {
+                // 让包装 shell 的 EXIT trap 清理独立会话，防止只杀外壳留下 content/cmd 等子进程。
+                interrupted = Thread.interrupted() || interrupted
+                process.destroy()
+                try { process.waitFor(500, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { interrupted = true }
+            }
             if (process.isAlive) process.destroyForcibly()
             runCatching { process.outputStream.close() }
             runCatching { process.inputStream.close() }
@@ -146,4 +167,32 @@ $command"""
     }
     private const val RECEIPT = "REAMICRO_ROOT_UID_0"
     private const val MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+    private val TRANSIENT_SCRIPT = """
+        limit=${'$'}1
+        shift
+        child=
+        timer=
+        cleanup() {
+            for owned in "${'$'}timer" "${'$'}child"; do
+                [ -n "${'$'}owned" ] || continue
+                kill -KILL -- "-${'$'}owned" 2>/dev/null || {
+                    parent=${'$'}(/system/bin/sed -n 's/^PPid:[[:space:]]*//p' "/proc/${'$'}owned/status" 2>/dev/null)
+                    [ "${'$'}parent" = "${'$'}${'$'}" ] && kill -KILL "${'$'}owned" 2>/dev/null
+                }
+            done
+        }
+        trap 'result=${'$'}?; cleanup; trap - EXIT; exit "${'$'}result"' EXIT
+        trap 'exit 124' HUP INT TERM
+        /system/bin/setsid "${'$'}@" &
+        child=${'$'}!
+        /system/bin/setsid /system/bin/sh -c '
+            sleep "${'$'}1"
+            parent=${'$'}(/system/bin/sed -n "s/^PPid:[[:space:]]*//p" "/proc/${'$'}${'$'}/status")
+            [ "${'$'}parent" = "${'$'}2" ] && kill -TERM "${'$'}2"
+        ' \
+            reamicro-timeout "${'$'}limit" "${'$'}${'$'}" </dev/null >/dev/null 2>&1 &
+        timer=${'$'}!
+        wait "${'$'}child"
+        exit ${'$'}?
+    """.trimIndent()
 }

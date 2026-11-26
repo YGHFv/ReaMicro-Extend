@@ -36,6 +36,7 @@ data class LocalTask(
     val configUpdatedAt: Long = 0L,
     val accountGeneration: String = "",
     val drawAtCustomTime: Boolean = false,
+    val hostReadOncePerDay: Boolean = true,
 )
 
 data class LocalTaskBook(
@@ -472,6 +473,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         .put(KEY_DURATION_MINUTES, task.durationMinutes)
         .put(KEY_DAILY_DRAW_LIMIT, task.dailyDrawLimit)
         .put(KEY_DRAW_AT_CUSTOM_TIME, task.drawAtCustomTime)
+        .put(KEY_HOST_READ_ONCE_PER_DAY, task.hostReadOncePerDay)
         .put(KEY_BOOKS, JSONArray(task.books.map { JSONObject().put("bookId", it.bookId).put("name", it.name) }))
         .put(KEY_MERCHANT_AUTO_COMPLETE, task.merchantAutoComplete)
         .put(KEY_MERCHANT_CITY_CODE, task.merchantCityCode)
@@ -576,6 +578,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
         private const val KEY_DURATION_MINUTES = "durationMinutes"
         private const val KEY_DAILY_DRAW_LIMIT = "dailyLimit"
         private const val KEY_DRAW_AT_CUSTOM_TIME = "drawAtCustomTime"
+        private const val KEY_HOST_READ_ONCE_PER_DAY = "hostReadOncePerDay"
         private const val KEY_BOOKS = "books"
         private const val KEY_MERCHANT_AUTO_COMPLETE = "merchantAutoComplete"
         private const val KEY_MERCHANT_CITY_CODE = "merchantCityCode"
@@ -595,6 +598,8 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
             "dailyCounterDate", "dailyCounter", "lastDrawItems", "lastDrawResult", "lastDrawAt",
             "drawPending", "drawRewardLoreId", "drawScheduleVersion",
             "dailyReadDate", "dailyReadMinutes", "bookRotation",
+            HOST_READ_ATTEMPT_DATE,
+            CloudTaskLocalRunner.KEY_LORE_PRAYER_ATTEMPT_DATE,
             CloudTaskLocalRunner.KEY_READ_PENDING_BATCH,
             "lastPawnDate", "pawnUsedToday", "pawnLastCoin",
 
@@ -621,6 +626,7 @@ class LocalTaskStore(private val contextProvider: () -> Context?) : LocalTaskRep
 
         internal val CONFIG_KEYS = setOf(
             KEY_ENABLED, KEY_TIME_OF_DAY, KEY_DURATION_MINUTES, KEY_DAILY_DRAW_LIMIT, KEY_DRAW_AT_CUSTOM_TIME, KEY_BOOKS,
+            KEY_HOST_READ_ONCE_PER_DAY,
             KEY_MERCHANT_AUTO_COMPLETE, KEY_MERCHANT_CITY_CODE, KEY_MERCHANT_PRINCIPAL, KEY_MERCHANT_TRANSPORT_ID,
             KEY_FORBIDDEN_PAWN_PROP_IDS,
             KEY_BLESSING_TYPE,

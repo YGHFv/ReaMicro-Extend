@@ -25,10 +25,10 @@ actual fun isRuntimeShaderSupported(): Boolean = Build.VERSION.SDK_INT >= Build.
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 actual fun RuntimeShader(@Language("AGSL") shaderString: String): RuntimeShader = AndroidRuntimeShader(android.graphics.RuntimeShader(shaderString))
 
-actual fun RuntimeShader.asComposeShader(): Shader = asAndroidRuntimeShader()
-
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 actual fun RuntimeShader.asBrush(): ShaderBrush = (this as AndroidRuntimeShader).brush
+
+actual fun isRuntimeShaderBrushImmutable(): Boolean = false
 
 /** Returns the underlying [android.graphics.RuntimeShader] for interop with native render-effect APIs. */
 fun RuntimeShader.asAndroidRuntimeShader(): android.graphics.RuntimeShader = (this as AndroidRuntimeShader).shader

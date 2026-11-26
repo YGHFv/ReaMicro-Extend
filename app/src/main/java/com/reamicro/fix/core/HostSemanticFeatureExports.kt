@@ -50,6 +50,7 @@ internal object HostSemanticFeatureExports {
         methods("ui.globalFont", "app.zhendong.reamicro.ui.reader.components.ReaderBottomBarKt", "reader.bottomBar" to "ReaderBottomBar")
         methods("settings.entry", "app.zhendong.reamicro.ui.setting.SettingsScreenKt", "root" to "SettingsScreen")
         methods("storage.account", "app.zhendong.reamicro.ui.storage.baidu.BaiduNetDiskAccountScreenKt", "webdav.screen" to "BaiduNetDiskAccountScreen", "webdav.logout" to "LogOut")
+        methods("storage.account", "app.zhendong.reamicro.ui.storage.c115.Y115NetDiskAccountScreenKt", "local.screen" to "Y115NetDiskAccountScreen", "local.logout" to "LogOut")
         methods("reader.epubSource", "com.fleeksoft.ksoup.nodes.TextNode", "text.normalized" to "text")
         methods("reader.epub", "kotlinx.coroutines.flow.StateFlowImpl", "flow.cas" to "compareAndSet", "flow.set" to "setValue")
         methods("reader.lifecycle", "org.epub.UIEpubWindow", "dp" to "dp")

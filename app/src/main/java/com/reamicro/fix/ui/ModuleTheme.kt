@@ -34,12 +34,18 @@ internal fun ModuleAppTheme(config: ModuleThemeConfig, dark: Boolean, content: @
 }
 
 @Composable
-internal fun Modifier.modulePageScroll(scrollBehavior: ScrollBehavior? = null): Modifier {
+internal fun Modifier.modulePageScroll(
+    scrollBehavior: ScrollBehavior? = null,
+    connectNestedScroll: Boolean = true,
+): Modifier {
+    val onOffsetChanged: (Float) -> Unit = remember(scrollBehavior) {
+        { offset -> scrollBehavior?.state?.overscrollOffset = offset }
+    }
     return this
         .scrollEndHaptic()
-        .overScrollVertical()
+        .overScrollVertical(onOffsetChanged = onOffsetChanged)
         .then(
-            if (scrollBehavior != null) Modifier.nestedScroll(scrollBehavior.nestedScrollConnection)
+            if (scrollBehavior != null && connectNestedScroll) Modifier.nestedScroll(scrollBehavior.nestedScrollConnection)
             else Modifier,
         )
 }

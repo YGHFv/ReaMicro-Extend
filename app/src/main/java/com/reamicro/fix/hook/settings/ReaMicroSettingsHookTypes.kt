@@ -149,6 +149,8 @@ internal data class ActionRow(
     val singleLineSubtitle: Boolean = false,
     val onClick: (() -> Unit)? = null,
     val onLongClick: (() -> Unit)? = null,
+    /** A second supporting line under [subtitle]; the row grows to fit it. */
+    val detail: String? = null,
 )
 
 internal data class FontSelectionOption(

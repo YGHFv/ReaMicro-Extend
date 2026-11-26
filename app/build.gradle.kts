@@ -127,10 +127,10 @@ val bundleModule by tasks.registering(Zip::class) {
 android {
     namespace = "com.reamicro.fix"
 
-    // Miuix beta02 uses Compose 1.13, whose Android artifacts require API 37.1.
+    // Follow the pinned Miuix rc01 build platform, including its minor API level.
     compileSdk {
         version = release(37) {
-            minorApiLevel = 1
+            minorApiLevel = 2
         }
     }
 
@@ -149,8 +149,8 @@ android {
         ndk { abiFilters += "arm64-v8a" }
         minSdk = 26
         targetSdk = 37
-        versionCode = 83
-        versionName = "2.3.21"
+        versionCode = 84
+        versionName = "2.3.4"
     }
 
     compileOptions {
@@ -246,9 +246,9 @@ dependencies {
     implementation(project(":scripta-editor"))
     implementation("com.google.re2j:re2j:1.8")
 
-    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation(libs.androidx.activity)
     // The app's event relay uses the same public dispatcher API as the vendored Miuix modules.
-    implementation("androidx.navigationevent:navigationevent-compose:1.2.0")
+    implementation(libs.androidx.navigationevent)
     implementation(project(":miuix-ui"))
     implementation(project(":miuix-preference"))
     implementation(project(":miuix-icons"))
@@ -257,7 +257,7 @@ dependencies {
     implementation(project(":miuix-glass-icons"))
     implementation(project(":miuix-nav"))
 
-    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.2")
+    implementation(libs.hiddenapibypass)
 
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")

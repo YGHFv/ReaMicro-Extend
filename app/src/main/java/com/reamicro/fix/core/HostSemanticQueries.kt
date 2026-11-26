@@ -50,13 +50,22 @@ internal object HostSemanticQueries {
         val relations = HostSemanticCatalog.relations()
         repeat(8) {
             relations.filter { it.id !in types }.forEach { rule ->
-                val owner = types[rule.owner] ?: return@forEach
-                val candidates = bridge.getClassData(owner)?.methods.orEmpty().filter {
+                val owner = types[rule.owner]
+                val pool = if (rule.strings.isNotEmpty()) bridge.findMethod(FindMethod.create()
+                    .matcher(MethodMatcher.create().usingEqStrings(rule.strings)))
+                else owner?.let { bridge.getClassData(it)?.methods }.orEmpty()
+                val candidates = pool.filter {
                     matches(it, rule.signatures, rule.static, rule.strings)
                 }
-                candidates.mapNotNull { if (rule.index < 0) it.returnTypeName else it.paramTypeNames.getOrNull(rule.index) }
+                fun target(methods: List<MethodData>) = methods.mapNotNull {
+                    if (rule.index < 0) it.returnTypeName else it.paramTypeNames.getOrNull(rule.index)
+                }
                     .filter { name -> bridge.getClassData(name)?.methods?.map { it.name }?.containsAll(rule.targetMethods) == true }
-                    .distinct().singleOrNull()?.let { saveType(rule.id, it) }
+                    .distinct().singleOrNull()
+                // R8 also moves methods used to infer parameter/return types between facades.
+                // An external owner is accepted only with a behavioral anchor and unique type.
+                (target(candidates.filter { it.declaredClassName == owner })
+                    ?: target(candidates).takeIf { rule.strings.isNotEmpty() })?.let { saveType(rule.id, it) }
             }
         }
         return output
@@ -67,7 +76,7 @@ internal object HostSemanticQueries {
         val types = base.filterKeys { it.startsWith("class:") }.mapKeys { it.key.removePrefix("class:") }
             .mapValues { it.value.removePrefix("L").removeSuffix(";").replace('/', '.') }.toMutableMap()
         if (group == "runtime") output.putAll(HostCoroutineQueries.query(bridge, base))
-        output.putAll(HostFeatureTypes.queryMembers(bridge, base, group))
+        if (group != "library") output.putAll(HostFeatureTypes.queryMembers(bridge, base, group))
         fun saveType(id: String, name: String) {
             types[id] = name
             output["class:$id"] = "L${name.replace('.', '/')};"
@@ -110,11 +119,13 @@ internal object HostSemanticQueries {
                 descriptor?.let { saveType(owner, it.removePrefix("L").removeSuffix(";").replace('/', '.')) }
             }
         }
+        // 文件门面的所属类型由上面的真实成员确定，再按该角色范围消除回调歧义。
+        if (group == "library") output.putAll(HostFeatureTypes.queryMembers(bridge,
+            base + output.filterKeys { it.startsWith("class:") }, group))
         val sheet = HostStorageQueries.SHEET
         val localRowKey = "method:$sheet#LocalLibrary"
         if (group == "library" && localRowKey !in output) {
-            // RC adds a second composable of this shape. Only the import row renders the
-            // same list item as both cloud rows.
+            // 同形状的入口可能共存；仅导入行使用两个云端入口共同调用的列表项。
             val authorized = output["method:$sheet#CloudAuthorizedRow"]?.let(bridge::getMethodData)
             val unauthorized = output["method:$sheet#CloudUnauthRow"]?.let(bridge::getMethodData)
             if (authorized != null && unauthorized != null) {

@@ -28,6 +28,7 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.glass.glassPress
+import top.yukonga.miuix.kmp.glass.GlassDialogButton
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
@@ -104,18 +105,28 @@ internal fun CapsuleButton(icon: ImageVector, label: String, onClick: () -> Unit
         Text(label, modifier = Modifier.padding(end = 3.dp), fontSize = 15.sp, fontWeight = FontWeight.Medium)
     }
 }
+
 @Composable
 internal fun CapsuleTextButton(label: String, onClick: () -> Unit) {
-    val interactionSource = remember { MutableInteractionSource() }
-    Button(onClick = onClick,
-        modifier = Modifier.glassPress(interactionSource, enabled = useModuleGlass()),
-        interactionSource = interactionSource,
-        minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
-        colors = ButtonDefaults.buttonColors(
-            color = MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f),
-        ),
-        insideMargin = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-    ) {
+    val content: @Composable RowScope.() -> Unit = {
         Text(label, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+    }
+    if (useModuleGlass()) {
+        GlassDialogButton(
+            onClick = onClick,
+            minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
+            insideMargin = PaddingValues(horizontal = 10.dp),
+            content = content,
+        )
+    } else {
+        Button(
+            onClick = onClick,
+            minWidth = 35.dp, minHeight = 35.dp, cornerRadius = 50.dp,
+            colors = ButtonDefaults.buttonColors(
+                color = MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.8f),
+            ),
+            insideMargin = PaddingValues(horizontal = 10.dp),
+            content = content,
+        )
     }
 }

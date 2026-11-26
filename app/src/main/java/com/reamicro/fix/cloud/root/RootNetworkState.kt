@@ -14,6 +14,8 @@ internal data class RootNetworkState(
     val oplusNetworkDisabled: Boolean? = null,
     val oplusNetworkType: Int? = null,
     val xiaomiSleep: Boolean? = null,
+    val oplusDisNetType: Int? = null,
+    val oplusUidDisconnected: Boolean? = null,
 ) {
     val ready: Boolean
         get() = probeError.isEmpty() && !oplusNetworkRestricted && xiaomiSleep != true &&
@@ -72,6 +74,8 @@ internal data class RootNetworkState(
                 oplusDeepSleep = bit("oplusDeepSleep"),
                 oplusNetworkDisabled = bit("oplusNetworkDisabled"),
                 oplusNetworkType = fields["oplusNetworkType"]?.toIntOrNull()?.takeIf { it in 0..2 },
+                oplusDisNetType = fields["oplusDisNetType"]?.toIntOrNull()?.takeIf { it in 0..6 },
+                oplusUidDisconnected = bit("oplusUidDisconnected"),
                 xiaomiSleep = when (fields["xiaomiSleep"]) {
                     "sleep" -> true
                     "unknown", "", null -> null
@@ -84,6 +88,7 @@ internal data class RootNetworkState(
         private val FIELD_NAMES = setOf(
             "deep", "light", "network", "defaultNetwork", "screen", "airplaneMode",
             "oplusDeepSleep", "oplusNetworkDisabled", "oplusNetworkType",
+            "oplusDisNetType", "oplusUidDisconnected",
             "xiaomiSleep",
         )
     }

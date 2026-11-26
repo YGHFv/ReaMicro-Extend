@@ -43,7 +43,7 @@ internal class HostStartupBootstrap(
                     val app = param.thisObject as? Application ?: return
                     if (app.packageName != packageName || application === app) return
                     // This one-shot bootstrap is the only hook installed before the archive
-                    // version is verified. Providers have not been installed at this point.
+                    // package identity is verified. Providers have not been installed at this point.
                     bootstrapHook?.unhook()
                     bootstrapHook = null
                     if (!accept(app)) return

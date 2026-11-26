@@ -466,7 +466,7 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
         ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             cropToPadding = true
-            val palette = discoverDialogPalette(context)
+            val palette = discoverCoverPalette(context)
             background = HostSurfaceDrawable(palette.rowBackground, palette.border,
                 EmbeddedHostUi.dp(context, DISCOVER_COVER_CORNER_DP.toFloat()), 0f)
             foreground = HostSurfaceDrawable(0, palette.border, EmbeddedHostUi.dp(context, DISCOVER_COVER_CORNER_DP.toFloat()), EmbeddedHostUi.dp(context, .4f))
@@ -482,7 +482,7 @@ private fun ReaMicroSettingsHook.renderDiscoverCover(
     val update = functionProxy("DiscoverCoverUpdate", FUNCTION1_CLASS) { args ->
         val view = args?.getOrNull(0) as? ImageView
         if (view != null) {
-            val palette = discoverDialogPalette(view.context)
+            val palette = discoverCoverPalette(view.context)
             view.background = HostSurfaceDrawable(palette.rowBackground, palette.border,
                 EmbeddedHostUi.dp(view.context, DISCOVER_COVER_CORNER_DP.toFloat()), 0f)
             view.foreground = HostSurfaceDrawable(0, palette.border, EmbeddedHostUi.dp(view.context, DISCOVER_COVER_CORNER_DP.toFloat()), EmbeddedHostUi.dp(view.context, .4f))
@@ -722,30 +722,23 @@ private fun decodeDiscoverCoverBytes(bytes: ByteArray): Bitmap? {
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }
 
-internal fun ReaMicroSettingsHook.discoverTagLine(book: DiscoverBook, source: DiscoverSource): String {
-    val cacheKey = discoverCacheKey(book, source)
-    discoverTagLineCache[cacheKey]?.let { return it }
+/** What is known about [book], as the labelled facts of the host's book information card. */
+internal fun ReaMicroSettingsHook.discoverBookFacts(book: DiscoverBook, source: DiscoverSource): List<Pair<String, String>> {
     val info = discoverTagInfo(book, source)
-    val line = buildList {
-        book.status.takeIf { it.isNotBlank() }?.let { add(it) }
-        formatOnlineWordCount(book.wordCount)
-            .takeIf { it.isNotBlank() && !it.startsWith("-") }
-            ?.let { add(it) }
-        val chapters = book.chapterCount.filter { it.isDigit() }
-        if (chapters.isNotBlank()) add("${chapters}章")
-        info.platformName.takeIf { it.isNotBlank() }?.let { add(it) }
-        formatOnlineUpdateTime(book.updateTime).takeIf { it.isNotBlank() }?.let { add(it) }
-        info.kindText.takeIf { it.isNotBlank() }?.let { add(it) }
-    }.joinToString(DISCOVER_TAG_SEPARATOR)
-    discoverTagLineCache.putBounded(cacheKey, line)
-    return line
+    val chapters = book.chapterCount.filter { it.isDigit() }
+    return listOf(
+        "状态" to book.status,
+        "字数" to formatOnlineWordCount(book.wordCount).takeIf { !it.startsWith("-") }.orEmpty(),
+        "章节" to if (chapters.isBlank()) "" else "${chapters}章",
+        "平台" to info.platformName,
+        "更新" to formatOnlineUpdateTime(book.updateTime),
+        "分类" to info.kindText,
+    ).filter { it.second.isNotBlank() }
 }
 
 private class DiscoverTagInfo(val platformName: String, val kindText: String)
 
 private val discoverTagInfoCache = java.util.concurrent.ConcurrentHashMap<String, DiscoverTagInfo>()
-
-private val discoverTagLineCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
 private fun discoverCacheKey(book: DiscoverBook, source: DiscoverSource): String =
     "${source.source.id}|${source.source.revision}|${book.hashCode()}"

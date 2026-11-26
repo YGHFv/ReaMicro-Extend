@@ -197,6 +197,10 @@
     <string name="pawn_loading">Loading items…</string>
     <string name="toast_notification_granted">Notification permission granted</string>
     <string name="permission_notification_denied">Notifications are not allowed; view task results in the app instead</string>
+    <string name="notification_permission_reminder">Open %1$s to enable notifications or the affected notification category</string>
+    <string name="notification_permission_title">Enable notifications</string>
+    <string name="notification_permission_explanation">Allow this app to send notifications for download progress, bookshelf updates and task results. Enable the corresponding notification category as well.</string>
+    <string name="notification_permission_enable">Enable</string>
     <string name="error_open_settings">Could not open system settings. Grant the permission manually in Settings.</string>
     <string name="status_unknown">Unknown</string>
     <string name="error_open_link">No app is available to open this link</string>
