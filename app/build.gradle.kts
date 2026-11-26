@@ -244,7 +244,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation(project(":scripta-editor"))
-    implementation("com.google.re2j:re2j:1.8")
+    implementation("com.google.re2j:re2j:1.9")
 
     implementation("androidx.activity:activity-compose:1.13.0")
     // The app's event relay uses the same public dispatcher API as the vendored Miuix modules.
