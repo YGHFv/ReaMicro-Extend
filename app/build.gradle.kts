@@ -263,7 +263,7 @@ dependencies {
     implementation("io.github.libxposed:service:102.0.0")
 
     // 从当前宿主 DEX 查询语义契约。
-    implementation("org.luckypray:dexkit:2.3.0")
+    implementation("org.luckypray:dexkit:2.3.1")
     // Resolve record properties from StringBuilder register flow, not field order.
     implementation("com.android.tools.smali:smali-dexlib2:3.0.10")
     implementation("com.highcapable.kavaref:kavaref-core:1.1.1")
